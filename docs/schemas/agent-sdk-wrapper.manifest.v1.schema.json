@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-sdk-wrapper.local/schemas/agent-sdk-wrapper.manifest.v1.schema.json",
+  "title": "agent-sdk-wrapper artifact manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_format",
+    "run_id",
+    "provider",
+    "model",
+    "status",
+    "updated_at",
+    "duration_ms",
+    "error",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "trace_format": {
+      "const": "agent-sdk-wrapper.event-envelope-jsonl.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": ["string", "null"]
+    },
+    "status": {
+      "enum": ["running", "success", "failure", "timeout", "cancelled"]
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

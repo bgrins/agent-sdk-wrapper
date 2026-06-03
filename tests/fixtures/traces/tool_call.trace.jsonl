@@ -1,0 +1,6 @@
+{"run_id":"golden-tool-call","sequence":0,"timestamp":"2026-05-31T00:01:00+00:00","event":{"type":"run_started","provider":"anthropic","model":"claude-haiku-4-5"}}
+{"run_id":"golden-tool-call","sequence":1,"timestamp":"2026-05-31T00:01:01+00:00","event":{"type":"agent_updated","name":"reviewer"}}
+{"run_id":"golden-tool-call","sequence":2,"timestamp":"2026-05-31T00:01:02+00:00","event":{"type":"tool_call","id":"tool-1","name":"repo.read_file","input":{"path":"app.py"}}}
+{"run_id":"golden-tool-call","sequence":3,"timestamp":"2026-05-31T00:01:03+00:00","event":{"type":"tool_result","id":"tool-1","output":"contents","is_error":false}}
+{"run_id":"golden-tool-call","sequence":4,"timestamp":"2026-05-31T00:01:04+00:00","event":{"type":"text","text":"Reviewed app.py."}}
+{"run_id":"golden-tool-call","sequence":5,"timestamp":"2026-05-31T00:01:05+00:00","event":{"type":"run_finished","status":"success","duration_ms":456,"ended_reason":"success"}}

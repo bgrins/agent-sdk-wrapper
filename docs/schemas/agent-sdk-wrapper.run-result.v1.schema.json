@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-sdk-wrapper.local/schemas/agent-sdk-wrapper.run-result.v1.schema.json",
+  "title": "agent-sdk-wrapper RunResult artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "provider",
+    "model",
+    "status",
+    "ended_reason",
+    "final_text",
+    "structured_output",
+    "usage",
+    "cost_usd",
+    "duration_ms",
+    "session_id",
+    "artifacts_dir",
+    "error",
+    "events"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": ["string", "null"]
+    },
+    "status": {
+      "enum": ["success", "failure", "timeout", "cancelled"]
+    },
+    "ended_reason": {
+      "enum": ["unknown", "success", "max_turns", "timeout", "refused", "error", "cancelled"]
+    },
+    "final_text": {
+      "type": "string"
+    },
+    "structured_output": true,
+    "usage": {
+      "oneOf": [
+        { "$ref": "agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json#/$defs/token_usage" },
+        { "type": "null" }
+      ]
+    },
+    "cost_usd": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "session_id": {
+      "type": ["string", "null"]
+    },
+    "artifacts_dir": {
+      "type": ["string", "null"]
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json"
+      }
+    }
+  }
+}

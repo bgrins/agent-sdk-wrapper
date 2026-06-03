@@ -1,0 +1,4 @@
+{"run_id":"golden-structured-output","sequence":0,"timestamp":"2026-05-31T00:04:00+00:00","event":{"type":"run_started","provider":"openai","model":"gpt-5"}}
+{"run_id":"golden-structured-output","sequence":1,"timestamp":"2026-05-31T00:04:01+00:00","event":{"type":"text","text":"{\"ok\":true}"}}
+{"run_id":"golden-structured-output","sequence":2,"timestamp":"2026-05-31T00:04:02+00:00","event":{"type":"structured_output","value":{"ok":true}}}
+{"run_id":"golden-structured-output","sequence":3,"timestamp":"2026-05-31T00:04:03+00:00","event":{"type":"run_finished","status":"success","duration_ms":234,"ended_reason":"success"}}

@@ -1,0 +1,99 @@
+name: agent-sdk-wrapper
+
+x-agent-sdk-wrapper-dev: &agent-sdk-wrapper-dev
+  build:
+    context: .
+    target: dev
+  image: agent-sdk-wrapper-dev
+  working_dir: /workspace
+  volumes:
+    - .:/workspace
+    - uv-cache:/root/.cache/uv
+  environment:
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    PROVIDER: ${PROVIDER:-}
+    MODEL: ${MODEL:-}
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+    UV_LINK_MODE: copy
+    UV_PROJECT_ENVIRONMENT: /opt/venv
+
+services:
+  dev:
+    <<: *agent-sdk-wrapper-dev
+    command: bash
+    stdin_open: true
+    tty: true
+
+  test:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync pytest
+
+  lint:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync ruff check
+
+  verify:
+    <<: *agent-sdk-wrapper-dev
+    command: sh -lc 'uv run --no-sync ruff check && uv run --no-sync pytest'
+
+  integration:
+    <<: *agent-sdk-wrapper-dev
+    command: sh -lc 'AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 uv run --no-sync pytest -m integration -s'
+
+  fixtures:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python scripts/regenerate_fixtures.py --check
+
+  fixtures-live:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python scripts/regenerate_fixtures.py --live
+
+  fixtures-live-promote:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python scripts/regenerate_fixtures.py --live --promote-live
+
+  examples-offline:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync pytest tests/test_examples_offline.py
+
+  examples:
+    <<: *agent-sdk-wrapper-dev
+    command: >
+      sh -lc 'set -e;
+      for example in run_basic stream structured_output custom_tools subagent auditor_style; do
+      echo "== examples/$${example}.py ==";
+      uv run --no-sync python "examples/$${example}.py";
+      done'
+
+  example-run-basic:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python examples/run_basic.py
+
+  example-run-basic-codex:
+    <<: *agent-sdk-wrapper-dev
+    command: sh -lc 'PROVIDER=codex MODEL= uv run --no-sync python examples/run_basic.py'
+
+  example-stream:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python examples/stream.py
+
+  example-structured-output:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python examples/structured_output.py
+
+  example-custom-tools:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python examples/custom_tools.py
+
+  example-subagent:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python examples/subagent.py
+
+  example-auditor-style:
+    <<: *agent-sdk-wrapper-dev
+    command: uv run --no-sync python examples/auditor_style.py
+
+volumes:
+  uv-cache:

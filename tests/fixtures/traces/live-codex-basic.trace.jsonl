@@ -1,0 +1,5 @@
+{"run_id":"live-codex-basic","sequence":0,"timestamp":"2026-05-31T00:11:00+00:00","event":{"type":"run_started","provider":"openai"}}
+{"run_id":"live-codex-basic","sequence":1,"timestamp":"2026-05-31T00:11:01+00:00","event":{"type":"session_info","id":"live-codex-basic-session"}}
+{"run_id":"live-codex-basic","sequence":2,"timestamp":"2026-05-31T00:11:02+00:00","event":{"type":"text","text":"LIVE_FIXTURE_PONG"}}
+{"run_id":"live-codex-basic","sequence":3,"timestamp":"2026-05-31T00:11:03+00:00","event":{"type":"usage","usage":{"input_tokens":14588,"output_tokens":9,"total_tokens":14597,"cache_read_tokens":0,"cache_write_tokens":0,"reasoning_output_tokens":0,"requests":0}}}
+{"run_id":"live-codex-basic","sequence":4,"timestamp":"2026-05-31T00:11:04+00:00","event":{"type":"run_finished","status":"success","duration_ms":1011,"ended_reason":"success"}}
