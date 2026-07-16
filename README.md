@@ -116,6 +116,28 @@ agent = Agent(
 Examples write timestamped artifacts under the gitignored
 `results/<provider>/<example>/<timestamp>/`.
 
+## Remote Control (experimental spike)
+
+`agent-sdk-wrapper serve` exposes long-lived agent sessions behind an HTTP+SSE
+protocol with a built-in web UI, reusing each SDK's native session primitives
+(Claude streaming input / Codex app-server). Supports start, steer, interrupt,
+permission prompts proxied to the browser, and resume by native session id.
+
+```bash
+uv sync --extra remote
+uv run agent-sdk-wrapper serve            # web UI on http://127.0.0.1:8765
+uv run agent-sdk-wrapper serve --state-dir .agent-state   # relocatable session state
+uv run python scripts/remote_control_smoke.py --provider anthropic --model claude-haiku-4-5
+uv run python scripts/remote_control_smoke.py --provider openai --model gpt-5 --permission-mode untrusted
+```
+
+`--state-dir` points spawned runtimes at `<dir>/claude` (`CLAUDE_CONFIG_DIR`)
+and `<dir>/codex` (`CODEX_HOME`), making transcripts, Codex rollouts, and auth
+one syncable directory for resume across machine restarts.
+
+See `docs/remote-control.md` for the endpoint mapping, provider capability
+matrix, and known gaps. The server binds localhost and has no authentication.
+
 ## CLI
 
 ```bash

@@ -19,3 +19,7 @@ wheels/
 
 # Local example / run artifacts
 results/
+
+# Remote-control provider state (serve --state-dir); contains auth material
+.agent-state/
+.playwright-cli/

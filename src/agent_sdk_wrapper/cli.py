@@ -158,6 +158,19 @@ def _parser() -> argparse.ArgumentParser:
         choices=["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"],
     )
     run.add_argument("--verbose", "-v", action="count", default=0)
+
+    serve = sub.add_parser(
+        "serve",
+        help="Start the remote-control HTTP+SSE server (requires the 'remote' extra).",
+    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument(
+        "--state-dir",
+        default=None,
+        help="Directory for provider session state (CLAUDE_CONFIG_DIR / CODEX_HOME).",
+    )
+    serve.add_argument("--verbose", "-v", action="count", default=0)
     return p
 
 
@@ -661,13 +674,23 @@ def _set_nested_option(target: dict[str, Any], key: str, value: Any, *, flag: st
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    _setup_logging(args.verbose)
+    _setup_logging(getattr(args, "verbose", 0))
     if args.command == "run":
         try:
             return asyncio.run(_run(args))
         except ConfigError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 2
+        except KeyboardInterrupt:
+            return 130
+    if args.command == "serve":
+        from .remote.server import main as serve_main
+
+        serve_args = ["--host", args.host, "--port", str(args.port)]
+        if args.state_dir:
+            serve_args.extend(["--state-dir", args.state_dir])
+        try:
+            return serve_main(serve_args)
         except KeyboardInterrupt:
             return 130
     return 1

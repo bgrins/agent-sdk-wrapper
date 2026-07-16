@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 
 dependencies = [
-    "claude-agent-sdk==0.2.87",
+    "claude-agent-sdk==0.2.119",
     "openai-codex==0.1.0b3",
     "pydantic>=2.12,<3",
 ]
@@ -22,7 +22,11 @@ Issues = "https://github.com/bgrins/agent-sdk-wrapper/issues"
 agent-sdk-wrapper = "agent_sdk_wrapper.cli:main"
 
 [project.optional-dependencies]
+remote = [
+    "aiohttp>=3.11",
+]
 dev = [
+    "aiohttp>=3.11",
     "jsonschema>=4",
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -32,8 +36,9 @@ dev = [
 [tool.uv]
 prerelease = "if-necessary-or-explicit"
 override-dependencies = [
-    # openai-codex 0.1.0b3 pins a pre-release (0.137.0a4); uv requires an explicit override to resolve it.
-    "openai-codex-cli-bin==0.137.0a4",
+    # openai-codex 0.1.0b3 pins openai-codex-cli-bin==0.137.0a4; override to the
+    # latest stable CLI binary (verified against offline + live tests).
+    "openai-codex-cli-bin==0.144.4",
 ]
 
 [build-system]
