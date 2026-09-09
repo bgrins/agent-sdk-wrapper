@@ -26,6 +26,7 @@ from ..artifacts import ProviderEventLogger, sdk_dir_for
 from ..errors import AgentSdkWrapperError, ConfigError, ProviderNotAvailableError, TransientError
 from ..events import (
     AgentEvent,
+    ContextCompacted,
     Error,
     SessionInfo,
     StructuredOutput,
@@ -108,6 +109,7 @@ class OpenAIProvider(ProviderAdapter):
         self._debug = debug
         self._thread_options = dict(thread_options or {})
         self._turn_options = dict(turn_options or {})
+        self._usage_baseline = _UsageBaseline()
 
     def ensure_available(self) -> None:
         try:
@@ -167,7 +169,9 @@ class OpenAIProvider(ProviderAdapter):
                         yield WarningEvent(message=warning)
 
                     turn = await thread.turn(req.prompt, **turn_kwargs)
-                    async for event in _stream_turn(turn, req):
+                    async for event in _stream_turn(
+                        turn, req, thread.id, self._usage_baseline
+                    ):
                         yield event
         except (ProviderNotAvailableError, ConfigError, AgentSdkWrapperError):
             raise
@@ -238,7 +242,19 @@ class OpenAIProvider(ProviderAdapter):
         return _drop_none(thread_options), _drop_none(turn_options)
 
 
-async def _stream_turn(turn: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
+async def _stream_turn(
+    turn: Any,
+    req: RunRequest,
+    thread_id: str | None = None,
+    baseline: _UsageBaseline | None = None,
+) -> AsyncIterator[AgentEvent]:
+    """Drain one Codex turn's event stream into normalized events.
+
+    ``baseline`` carries the usage this adapter already reported for
+    ``thread_id``; omitting it accounts the turn as a fresh thread.
+    """
+
+    baseline = _UsageBaseline() if baseline is None else baseline
     provider_log = ProviderEventLogger(
         "openai", req.artifacts_dir, req.on_provider_event
     )
@@ -247,6 +263,9 @@ async def _stream_turn(turn: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
     text_parts: list[str] = []
     completed_texts: list[str] = []
     last_usage: Any = None
+    # Codex sends one token-usage update per model request, so counting them
+    # gives the request count the payload itself never carries.
+    usage_updates = 0
     completed_action_items = 0
     max_turns_interrupted = False
 
@@ -288,13 +307,22 @@ async def _stream_turn(turn: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
                 item_id = _codex_item_id(root)
                 buffered_text = _pop_delta_buffer(thinking_delta_parts, item_id)
                 text = _reasoning_text(root) or buffered_text
-                if text:
-                    yield Thinking(text=text, raw=_raw(event) if req.include_raw else None)
+                # A short reasoning item can complete with an empty summary even
+                # though reasoning tokens were billed. Dropping it would leave no
+                # trace that the model reasoned at all, so emit the event anyway
+                # (parallel to an Anthropic redacted thinking block).
+                yield Thinking(text=text, raw=_raw(event) if req.include_raw else None)
                 continue
             if root_type == "plan":
                 text = getattr(root, "text", "") or ""
                 if text:
                     yield Thinking(text=text, raw=_raw(event) if req.include_raw else None)
+                continue
+            if root_type == "contextCompaction":
+                yield ContextCompacted(
+                    trigger="codex",
+                    raw=_raw(event) if req.include_raw else None,
+                )
                 continue
             tool_events = _tool_events(root, event, req.include_raw)
             for tool_event in tool_events:
@@ -323,6 +351,19 @@ async def _stream_turn(turn: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
             last_usage = getattr(payload, "token_usage", None) or getattr(
                 payload, "tokenUsage", None
             )
+            usage_updates += 1
+            continue
+
+        if method == "error":
+            error = getattr(payload, "error", None)
+            text = _error_message(error) or "Codex reported an error"
+            # The SDK retries some failures itself. Surfacing a retried one as
+            # an Error would fail a run that goes on to succeed, so report it
+            # as a warning and let the terminal turn state decide the outcome.
+            if getattr(payload, "will_retry", False):
+                yield WarningEvent(message=text)
+            else:
+                yield Error(message=text, error_type="codex", retryable=True)
             continue
 
         if method == "turn/completed":
@@ -333,7 +374,7 @@ async def _stream_turn(turn: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
             for text in _drain_delta_buffers(thinking_delta_parts):
                 yield Thinking(text=text)
             if last_usage is not None:
-                yield _usage_event(last_usage, req.include_raw)
+                yield _usage_event(last_usage, req.include_raw, usage_updates, thread_id, baseline)
             turn_info = getattr(payload, "turn", None)
             if _turn_failed(turn_info):
                 raise AgentSdkWrapperError(_turn_error_message(turn_info))
@@ -395,6 +436,41 @@ _CODEX_ACTION_ITEM_TYPES = {
     "mcpToolCall",
     "webSearch",
 }
+
+
+@dataclasses.dataclass
+class _UsageBaseline:
+    """Cumulative Codex usage this adapter has already reported for a thread.
+
+    Codex reports thread-cumulative token totals, so a resumed thread's first
+    snapshot already covers every earlier turn. Subtracting the baseline keeps
+    each run's ``Usage`` event scoped to that run. Resuming a thread the
+    adapter never ran (an externally supplied ``session_id``) starts from an
+    empty baseline, so that first run still counts the thread's prior history.
+    """
+
+    thread_id: str | None = None
+    total: TokenUsage = dataclasses.field(default_factory=TokenUsage)
+
+    def delta(self, thread_id: str | None, total: TokenUsage) -> TokenUsage:
+        """Return the usage added since the last snapshot and adopt the new one."""
+
+        if thread_id != self.thread_id:
+            self.thread_id = thread_id
+            self.total = TokenUsage()
+        previous = self.total
+        self.total = total
+        return TokenUsage(
+            input_tokens=max(0, total.input_tokens - previous.input_tokens),
+            output_tokens=max(0, total.output_tokens - previous.output_tokens),
+            total_tokens=max(0, total.total_tokens - previous.total_tokens),
+            cache_read_tokens=max(0, total.cache_read_tokens - previous.cache_read_tokens),
+            cache_write_tokens=max(0, total.cache_write_tokens - previous.cache_write_tokens),
+            reasoning_output_tokens=max(
+                0, total.reasoning_output_tokens - previous.reasoning_output_tokens
+            ),
+            requests=total.requests,
+        )
 
 
 def _counts_toward_max_turns(root_type: str) -> bool:
@@ -696,9 +772,13 @@ def _tool_server_script() -> str:
         import json
         from pathlib import Path
 
-        from mcp.server.fastmcp import FastMCP
+        try:
+            # mcp >= 2 renamed FastMCP to MCPServer; add_tool/run are unchanged.
+            from mcp.server.mcpserver import MCPServer as _Server
+        except ImportError:  # mcp < 2
+            from mcp.server.fastmcp import FastMCP as _Server
 
-        server = FastMCP("agent_sdk_wrapper_tools")
+        server = _Server("agent_sdk_wrapper_tools")
 
 
         def _resolve(entry):
@@ -1096,6 +1176,22 @@ def _enum_value(enum_type: Any, value: Any) -> Any:
 
 
 def _tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:
+    """Map one completed Codex action item onto a tool call and its result.
+
+    Codex names an action item only on the call side, so the tool name is
+    copied onto the matching result; callers then read a result without having
+    to correlate item ids themselves.
+    """
+
+    events = _build_tool_events(root, event, include_raw)
+    names = {e.id: e.name for e in events if isinstance(e, ToolCall) and e.id}
+    for tool_event in events:
+        if isinstance(tool_event, ToolResult) and tool_event.name is None:
+            tool_event.name = names.get(tool_event.id)
+    return events
+
+
+def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:
     root_type = getattr(root, "type", "")
     if not root_type:
         return []
@@ -1324,7 +1420,24 @@ def _stringify_output(value: Any) -> str | None:
     return json.dumps(plain)
 
 
-def _usage_event(usage: Any, include_raw: bool) -> Usage:
+def _usage_event(
+    usage: Any,
+    include_raw: bool,
+    requests: int,
+    thread_id: str | None,
+    baseline: _UsageBaseline,
+) -> Usage:
+    """Normalize a Codex token-usage snapshot into a per-run ``Usage`` event.
+
+    Codex reports ``output_tokens`` net of reasoning even though reasoning
+    bills as output, so reasoning is folded in to match the convention the
+    wrapper publishes (and what the Anthropic adapter already emits); the
+    reasoning share stays available on its own field. Codex bills no cache
+    writes, so that counter stays zero. The snapshot is thread-cumulative, so
+    the reported counts are the delta against what this thread already
+    accounted.
+    """
+
     data = _to_plain(usage)
     total = data.get("total", data) if isinstance(data, dict) else {}
     inp = _int_field(total, "input_tokens", "inputTokens", "input", "prompt_tokens", "promptTokens")
@@ -1336,7 +1449,6 @@ def _usage_event(usage: Any, include_raw: bool) -> Usage:
         "completion_tokens",
         "completionTokens",
     )
-    total_tokens = _int_field(total, "total_tokens", "totalTokens", "total")
     cached = _int_field(
         total,
         "cached_input_tokens",
@@ -1345,15 +1457,17 @@ def _usage_event(usage: Any, include_raw: bool) -> Usage:
         "cacheReadInputTokens",
     )
     reasoning = _int_field(total, "reasoning_output_tokens", "reasoningOutputTokens")
+    out += reasoning
+    cumulative = TokenUsage(
+        requests=requests,
+        input_tokens=inp,
+        output_tokens=out,
+        total_tokens=inp + out,
+        cache_read_tokens=cached,
+        reasoning_output_tokens=reasoning,
+    )
     return Usage(
-        usage=TokenUsage(
-            requests=_int_field(data, "requests", "requestCount"),
-            input_tokens=inp,
-            output_tokens=out,
-            total_tokens=total_tokens or inp + out,
-            cache_read_tokens=cached,
-            reasoning_output_tokens=reasoning,
-        ),
+        usage=baseline.delta(thread_id, cumulative),
         cost_usd=None,
         raw=data if include_raw and isinstance(data, dict) else None,
     )

@@ -8,8 +8,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 
 dependencies = [
-    "claude-agent-sdk==0.2.87",
-    "openai-codex==0.1.0b3",
+    "claude-agent-sdk==0.2.152",
+    "openai-codex==0.147.0",
     "pydantic>=2.12,<3",
 ]
 
@@ -27,13 +27,6 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
-]
-
-[tool.uv]
-prerelease = "if-necessary-or-explicit"
-override-dependencies = [
-    # openai-codex 0.1.0b3 pins a pre-release (0.137.0a4); uv requires an explicit override to resolve it.
-    "openai-codex-cli-bin==0.137.0a4",
 ]
 
 [build-system]

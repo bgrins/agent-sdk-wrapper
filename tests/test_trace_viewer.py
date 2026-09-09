@@ -92,6 +92,7 @@ def test_trace_viewer_has_conversation_first_information_architecture() -> None:
         'data-view="timeline-view"',
         'data-view="events-view"',
         'data-view="files-view"',
+        'data-view="raw-view"',
     )
     for marker in tab_markers:
         assert marker in html
@@ -103,3 +104,34 @@ def test_trace_viewer_has_conversation_first_information_architecture() -> None:
     assert 'id="events"' in html
     assert ".tool-panel" in html
     assert ".msg-role" in html
+
+
+def test_trace_viewer_workspace_scrolls_instead_of_clipping() -> None:
+    """The workspace pane must stretch into a bounded row and scroll itself.
+
+    Left content-sized, it grows past main's overflow:hidden and every event
+    below the fold becomes unreachable.
+    """
+
+    html = viewer_html()
+
+    for marker in (
+        "grid-template-rows: minmax(0, 1fr)",
+        "align-items: stretch",
+        "resetWorkspaceScroll",
+    ):
+        assert marker in html
+
+
+def test_trace_viewer_renders_the_request_that_produced_the_trace() -> None:
+    html = viewer_html()
+
+    for marker in ("system_prompt", "system-prompt", 'role: "user"', "run_started"):
+        assert marker in html
+
+
+def test_trace_viewer_raw_tab_shows_the_verbatim_trace() -> None:
+    html = viewer_html()
+
+    for marker in ('id="raw"', 'id="rawMeta"', 'id="copyRaw"', "renderRaw", "findTraceByExtension"):
+        assert marker in html

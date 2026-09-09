@@ -36,8 +36,9 @@ def test_trace_fixture_replays_to_expected_result(monkeypatch, trace_path: Path)
             provider=replay.provider,
             model=replay.model,
             cwd=replay.cwd,
+            system_prompt=replay.system_prompt,
             max_retries=0,
-        ).run("replay fixture")
+        ).run(replay.prompt)
     )
 
     assert run_result_summary(result) == replay.expected

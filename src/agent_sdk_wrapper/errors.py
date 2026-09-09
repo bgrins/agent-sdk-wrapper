@@ -32,6 +32,24 @@ class TransientError(AgentSdkWrapperError):
     transient = True
 
 
+class ProcessTerminatedError(AgentSdkWrapperError):
+    """The provider runtime was killed by a signal (e.g. SIGTERM, SIGKILL).
+
+    Deliberately not a :class:`TransientError`: an external kill aborts the
+    whole process tree, so retrying the run in-place only burns the shutdown
+    window. Callers running a batch should treat it as a stop signal for the
+    batch, not a per-item failure.
+    """
+
+    def __init__(
+        self, signal: int, *, message: str | None = None, cause: BaseException | None = None
+    ) -> None:
+        super().__init__(
+            message or f"provider runtime killed by signal {signal}", cause=cause
+        )
+        self.signal = signal
+
+
 class RunFailedError(AgentSdkWrapperError):
     """The agent run completed in a non-success state and raise_on_error was set."""
 

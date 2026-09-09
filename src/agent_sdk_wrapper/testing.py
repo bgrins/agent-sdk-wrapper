@@ -11,6 +11,7 @@ from typing import Any
 from .events import (
     AgentEvent,
     AgentUpdated,
+    ContextCompacted,
     Error,
     EventEnvelope,
     RunEndedReason,
@@ -20,6 +21,8 @@ from .events import (
     RunStatus,
     SessionInfo,
     StructuredOutput,
+    SubagentEnded,
+    SubagentStarted,
     Text,
     Thinking,
     TokenUsage,
@@ -43,6 +46,8 @@ class TraceReplay:
     provider: Provider
     model: str | None
     cwd: str | None
+    prompt: str
+    system_prompt: str | None
     events: list[AgentEvent]
     expected: dict[str, Any]
 
@@ -137,6 +142,10 @@ def event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         return ToolResult(**data)
     if event_type == "agent_updated":
         return AgentUpdated(**data)
+    if event_type == "subagent_started":
+        return SubagentStarted(**data)
+    if event_type == "subagent_ended":
+        return SubagentEnded(**data)
     if event_type == "usage":
         usage_payload = data.pop("usage", None) or {}
         return Usage(usage=TokenUsage(**usage_payload), **data)
@@ -144,6 +153,8 @@ def event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         return SessionInfo(**data)
     if event_type == "structured_output":
         return StructuredOutput(**data)
+    if event_type == "context_compacted":
+        return ContextCompacted(**data)
     if event_type == "warning":
         return WarningEvent(**data)
     if event_type == "error":
@@ -210,6 +221,10 @@ def load_trace_replay(path: str | Path) -> TraceReplay:
         provider=provider,
         model=started.model,
         cwd=started.cwd,
+        # The fixture records what the run was asked; replaying with the same
+        # prompt keeps the re-emitted run_started identical to the committed one.
+        prompt=started.prompt or "",
+        system_prompt=started.system_prompt,
         events=events,
         expected=trace_summary(envelopes),
     )

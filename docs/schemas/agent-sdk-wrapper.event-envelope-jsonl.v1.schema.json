@@ -27,9 +27,12 @@
         { "$ref": "#/$defs/tool_call" },
         { "$ref": "#/$defs/tool_result" },
         { "$ref": "#/$defs/agent_updated" },
+        { "$ref": "#/$defs/subagent_started" },
+        { "$ref": "#/$defs/subagent_ended" },
         { "$ref": "#/$defs/usage" },
         { "$ref": "#/$defs/session_info" },
         { "$ref": "#/$defs/structured_output" },
+        { "$ref": "#/$defs/context_compacted" },
         { "$ref": "#/$defs/warning" },
         { "$ref": "#/$defs/error" },
         { "$ref": "#/$defs/run_finished" }
@@ -71,7 +74,9 @@
         "type": { "const": "run_started" },
         "provider": { "type": "string" },
         "model": { "type": "string" },
-        "cwd": { "type": "string" }
+        "cwd": { "type": "string" },
+        "prompt": { "type": "string" },
+        "system_prompt": { "type": "string" }
       }
     },
     "text": {
@@ -91,6 +96,7 @@
       "properties": {
         "type": { "const": "thinking" },
         "text": { "type": "string" },
+        "redacted_bytes": { "type": "integer", "minimum": 0 },
         "raw": { "$ref": "#/$defs/json_object" }
       }
     },
@@ -113,6 +119,7 @@
       "properties": {
         "type": { "const": "tool_result" },
         "id": { "type": "string" },
+        "name": { "type": "string" },
         "output": { "type": "string" },
         "is_error": { "type": "boolean" },
         "raw": { "$ref": "#/$defs/json_object" }
@@ -125,6 +132,28 @@
       "properties": {
         "type": { "const": "agent_updated" },
         "name": { "type": "string" }
+      }
+    },
+    "subagent_started": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "task_id", "name", "description"],
+      "properties": {
+        "type": { "const": "subagent_started" },
+        "task_id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "subagent_ended": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "task_id", "status"],
+      "properties": {
+        "type": { "const": "subagent_ended" },
+        "task_id": { "type": "string" },
+        "status": { "type": "string" },
+        "summary": { "type": "string" }
       }
     },
     "usage": {
@@ -156,6 +185,17 @@
         "value": true
       }
     },
+    "context_compacted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trigger"],
+      "properties": {
+        "type": { "const": "context_compacted" },
+        "trigger": { "type": "string" },
+        "pre_tokens": { "type": "integer", "minimum": 0 },
+        "raw": { "$ref": "#/$defs/json_object" }
+      }
+    },
     "warning": {
       "type": "object",
       "additionalProperties": false,
@@ -169,11 +209,12 @@
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "message"],
+      "required": ["type", "message", "retryable"],
       "properties": {
         "type": { "const": "error" },
         "message": { "type": "string" },
         "error_type": { "type": "string" },
+        "retryable": { "type": "boolean" },
         "raw": { "$ref": "#/$defs/json_object" }
       }
     },

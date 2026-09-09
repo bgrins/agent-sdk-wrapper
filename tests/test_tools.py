@@ -63,3 +63,55 @@ def test_json_schema_optional_unwrap():
 
     schema = json_schema_for(fn)
     assert schema["properties"]["x"] == {"type": "integer"}
+
+
+def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
+    """The generated stdio server must actually start under the installed mcp.
+
+    It runs in a subprocess, so an import that no longer resolves (mcp 2.x
+    renamed FastMCP to MCPServer) surfaces only as a handshake failure inside a
+    live Codex run. Driving the real protocol here catches it offline.
+    """
+    import json
+    import subprocess
+    import sys
+
+    from agent_sdk_wrapper.providers.openai_provider import _tool_entry, _tool_server_script
+
+    def add(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    script = tmp_path / "server.py"
+    script.write_text(_tool_server_script(), encoding="utf-8")
+    (tmp_path / "tools.json").write_text(
+        json.dumps([_tool_entry(add)], ensure_ascii=False), encoding="utf-8"
+    )
+
+    requests = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        input="\n".join(json.dumps(r) for r in requests) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=tmp_path,
+    )
+
+    responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    assert responses, f"server produced no output; stderr:\n{proc.stderr}"
+    listed = next(r for r in responses if r.get("id") == 2)
+    assert [tool["name"] for tool in listed["result"]["tools"]] == ["add"]

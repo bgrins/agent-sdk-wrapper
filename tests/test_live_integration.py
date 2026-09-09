@@ -141,7 +141,9 @@ def _model_for(provider: str) -> str | None:
         os.environ.get("AGENT_SDK_WRAPPER_OPENAI_MODEL")
         or os.environ.get("OPENAI_MODEL")
         or (os.environ.get("MODEL") if selected_provider == "openai" else None)
-        or None
+        # Pin the cheapest model that exercises the full Codex surface rather
+        # than letting the runtime pick, so live-test cost stays predictable.
+        or "gpt-5.6-luna"
     )
 
 

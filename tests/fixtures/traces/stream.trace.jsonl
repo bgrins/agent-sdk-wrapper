@@ -1,4 +1,4 @@
-{"run_id":"golden-stream","sequence":0,"timestamp":"2026-05-31T00:05:00+00:00","event":{"type":"run_started","provider":"openai","model":"gpt-5-mini"}}
+{"run_id":"golden-stream","sequence":0,"timestamp":"2026-05-31T00:05:00+00:00","event":{"type":"run_started","provider":"openai","model":"gpt-5-mini","prompt":"offline stream fixture"}}
 {"run_id":"golden-stream","sequence":1,"timestamp":"2026-05-31T00:05:01+00:00","event":{"type":"session_info","id":"stream-session"}}
 {"run_id":"golden-stream","sequence":2,"timestamp":"2026-05-31T00:05:02+00:00","event":{"type":"thinking","text":"stream plan"}}
 {"run_id":"golden-stream","sequence":3,"timestamp":"2026-05-31T00:05:03+00:00","event":{"type":"text","text":"Streamed."}}

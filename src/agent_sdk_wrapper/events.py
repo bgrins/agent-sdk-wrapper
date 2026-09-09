@@ -61,6 +61,28 @@ def _jsonable(value: Any) -> Any:
 
 @dataclass
 class TokenUsage:
+    """Normalized token counts for one or more model requests.
+
+    Providers disagree about what their raw counters include, so adapters
+    normalize onto one convention before emitting:
+
+    ``input_tokens``
+        Every prompt token the request billed, cached ones included. Anthropic
+        reports uncached input only, so its adapter folds the cache counters
+        back in; Codex already reports the full prompt count.
+    ``output_tokens``
+        Every generated token, reasoning included. Codex reports reasoning
+        apart from output, so its adapter folds it in.
+    ``cache_read_tokens`` / ``cache_write_tokens``
+        The cached portion of ``input_tokens``, broken out. Codex does not bill
+        cache writes, so its ``cache_write_tokens`` stays zero.
+    ``reasoning_output_tokens``
+        The reasoning portion of ``output_tokens``, broken out where the
+        provider reports it.
+    ``requests``
+        Model requests the counts cover.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -100,10 +122,18 @@ class _EventBase:
 
 @dataclass
 class RunStarted(_EventBase):
+    """The opening event of every run, carrying what the run was asked to do.
+
+    ``prompt`` and ``system_prompt`` are recorded so a trace is readable on its
+    own. Without them a trace holds every answer and none of the questions.
+    """
+
     type: ClassVar[str] = "run_started"
     provider: str = ""
     model: str | None = None
     cwd: str | None = None
+    prompt: str | None = None
+    system_prompt: str | None = None
 
 
 @dataclass
@@ -126,6 +156,10 @@ class Thinking(_EventBase):
 
     type: ClassVar[str] = "thinking"
     text: str = ""
+    # Bytes of encrypted reasoning the provider round-trips but never exposes.
+    # Set when a thinking item carries no readable text, so callers can tell a
+    # redacted item from an empty one.
+    redacted_bytes: int | None = None
     raw: dict[str, Any] | None = None
 
 
@@ -142,6 +176,9 @@ class ToolCall(_EventBase):
 class ToolResult(_EventBase):
     type: ClassVar[str] = "tool_result"
     id: str | None = None
+    # The tool this result belongs to, when the provider reports it, so callers
+    # need not track call ids themselves.
+    name: str | None = None
     output: str | None = None
     is_error: bool = False
     raw: dict[str, Any] | None = None
@@ -153,6 +190,26 @@ class AgentUpdated(_EventBase):
 
     type: ClassVar[str] = "agent_updated"
     name: str = ""
+
+
+@dataclass
+class SubagentStarted(_EventBase):
+    """A delegated subagent task began."""
+
+    type: ClassVar[str] = "subagent_started"
+    task_id: str = ""
+    name: str = ""
+    description: str = ""
+
+
+@dataclass
+class SubagentEnded(_EventBase):
+    """A delegated subagent task reached a terminal status."""
+
+    type: ClassVar[str] = "subagent_ended"
+    task_id: str = ""
+    status: str = ""
+    summary: str | None = None
 
 
 @dataclass
@@ -187,10 +244,24 @@ class WarningEvent(_EventBase):
 
 
 @dataclass
+class ContextCompacted(_EventBase):
+    """The provider compacted the conversation to fit its context window."""
+
+    type: ClassVar[str] = "context_compacted"
+    trigger: str = "unknown"
+    pre_tokens: int | None = None
+    raw: dict[str, Any] | None = None
+
+
+@dataclass
 class Error(_EventBase):
     type: ClassVar[str] = "error"
     message: str = ""
     error_type: str | None = None
+    # Whether re-running the request stands a chance of succeeding. Set for
+    # provider-reported errors that never raise, so callers that decide their
+    # own retry policy do not have to re-classify the message text.
+    retryable: bool = False
     raw: dict[str, Any] | None = None
 
 
@@ -209,9 +280,12 @@ AgentEvent = (
     | ToolCall
     | ToolResult
     | AgentUpdated
+    | SubagentStarted
+    | SubagentEnded
     | Usage
     | SessionInfo
     | StructuredOutput
+    | ContextCompacted
     | WarningEvent
     | Error
     | RunFinished

@@ -51,6 +51,8 @@ Agent(model="codex:gpt-5")       # provider:model syntax
 |---|---|---|
 | `run()` / `stream()` | Yes | Yes |
 | Text, thinking, tools, usage | Normalized events | Normalized events |
+| Subagent lifecycle | `Task*` messages | Collab-agent action items |
+| Context compaction | `compact_boundary` | `contextCompaction` item |
 | Python callable tools | In-process MCP server | Temporary stdio MCP server |
 | External MCP servers | stdio/http | stdio/http via Codex config |
 | Subagents | Claude `AgentDefinition` | Codex multi-agent config |
@@ -74,6 +76,29 @@ Important configuration notes:
   `inspect.getsource()`.
 - `Agent.check_runtime()` validates the request before checking provider
   availability.
+
+### Token Accounting
+
+`TokenUsage` publishes one convention across providers, so the same field
+means the same thing whichever backend ran:
+
+- `input_tokens` counts every prompt token the request billed, cached ones
+  included. Anthropic reports input net of cache, so the adapter folds the
+  cache counters back in.
+- `output_tokens` counts every generated token, reasoning included. Codex
+  reports reasoning apart from output, so the adapter folds it in.
+- `cache_read_tokens`, `cache_write_tokens`, and `reasoning_output_tokens`
+  break out the shares of those two totals. Codex bills no cache writes, so its
+  `cache_write_tokens` stays zero.
+
+Codex reports thread-cumulative totals, so a resumed thread's snapshot already
+covers earlier turns. The adapter subtracts what it already reported and emits
+only the delta. Resuming a thread the adapter never ran — an externally
+supplied `session_id` — starts from an empty baseline, so that first run also
+counts the thread's prior history.
+
+Anthropic reports a dollar cost; Codex does not, so `cost_usd` is `None` for
+Codex runs.
 
 ## MCP And Subagents
 
@@ -110,8 +135,15 @@ agent = Agent(
   `envelope.message` for the serialized payload or `envelope.raw` for the SDK
   object.
 - Versioned JSON Schemas live under `docs/schemas/`.
-- `docs/trace-viewer.html` is a dependency-free local viewer. Served from the
-  repo root, it auto-discovers runs under `/results/`.
+- `run_started` records the prompt and system prompt, so a trace is readable
+  without knowing what the run was asked.
+- `docs/trace-viewer.html` is a dependency-free local viewer. Serve the repo
+  root (`python3 -m http.server`) and open `/docs/trace-viewer.html`; it
+  auto-discovers runs under `/results/`. Opening it as `file://` disables
+  discovery, but the **Open Files** picker still works.
+- `scripts/compare_providers.py` runs matched scenarios (basic, tools,
+  structured, thinking) against both providers so their traces can be compared
+  side by side in the viewer. Live and billed; needs both API keys.
 
 Examples write timestamped artifacts under the gitignored
 `results/<provider>/<example>/<timestamp>/`.

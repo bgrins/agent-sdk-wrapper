@@ -16,12 +16,21 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import ProviderEventLogger
-from ..errors import AgentSdkWrapperError, ConfigError, ProviderNotAvailableError, TransientError
+from ..errors import (
+    AgentSdkWrapperError,
+    ConfigError,
+    ProcessTerminatedError,
+    ProviderNotAvailableError,
+    TransientError,
+)
 from ..events import (
     AgentEvent,
+    ContextCompacted,
     Error,
     SessionInfo,
     StructuredOutput,
+    SubagentEnded,
+    SubagentStarted,
     Text,
     Thinking,
     TokenUsage,
@@ -38,6 +47,16 @@ from .base import ProviderAdapter
 
 _DEFAULT_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
 _WEB_TOOL_NAMES: tuple[str, ...] = ("WebSearch", "WebFetch")
+
+# HTTP statuses worth another attempt. A mid-run API call that returned one of
+# these — or that got no response at all — is the common transient failure; the
+# SDK reports it as an errored ``ResultMessage`` rather than raising.
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+# Exit codes the runtime reports when an external signal killed it. The control
+# protocol uses the shell convention (128 + signum); the subprocess transport
+# reports asyncio's negative return code.
+_SIGNALS_BY_EXIT_CODE: dict[int, int] = {137: 9, 143: 15, 130: 2, -9: 9, -15: 15, -2: 2}
 
 
 def _raw(obj: Any) -> dict[str, Any] | None:
@@ -186,8 +205,12 @@ class AnthropicProvider(ProviderAdapter):
             ProcessError,
             RateLimitEvent,
             ResultMessage,
+            ServerToolResultBlock,
+            ServerToolUseBlock,
             StreamEvent,
             SystemMessage,
+            TaskNotificationMessage,
+            TaskStartedMessage,
             TextBlock,
             ThinkingBlock,
             ToolResultBlock,
@@ -198,6 +221,9 @@ class AnthropicProvider(ProviderAdapter):
 
         options = self._build_options(req)
         seen_session = False
+        # tool_use_id -> tool name, so a tool result can name the tool it
+        # answers without the caller having to correlate ids itself.
+        tool_names: dict[str, str] = {}
         provider_log = ProviderEventLogger(
             "anthropic", req.artifacts_dir, req.on_provider_event
         )
@@ -210,8 +236,10 @@ class AnthropicProvider(ProviderAdapter):
                         if isinstance(block, TextBlock):
                             yield Text(text=block.text)
                         elif isinstance(block, ThinkingBlock):
-                            yield Thinking(text=block.thinking)
-                        elif isinstance(block, ToolUseBlock):
+                            yield _thinking_event(block)
+                        elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+                            if block.id:
+                                tool_names[block.id] = block.name
                             yield ToolCall(
                                 id=block.id,
                                 name=block.name,
@@ -225,11 +253,35 @@ class AnthropicProvider(ProviderAdapter):
                             if isinstance(block, ToolResultBlock):
                                 yield ToolResult(
                                     id=block.tool_use_id,
+                                    name=tool_names.get(block.tool_use_id),
                                     output=_stringify(block.content),
                                     is_error=bool(block.is_error),
                                     raw=_raw(block) if req.include_raw else None,
                                 )
+                            elif isinstance(block, ServerToolResultBlock):
+                                yield ToolResult(
+                                    id=block.tool_use_id,
+                                    name=tool_names.get(block.tool_use_id),
+                                    output=_stringify(block.content),
+                                    is_error=False,
+                                    raw=_raw(block) if req.include_raw else None,
+                                )
+                elif isinstance(message, TaskStartedMessage):
+                    yield SubagentStarted(
+                        task_id=message.task_id,
+                        name=message.task_type or "",
+                        description=message.description,
+                    )
+                elif isinstance(message, TaskNotificationMessage):
+                    yield SubagentEnded(
+                        task_id=message.task_id,
+                        status=message.status,
+                        summary=message.summary,
+                    )
                 elif isinstance(message, SystemMessage):
+                    compacted = _compaction_event(message)
+                    if compacted is not None:
+                        yield compacted
                     if not seen_session and isinstance(message.data, dict):
                         sid = message.data.get("session_id")
                         if sid:
@@ -240,16 +292,18 @@ class AnthropicProvider(ProviderAdapter):
                         seen_session = True
                         yield SessionInfo(id=message.session_id)
                     if message.usage:
-                        yield _usage_event(message.usage, message.total_cost_usd)
+                        yield _usage_event(
+                            message.usage,
+                            message.total_cost_usd,
+                            requests=message.num_turns,
+                        )
                     if req.output_schema is not None and message.structured_output is not None:
                         yield StructuredOutput(
                             value=validate_output(req.output_schema, message.structured_output)
                         )
-                    if message.is_error:
-                        yield Error(
-                            message=message.result or "run reported an error",
-                            error_type="result_error",
-                        )
+                    error = _result_error(message)
+                    if error is not None:
+                        yield error
                 elif isinstance(message, RateLimitEvent):
                     yield _rate_limit_warning(message, include_raw=req.include_raw)
                 elif isinstance(message, StreamEvent):
@@ -266,6 +320,9 @@ class AnthropicProvider(ProviderAdapter):
             ) from exc
         except ProcessError as exc:
             msg = f"{exc}"
+            signum = _SIGNALS_BY_EXIT_CODE.get(exc.exit_code) if exc.exit_code else None
+            if signum is not None:
+                raise ProcessTerminatedError(signum, message=msg, cause=exc) from exc
             if _looks_transient(getattr(exc, "stderr", "") or msg):
                 raise TransientError(msg, cause=exc) from exc
             raise AgentSdkWrapperError(msg, cause=exc) from exc
@@ -273,6 +330,109 @@ class AnthropicProvider(ProviderAdapter):
             raise AgentSdkWrapperError(f"failed to decode CLI output: {exc}", cause=exc) from exc
         except ClaudeSDKError as exc:
             raise AgentSdkWrapperError(str(exc), cause=exc) from exc
+
+
+def _thinking_event(block: Any) -> Thinking:
+    """Map a thinking block, reporting redacted length when the text is hidden.
+
+    Some thinking display modes return an encrypted signature the provider
+    round-trips but never exposes. Reporting its size keeps a redacted item
+    distinguishable from an empty one.
+    """
+
+    text = block.thinking or ""
+    signature = getattr(block, "signature", None) or ""
+    if text.strip():
+        return Thinking(text=text)
+    return Thinking(text=text, redacted_bytes=len(signature) or None)
+
+
+def _compaction_event(message: Any) -> ContextCompacted | None:
+    """Map a ``compact_boundary`` system message to a normalized event."""
+
+    if getattr(message, "subtype", None) != "compact_boundary":
+        return None
+    data = message.data if isinstance(message.data, dict) else {}
+    metadata = data.get("compact_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return ContextCompacted(
+        trigger=str(metadata.get("trigger", "unknown")),
+        pre_tokens=metadata.get("pre_tokens"),
+    )
+
+
+def _result_error(message: Any) -> Error | None:
+    """Classify a terminal ``ResultMessage`` into a normalized error, if any.
+
+    The SDK reports most failures as an errored result rather than an
+    exception, so the terminal reason is only recoverable from ``subtype``,
+    ``stop_reason``, and ``api_error_status``. Mapping them here is what lets
+    the run report ``max_turns`` or ``refused`` instead of a generic error, and
+    lets callers tell a retryable upstream blip from a permanent failure.
+    """
+
+    if message.subtype == "error_max_turns":
+        return Error(
+            message=_error_detail(message) or "reached the configured max turns",
+            error_type="max_turns",
+        )
+    if message.stop_reason == "refusal":
+        return Error(
+            message=_error_detail(message) or "the model refused the request",
+            error_type="refused",
+        )
+    if not message.is_error:
+        return None
+    if _is_transient_result(message):
+        status = message.api_error_status
+        detail = f"API error {status}" if status is not None else "connection dropped"
+        return Error(
+            message=f"transient upstream failure: {detail}",
+            error_type="transient_api_error",
+            retryable=True,
+        )
+    # Not stop_reason: that describes how generation ended (``end_turn``,
+    # ``stop_sequence``) and is unrelated to why the run failed, so using it
+    # here labels an HTTP 400 as "stop_sequence". Prefer the failing status,
+    # then a genuine error subtype.
+    if message.api_error_status is not None:
+        error_type = f"api_error_{message.api_error_status}"
+    elif message.subtype and message.subtype.startswith("error"):
+        error_type = message.subtype
+    else:
+        error_type = "result_error"
+    return Error(
+        message=_error_detail(message) or "run reported an error",
+        error_type=error_type,
+    )
+
+
+def _error_detail(message: Any) -> str:
+    """Pick the most specific failure text an errored result carries."""
+
+    errors = getattr(message, "errors", None)
+    if errors:
+        return "; ".join(str(e) for e in errors)
+    if message.api_error_status is not None:
+        return f"API error {message.api_error_status}"
+    if message.result:
+        return str(message.result)
+    return str(message.subtype or "")
+
+
+def _is_transient_result(message: Any) -> bool:
+    """Whether an errored result is a retryable upstream failure.
+
+    A mid-run API call that failed leaves ``subtype`` at ``success`` — the run
+    itself did not fail structurally. It is worth retrying when the call
+    returned a retryable status, or got no response at all (a dropped
+    connection). Client errors and structural run failures are not.
+    """
+
+    if message.subtype != "success":
+        return False
+    status = message.api_error_status
+    return status is None or status in _RETRYABLE_STATUS_CODES
 
 
 def _rate_limit_warning(message: Any, *, include_raw: bool) -> WarningEvent:
@@ -370,17 +530,28 @@ def _anthropic_tool_names(servers: list[McpServer], *, enabled: bool) -> list[st
     return out
 
 
-def _usage_event(usage: dict[str, Any], cost: float | None) -> Usage:
-    inp = int(usage.get("input_tokens", 0) or 0)
+def _usage_event(usage: dict[str, Any], cost: float | None, *, requests: int = 0) -> Usage:
+    """Normalize an SDK usage mapping onto :class:`TokenUsage`.
+
+    Anthropic reports ``input_tokens`` net of cache, with the cached portion in
+    its own counters, so the cache counts are folded back in to match the
+    convention the wrapper publishes (and what the Codex adapter already
+    emits). The SDK carries no request count in the usage mapping, so the
+    result's turn count stands in for it.
+    """
+
+    cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+    cache_write = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    inp = int(usage.get("input_tokens", 0) or 0) + cache_read + cache_write
     out = int(usage.get("output_tokens", 0) or 0)
     return Usage(
         usage=TokenUsage(
-            requests=int(usage.get("requests", 0) or usage.get("request_count", 0) or 0),
+            requests=requests,
             input_tokens=inp,
             output_tokens=out,
             total_tokens=inp + out,
-            cache_read_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
-            cache_write_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
         ),
         cost_usd=cost,
         raw=usage,

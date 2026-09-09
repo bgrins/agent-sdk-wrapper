@@ -220,7 +220,7 @@
 
     .run-button {
       width: 100%;
-      min-height: 72px;
+      min-height: 0;
       padding: 10px 12px;
       border: 1px solid var(--border);
       border-left: 4px solid #98a2b3;
@@ -318,7 +318,9 @@
 
     .event[data-type="tool_call"],
     .event[data-type="tool_result"],
-    .event[data-type="agent_updated"] {
+    .event[data-type="agent_updated"],
+    .event[data-type="subagent_started"],
+    .event[data-type="subagent_ended"] {
       border-left-color: var(--tool);
     }
 
@@ -365,6 +367,200 @@
       cursor: pointer;
       color: var(--accent);
       font-weight: 600;
+    }
+
+    .run-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px 16px;
+    }
+
+    .run-badges {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .badge {
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--panel-3);
+      color: var(--muted);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+
+    .badge-status.status-success {
+      background: color-mix(in srgb, var(--ok) 15%, transparent);
+      color: var(--ok);
+    }
+
+    .badge-status.status-failure,
+    .badge-status.status-timeout,
+    .badge-status.status-cancelled,
+    .badge-error {
+      background: color-mix(in srgb, var(--err) 15%, transparent);
+      color: var(--err);
+    }
+
+    .badge-error {
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .badge-reason {
+      background: color-mix(in srgb, var(--warn) 18%, transparent);
+      color: var(--warn);
+    }
+
+    .badge-provider.provider-anthropic {
+      background: color-mix(in srgb, #c96442 16%, transparent);
+      color: #a4472a;
+    }
+
+    .badge-provider.provider-openai {
+      background: color-mix(in srgb, #10a37f 16%, transparent);
+      color: #0b7a5f;
+    }
+
+    .run-model {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12.5px;
+      font-weight: 600;
+    }
+
+    .run-ident {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      color: var(--faint);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
+
+    /* Runtime and usage are different kinds of data, so they read as two
+       separate blocks rather than one joined table. Each sizes to its content
+       and sits left — stretched across a wide viewport the numbers drift so far
+       apart they stop being comparable. */
+    .metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .metric-group {
+      display: flex;
+      align-items: stretch;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-2);
+    }
+
+    .metric-group-label {
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      border-right: 1px solid var(--border);
+      background: var(--panel-3);
+      border-radius: 5px 0 0 5px;
+      color: var(--faint);
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .metric-row {
+      display: flex;
+    }
+
+    .metric {
+      min-width: 62px;
+      padding: 6px 11px;
+      border-left: 1px solid var(--border);
+    }
+
+    .metric-row .metric:first-child {
+      border-left: 0;
+    }
+
+    .metric-label {
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+
+    .run-filter {
+      width: 100%;
+      margin-bottom: 8px;
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+    }
+
+    .run-filter:focus-visible {
+      border-color: var(--border-strong);
+      outline: none;
+    }
+
+    .raw {
+      max-height: none;
+      margin: 0;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      line-height: 1.5;
+      white-space: pre;
+      overflow: auto;
+    }
+
+    .raw-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .raw-meta {
+      color: var(--faint);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
+
+    .system-prompt {
+      margin: 0 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-2);
+    }
+
+    .system-prompt > summary {
+      padding: 8px 12px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .system-prompt .msg-body {
+      border-top: 1px solid var(--border);
+      color: var(--muted);
     }
 
     .side-list {
@@ -524,7 +720,13 @@
 
     .viewer-layout {
       height: 100%;
+      /* The single row must be bounded, and both panes must stretch into it.
+         Left content-sized (align-items: start), the workspace grows to its
+         full scroll height and main's overflow:hidden clips everything past
+         the fold instead of letting the workspace scroll. */
+      grid-template-rows: minmax(0, 1fr);
       grid-template-columns: 300px minmax(0, 1fr);
+      align-items: stretch;
       gap: 0;
     }
 
@@ -550,17 +752,17 @@
     }
 
     .run-list {
-      gap: 4px;
+      gap: 3px;
     }
 
     .run-button {
-      min-height: 82px;
-      padding: 10px 12px;
+      min-height: 0;
+      padding: 7px 10px;
       border-color: var(--border);
       border-left-width: 3px;
       background: var(--panel);
       color: var(--text);
-      box-shadow: var(--shadow);
+      box-shadow: none;
       transition: background .12s, border-color .12s;
     }
 
@@ -577,12 +779,28 @@
     }
 
     .run-title {
-      display: -webkit-box;
+      display: block;
       overflow: hidden;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 2;
       font-size: 12.5px;
       line-height: 1.45;
+      white-space: nowrap;
+    }
+
+    .run-parent {
+      display: block;
+      overflow: hidden;
+      color: var(--faint);
+      font-size: 10.5px;
+      font-weight: 400;
+      text-overflow: ellipsis;
+      direction: rtl;
+      text-align: left;
+    }
+
+    .run-leaf {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .run-meta {
@@ -594,7 +812,24 @@
     .trace-workspace {
       min-height: 0;
       overflow: auto;
-      padding: 18px 24px 28px;
+      padding: 14px 16px 24px;
+    }
+
+    /* Each tab panel is a plain container, not a card. Its contents are already
+       cards, and wrapping cards in a card cost ~8% of the reading width to
+       nested padding and borders. */
+    section.view {
+      padding: 0;
+      border: 0;
+      background: none;
+      box-shadow: none;
+    }
+
+    .side-list {
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
     }
 
     section {
@@ -604,10 +839,11 @@
     }
 
     .overview-panel {
-      display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(300px, .8fr);
-      gap: 16px;
-      align-items: start;
+      display: block;
+    }
+
+    #result {
+      margin-top: 12px;
     }
 
     .summary {
@@ -691,7 +927,6 @@
     .conversation {
       display: grid;
       gap: 10px;
-      max-width: 980px;
     }
 
     .msg,
@@ -728,6 +963,10 @@
       height: 11px;
       border-radius: 2px;
       background: currentColor;
+    }
+
+    .msg-role.user {
+      color: var(--accent);
     }
 
     .msg-role.assistant {
@@ -816,7 +1055,32 @@
       color: var(--warn);
     }
 
+    /* A marker that content is absent, not the content itself: no panel, no
+       body text styling, just a muted badge and a dim note. */
+    .trace-note {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 2px 2px 2px 0;
+      color: var(--faint);
+      font-size: 11.5px;
+      font-style: italic;
+    }
+
+    .note-badge {
+      padding: 1px 7px;
+      border: 1px dashed var(--border-strong);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 9.5px;
+      font-style: normal;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
     .banner[data-type="session_info"],
+    .banner[data-type="context_compacted"],
     .banner[data-type="usage"] {
       opacity: .9;
     }
@@ -876,6 +1140,7 @@
       .viewer-layout,
       body.results-collapsed .viewer-layout {
         height: auto;
+        grid-template-rows: auto;
         grid-template-columns: 1fr;
       }
 
@@ -917,6 +1182,7 @@
           <h2>Results</h2>
           <button id="refreshResults" class="button" type="button">Refresh</button>
         </div>
+        <input id="runFilter" class="run-filter" type="search" placeholder="Filter runs" aria-label="Filter runs">
         <div class="results-scroll">
           <div id="resultsStatus" class="results-status">Scanning /results/.</div>
           <ul id="runs" class="run-list"></ul>
@@ -925,20 +1191,15 @@
 
       <div class="trace-workspace">
         <section class="overview-panel">
-          <div>
-            <h2>Run</h2>
-            <div id="summary" class="summary">
-              <div class="empty">No trace loaded.</div>
-            </div>
-            <div id="load-error" class="error-banner" aria-hidden="true"></div>
+          <div class="run-head">
+            <div id="runBadges" class="run-badges"></div>
+            <div id="runIdent" class="run-ident"></div>
           </div>
-
-          <div>
-            <h2>Result</h2>
-            <div id="result">
-              <div class="empty">No result.json loaded.</div>
-            </div>
+          <div id="summary" class="metrics" aria-label="Usage">
+            <div class="empty">No trace loaded.</div>
           </div>
+          <div id="load-error" class="error-banner" aria-hidden="true"></div>
+          <div id="result"></div>
         </section>
 
         <div class="view-tabs" role="tablist" aria-label="Trace views">
@@ -946,32 +1207,40 @@
           <button class="tab-btn" type="button" role="tab" aria-selected="false" data-view="timeline-view">Timeline</button>
           <button class="tab-btn" type="button" role="tab" aria-selected="false" data-view="events-view">Events</button>
           <button class="tab-btn" type="button" role="tab" aria-selected="false" data-view="files-view">Files</button>
+          <button class="tab-btn" type="button" role="tab" aria-selected="false" data-view="raw-view">Raw</button>
         </div>
 
         <section id="conversation-view" class="view active" role="tabpanel">
-          <h2>Conversation</h2>
           <div id="conversation" class="conversation">
             <div class="empty">No trace loaded.</div>
           </div>
         </section>
 
         <section id="timeline-view" class="view" role="tabpanel">
-          <h2>Timeline</h2>
           <div id="timeline" class="timeline">
             <div class="empty">No trace loaded.</div>
           </div>
         </section>
 
         <section id="events-view" class="view" role="tabpanel">
-          <h2>Events</h2>
           <div id="events" class="timeline">
             <div class="empty">No trace loaded.</div>
           </div>
         </section>
 
         <section id="files-view" class="view" role="tabpanel">
-          <h2>Files</h2>
           <ul id="files" class="side-list"></ul>
+        </section>
+
+        <section id="raw-view" class="view" role="tabpanel">
+          <div class="section-head">
+            <h2>Raw</h2>
+            <div class="raw-actions">
+              <span id="rawMeta" class="raw-meta"></span>
+              <button id="copyRaw" class="button" type="button">Copy</button>
+            </div>
+          </div>
+          <pre id="raw" class="raw"><span class="empty">No trace loaded.</span></pre>
         </section>
       </div>
     </div>
@@ -991,6 +1260,13 @@
     const timelineEl = document.querySelector("#timeline");
     const eventsEl = document.querySelector("#events");
     const filesEl = document.querySelector("#files");
+    const workspaceEl = document.querySelector(".trace-workspace");
+    const rawEl = document.querySelector("#raw");
+    const rawMetaEl = document.querySelector("#rawMeta");
+    const copyRawButton = document.querySelector("#copyRaw");
+    const runBadgesEl = document.querySelector("#runBadges");
+    const runIdentEl = document.querySelector("#runIdent");
+    const runFilterEl = document.querySelector("#runFilter");
     const loadErrorEl = document.querySelector("#load-error");
     const tabButtons = [...document.querySelectorAll(".tab-btn")];
     const RESULTS_SIDEBAR_STORAGE_KEY = "agent-sdk-wrapper.trace-viewer.resultsCollapsed";
@@ -1008,6 +1284,8 @@
       saveResultsSidebarCollapsed(collapsed);
     });
     refreshResultsButton.addEventListener("click", () => discoverResults());
+    copyRawButton.addEventListener("click", copyRawTrace);
+    runFilterEl.addEventListener("input", () => renderRuns(discoveredRuns));
     tabButtons.forEach((button) => {
       button.addEventListener("click", () => switchView(button.dataset.view));
     });
@@ -1111,7 +1389,16 @@
         return;
       }
 
-      const items = runs.map((run) => {
+      const query = (runFilterEl?.value || "").trim().toLowerCase();
+      const visible = query
+        ? runs.filter((run) => runSearchText(run).includes(query))
+        : runs;
+      if (!visible.length) {
+        runsEl.replaceChildren(emptyListItem(`No runs match "${query}".`));
+        return;
+      }
+
+      const items = visible.map((run) => {
         const li = document.createElement("li");
         const button = document.createElement("button");
         const status = run.manifest?.status || "unknown";
@@ -1120,9 +1407,25 @@
         button.setAttribute("aria-current", run.runUrl.href === activeRunUrl ? "true" : "false");
         button.addEventListener("click", () => loadRunFromUrl(run));
 
+        const label = run.label || run.runUrl.pathname;
         const title = document.createElement("div");
         title.className = "run-title";
-        title.textContent = run.label || run.runUrl.pathname;
+        // Nested run paths share long prefixes, so the leaf identifies the run;
+        // clamping from the start would hide exactly that. Show the leaf, keep
+        // its parent dimmed ahead of it, and put the full path on the tooltip.
+        const segments = label.split("/").filter(Boolean);
+        const leaf = segments.pop() || label;
+        if (segments.length) {
+          const parent = document.createElement("span");
+          parent.className = "run-parent";
+          parent.textContent = `${segments.join("/")}/`;
+          title.append(parent);
+        }
+        const leafEl = document.createElement("span");
+        leafEl.className = "run-leaf";
+        leafEl.textContent = leaf;
+        title.append(leafEl);
+        button.title = label;
 
         const meta = document.createElement("div");
         meta.className = "run-meta";
@@ -1136,14 +1439,48 @@
     }
 
     function runMeta(run) {
+      // The status is already carried by the card's colored edge, and a full
+      // ISO timestamp is unscannable, so the meta line is model plus age.
       const manifest = run.manifest || {};
       const parts = [
-        manifest.status || "unknown",
-        manifest.provider || "",
-        manifest.model || "",
-        manifest.updated_at || "",
+        manifest.model || manifest.provider || "",
+        relativeTime(manifest.updated_at),
       ].filter(Boolean);
-      return parts.join(" | ");
+      return parts.join(" · ");
+    }
+
+    function runSearchText(run) {
+      const manifest = run.manifest || {};
+      return [
+        run.label || run.runUrl.pathname,
+        manifest.status,
+        manifest.provider,
+        manifest.model,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return "";
+      const then = Date.parse(iso);
+      if (Number.isNaN(then)) return iso;
+      const seconds = Math.round((Date.now() - then) / 1000);
+      if (seconds < 60) return "just now";
+      const units = [
+        ["m", 60],
+        ["h", 3600],
+        ["d", 86400],
+      ];
+      let label = `${Math.round(seconds / 86400)}d ago`;
+      for (const [suffix, size] of units) {
+        if (seconds < size * 60 || suffix === "d") {
+          label = `${Math.floor(seconds / size)}${suffix} ago`;
+          break;
+        }
+      }
+      return label;
     }
 
     async function loadRunFromUrl(run) {
@@ -1158,16 +1495,19 @@
         const resultRel = manifest?.files?.result || null;
         const traceUrl = new URL(traceRel, run.runUrl);
         const resultUrl = resultRel ? new URL(resultRel, run.runUrl) : null;
-        const trace = parseTrace(await fetchText(traceUrl, traceUrl.pathname), traceRel);
+        const traceText = await fetchText(traceUrl, traceUrl.pathname);
+        const trace = parseTrace(traceText, traceRel);
         const result = resultUrl ? await fetchJson(resultUrl, resultUrl.pathname) : null;
 
         run.manifest = manifest;
         renderSummary(manifest, result, trace);
-        renderResult(result);
+        renderResult(result, trace);
         renderConversation(trace);
         renderTimeline(trace);
         renderEvents(trace);
         renderServerFiles(manifest, run.runUrl);
+        renderRaw(traceText);
+        resetWorkspaceScroll();
       } catch (error) {
         renderEmpty();
         setLoadError(error instanceof Error ? error.message : String(error));
@@ -1208,17 +1548,20 @@
         const manifest = manifestFile ? await readJson(manifestFile) : null;
         const traceRel = manifest?.files?.trace || "trace.jsonl";
         const resultRel = manifest?.files?.result || "result.json";
-        const traceFile = findFile(byPath, traceRel);
+        const traceFile = findFile(byPath, traceRel) || findTraceByExtension(byPath);
         const resultFile = findFile(byPath, resultRel);
         const result = resultFile ? await readJson(resultFile) : null;
-        const trace = traceFile ? parseTrace(await traceFile.text(), relativeName(traceFile)) : [];
+        const traceText = traceFile ? await traceFile.text() : "";
+        const trace = traceFile ? parseTrace(traceText, relativeName(traceFile)) : [];
 
         renderSummary(manifest, result, trace);
-        renderResult(result);
+        renderResult(result, trace);
         renderConversation(trace);
         renderTimeline(trace);
         renderEvents(trace);
         renderFiles(manifest, byPath);
+        renderRaw(traceText);
+        resetWorkspaceScroll();
       } catch (error) {
         renderEmpty();
         setLoadError(error instanceof Error ? error.message : String(error));
@@ -1240,6 +1583,25 @@
         }
       }
       return null;
+    }
+
+    function findTraceByExtension(byPath) {
+      // Picking loose files, the trace is often not named trace.jsonl — the
+      // committed fixtures are <name>.trace.jsonl. Fall back to extension so a
+      // hand-picked trace loads instead of rendering an empty view. The
+      // provider-native sidecar is a .jsonl too, so it is never the fallback.
+      let fallback = null;
+      for (const [path, file] of byPath) {
+        const name = path.split("/").pop() || path;
+        if (!name.endsWith(".jsonl") || name === "provider-events.jsonl") {
+          continue;
+        }
+        if (name.endsWith(".trace.jsonl")) {
+          return file;
+        }
+        fallback = fallback || file;
+      }
+      return fallback;
     }
 
     async function readJson(file) {
@@ -1264,22 +1626,164 @@
     }
 
     function renderSummary(manifest, result, trace) {
-      const values = [
-        ["Status", manifest?.status || result?.status || "unknown", `status-${manifest?.status || result?.status || ""}`],
-        ["Provider", manifest?.provider || result?.provider || ""],
-        ["Model", manifest?.model || result?.model || ""],
-        ["Run ID", manifest?.run_id || result?.run_id || ""],
+      // Everything a run is judged on, laid out flat: outcome as badges, the
+      // numbers as one scannable row. Nothing here is collapsed, because eight
+      // facts behind a disclosure cost more attention than they save.
+      const status = manifest?.status || result?.status || "unknown";
+      const stats = traceStats(trace, result);
+      const provider = manifest?.provider || result?.provider || "";
+      const model = manifest?.model || result?.model || "";
+      const endedReason = result?.ended_reason || "";
+      const error = manifest?.error || result?.error || "";
+
+      const badges = [statusBadge(status)];
+      if (endedReason && endedReason !== "success" && endedReason !== "unknown") {
+        badges.push(badge(endedReason, "badge-reason"));
+      }
+      if (provider) badges.push(badge(provider, `badge-provider provider-${provider}`));
+      if (model) {
+        const modelEl = document.createElement("span");
+        modelEl.className = "run-model";
+        modelEl.textContent = model;
+        badges.push(modelEl);
+      }
+      if (error) badges.push(badge(error, "badge-error"));
+      runBadgesEl.replaceChildren(...badges);
+
+      const identParts = [];
+      const runId = manifest?.run_id || result?.run_id || "";
+      if (runId) identParts.push(["run", runId.slice(0, 8), runId]);
+      if (result?.session_id) {
+        identParts.push(["session", result.session_id, result.session_id]);
+      }
+      if (manifest?.updated_at) {
+        identParts.push(["", relativeTime(manifest.updated_at), manifest.updated_at]);
+      }
+      runIdentEl.replaceChildren(
+        ...identParts.map(([label, value, full]) => {
+          const node = document.createElement("span");
+          node.className = "ident";
+          node.title = full;
+          node.textContent = label ? `${label} ${value}` : value;
+          return node;
+        })
+      );
+
+      const usage = stats.usage || {};
+      // Two labeled rows: what the run did, then what it spent. Mixing token
+      // counts in with event counts made both harder to read.
+      const runtime = [
         ["Duration", formatDuration(manifest?.duration_ms ?? result?.duration_ms)],
-        ["Session", result?.session_id || ""],
         ["Events", String(trace.length)],
-        ["Trace Format", manifest?.trace_format || ""]
+        ["Tools", String(stats.toolCalls)],
+        ["Requests", usage.requests ? String(usage.requests) : ""],
       ];
-      summaryEl.replaceChildren(...values.map(([label, value, cls]) => metric(label, value, cls)));
+      const spend = [
+        ["Input", formatCount(usage.input_tokens)],
+        // Cache reads and reasoning are provider-specific; a cell that always
+        // reads zero is wasted width, so these appear only when they carry a
+        // number.
+        ["Cached", usage.cache_read_tokens ? formatCount(usage.cache_read_tokens) : ""],
+        ["Output", formatCount(usage.output_tokens)],
+        [
+          "Reasoning",
+          usage.reasoning_output_tokens ? formatCount(usage.reasoning_output_tokens) : "",
+        ],
+        ["Cost", stats.costLabel],
+      ];
+      summaryEl.replaceChildren(
+        metricGroup("Runtime", runtime),
+        metricGroup("Usage", spend)
+      );
     }
 
-    function renderResult(result) {
-      if (!result) {
-        resultEl.innerHTML = '<div class="empty">No result.json loaded.</div>';
+    function traceStats(trace, result) {
+      let toolCalls = 0;
+      let usage = result?.usage || null;
+      let cost = typeof result?.cost_usd === "number" ? result.cost_usd : null;
+      const totals = {};
+      let sawUsageEvent = false;
+
+      for (const envelope of trace) {
+        const event = envelope.event || {};
+        if (event.type === "tool_call") toolCalls += 1;
+        if (event.type !== "usage") continue;
+        sawUsageEvent = true;
+        for (const [key, value] of Object.entries(event.usage || {})) {
+          totals[key] = (totals[key] || 0) + value;
+        }
+        if (cost === null && typeof event.cost_usd === "number") cost = event.cost_usd;
+      }
+      // result.json is authoritative; fall back to summing the stream so a
+      // trace opened without its result still reports spend.
+      if (!usage && sawUsageEvent) usage = totals;
+
+      return {
+        toolCalls,
+        usage,
+        // A dash is deliberate: Codex reports no dollar cost, and showing the
+        // cell empty-handed is more honest than hiding that it exists.
+        costLabel: cost === null ? "—" : formatCost(cost),
+      };
+    }
+
+    function formatCount(value) {
+      if (!value) return value === 0 ? "0" : "—";
+      return value.toLocaleString();
+    }
+
+    function formatCost(cost) {
+      if (cost === 0) return "$0";
+      // Runs routinely land in fractions of a cent, so two decimals would
+      // round most of them to the same uninformative $0.01.
+      return cost < 1 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
+    }
+
+    function statusBadge(status) {
+      return badge(status, `badge-status status-${status}`);
+    }
+
+    function badge(text, cls) {
+      const node = document.createElement("span");
+      node.className = `badge ${cls}`.trim();
+      node.textContent = text;
+      return node;
+    }
+
+    function metricGroup(title, cells) {
+      const group = document.createElement("div");
+      group.className = "metric-group";
+      const titleEl = document.createElement("div");
+      titleEl.className = "metric-group-label";
+      titleEl.textContent = title;
+      const row = document.createElement("div");
+      row.className = "metric-row";
+      row.append(
+        ...cells.filter(([, value]) => value !== "").map(([l, v]) => metricCell(l, v))
+      );
+      group.append(titleEl, row);
+      return group;
+    }
+
+    function metricCell(label, value) {
+      const cell = document.createElement("div");
+      cell.className = "metric";
+      const valueEl = document.createElement("div");
+      valueEl.className = "metric-value";
+      valueEl.textContent = value || "—";
+      const labelEl = document.createElement("div");
+      labelEl.className = "metric-label";
+      labelEl.textContent = label;
+      cell.append(valueEl, labelEl);
+      return cell;
+    }
+
+    function renderResult(result, trace) {
+      // The conversation already renders the final text and the structured
+      // output, so this is only a fallback for a result.json opened without
+      // its trace.
+      if (!result || trace.length) {
+        resultEl.replaceChildren();
         return;
       }
 
@@ -1305,24 +1809,7 @@
         nodes.push(jsonDetails("Structured Output", result.structured_output));
       }
 
-      if (result.usage) {
-        nodes.push(jsonBlock("Usage", result.usage));
-      }
-
       resultEl.replaceChildren(...nodes);
-    }
-
-    function metric(label, value, cls = "") {
-      const outer = document.createElement("div");
-      outer.className = "metric";
-      const labelEl = document.createElement("div");
-      labelEl.className = "label";
-      labelEl.textContent = label;
-      const valueEl = document.createElement("div");
-      valueEl.className = `value ${cls}`.trim();
-      valueEl.textContent = value || "-";
-      outer.append(labelEl, valueEl);
-      return outer;
     }
 
     function renderConversation(trace) {
@@ -1346,6 +1833,14 @@
       const items = [];
       let currentMessage = null;
 
+      const started = trace.find((env) => (env.event || {}).type === "run_started");
+      if (started?.event?.system_prompt) {
+        items.push({ kind: "system", text: started.event.system_prompt });
+      }
+      if (started?.event?.prompt) {
+        items.push({ kind: "message", role: "user", text: started.event.prompt });
+      }
+
       function flushMessage() {
         if (currentMessage && currentMessage.text.trim()) {
           items.push(currentMessage);
@@ -1355,6 +1850,18 @@
 
       for (const envelope of trace) {
         const event = envelope.event || {};
+        if (event.type === "thinking" && !(event.text || "").trim()) {
+          flushMessage();
+          items.push({
+            kind: "note",
+            label: "Thinking",
+            text: event.redacted_bytes
+              ? `not exposed — ${event.redacted_bytes} bytes redacted`
+              : "not exposed by the provider",
+            sequence: envelope.sequence,
+          });
+          continue;
+        }
         if (event.type === "text" || event.type === "thinking") {
           const role = event.type === "thinking" ? "thinking" : "assistant";
           if (!currentMessage || currentMessage.role !== role) {
@@ -1404,6 +1911,37 @@
             body: event.name || "",
             sequence: envelope.sequence,
           });
+        } else if (event.type === "subagent_started") {
+          items.push({
+            kind: "banner",
+            type: event.type,
+            title: `Subagent started${event.name ? ` (${event.name})` : ""}`,
+            body: event.description || event.task_id || "",
+            sequence: envelope.sequence,
+          });
+        } else if (event.type === "subagent_ended") {
+          items.push({
+            kind: "banner",
+            type: event.type,
+            title: `Subagent ${event.status || "ended"}`,
+            body: event.summary || event.task_id || "",
+            sequence: envelope.sequence,
+          });
+        } else if (event.type === "context_compacted") {
+          items.push({
+            kind: "banner",
+            type: event.type,
+            title: "Context compacted",
+            body: [
+              `trigger: ${event.trigger || "unknown"}`,
+              event.pre_tokens == null
+                ? null
+                : `pre-compaction tokens: ${event.pre_tokens.toLocaleString()}`,
+            ]
+              .filter(Boolean)
+              .join(", "),
+            sequence: envelope.sequence,
+          });
         } else if (event.type === "structured_output") {
           items.push({
             kind: "banner",
@@ -1427,6 +1965,28 @@
     }
 
     function renderConversationItem(item) {
+      if (item.kind === "note") {
+        const node = document.createElement("div");
+        node.className = "trace-note";
+        const label = document.createElement("span");
+        label.className = "note-badge";
+        label.textContent = item.label;
+        const text = document.createElement("span");
+        text.textContent = item.text;
+        node.append(label, text);
+        return node;
+      }
+      if (item.kind === "system") {
+        const node = document.createElement("details");
+        node.className = "system-prompt";
+        const summary = document.createElement("summary");
+        summary.textContent = "System prompt";
+        const body = document.createElement("div");
+        body.className = "msg-body";
+        body.textContent = item.text;
+        node.append(summary, body);
+        return node;
+      }
       if (item.kind === "message") {
         const node = document.createElement("article");
         node.className = `msg ${item.role}-msg`;
@@ -1659,7 +2219,11 @@
     }
 
     function formatDuration(value) {
-      return Number.isFinite(value) ? `${value} ms` : "";
+      if (!Number.isFinite(value)) return "";
+      if (value < 1000) return `${value} ms`;
+      if (value < 60000) return `${(value / 1000).toFixed(1)} s`;
+      const minutes = Math.floor(value / 60000);
+      return `${minutes}m ${Math.round((value % 60000) / 1000)}s`;
     }
 
     function shortTime(value) {
@@ -1724,6 +2288,15 @@
       for (const view of document.querySelectorAll(".view")) {
         view.classList.toggle("active", view.id === viewId);
       }
+      // The workspace is one scroller shared by every tab, so a deep scroll in
+      // a long view would otherwise drop you mid-content in the next one.
+      resetWorkspaceScroll();
+    }
+
+    function resetWorkspaceScroll() {
+      if (workspaceEl) {
+        workspaceEl.scrollTop = 0;
+      }
     }
 
     function emptyListItem(text) {
@@ -1765,13 +2338,56 @@
       toggleResultsButton.textContent = collapsed ? "Show Results" : "Hide Results";
     }
 
+    let rawTraceText = "";
+
+    function renderRaw(text) {
+      // The trace file verbatim, not a re-serialization: the Raw tab exists to
+      // show exactly what is on disk, byte for byte.
+      rawTraceText = text || "";
+      if (!rawTraceText) {
+        rawEl.innerHTML = '<span class="empty">No trace loaded.</span>';
+        rawMetaEl.textContent = "";
+        return;
+      }
+      rawEl.textContent = rawTraceText;
+      const lines = rawTraceText.split(/\r?\n/).filter(Boolean).length;
+      const bytes = new Blob([rawTraceText]).size;
+      rawMetaEl.textContent = `${lines.toLocaleString()} lines · ${formatBytes(bytes)}`;
+    }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    async function copyRawTrace() {
+      if (!rawTraceText) return;
+      try {
+        await navigator.clipboard.writeText(rawTraceText);
+        flashCopyLabel("Copied");
+      } catch {
+        flashCopyLabel("Copy failed");
+      }
+    }
+
+    function flashCopyLabel(text) {
+      copyRawButton.textContent = text;
+      setTimeout(() => {
+        copyRawButton.textContent = "Copy";
+      }, 1200);
+    }
+
     function renderEmpty() {
       summaryEl.innerHTML = '<div class="empty">No trace loaded.</div>';
-      resultEl.innerHTML = '<div class="empty">No result.json loaded.</div>';
+      runBadgesEl.replaceChildren();
+      runIdentEl.replaceChildren();
+      resultEl.replaceChildren();
       conversationEl.innerHTML = '<div class="empty">No trace loaded.</div>';
       timelineEl.innerHTML = '<div class="empty">No trace loaded.</div>';
       eventsEl.innerHTML = '<div class="empty">No trace loaded.</div>';
       filesEl.replaceChildren(emptyListItem("No files loaded."));
+      renderRaw("");
     }
 
     function clearObjectUrls() {

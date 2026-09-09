@@ -104,6 +104,36 @@ def test_each_event_type_validates_against_trace_schema() -> None:
         trace_validator.validate(envelope.to_dict())
 
 
+def test_trace_schema_covers_every_event_type() -> None:
+    """Every member of the ``AgentEvent`` union must have a schema branch.
+
+    The hand-written example list above exercises realistic payloads but can
+    silently fall behind the union; this walks the union itself so adding an
+    event without a schema entry fails here rather than in a consumer.
+    """
+
+    from typing import get_args
+
+    from agent_sdk_wrapper.events import AgentEvent
+
+    schema = load_schema("agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json")
+    branches = {
+        ref["$ref"].removeprefix("#/$defs/")
+        for ref in schema["properties"]["event"]["oneOf"]
+    }
+    assert {event.type for event in get_args(AgentEvent)} == branches
+
+    trace_validator = validator("agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json")
+    for sequence, event_type in enumerate(get_args(AgentEvent)):
+        envelope = EventEnvelope(
+            run_id="schema-union-coverage",
+            sequence=sequence,
+            timestamp="2026-05-31T00:00:00+00:00",
+            event=event_type(),
+        )
+        trace_validator.validate(envelope.to_dict())
+
+
 def test_golden_trace_fixtures_validate_against_trace_schema() -> None:
     trace_validator = validator("agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json")
 

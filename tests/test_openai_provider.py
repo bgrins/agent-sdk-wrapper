@@ -23,6 +23,7 @@ from agent_sdk_wrapper import (
     ToolCall,
     ToolResult,
     Usage,
+    WarningEvent,
 )
 from agent_sdk_wrapper.providers.openai_provider import (
     OpenAIProvider,
@@ -165,12 +166,15 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
         '{"ok":true}'
     ]
     usage = next(event for event in out if isinstance(event, Usage))
+    # Reasoning bills as output, so it is folded into output_tokens; the
+    # request count comes from the number of token-usage updates.
     assert usage.usage == TokenUsage(
         input_tokens=10,
-        output_tokens=3,
-        total_tokens=13,
+        output_tokens=7,
+        total_tokens=17,
         cache_read_tokens=2,
         reasoning_output_tokens=4,
+        requests=1,
     )
     structured = next(event for event in out if isinstance(event, StructuredOutput))
     assert structured.value == Answer(ok=True)
@@ -333,7 +337,7 @@ async def test_codex_stream_maps_command_tool_result():
 
     assert out == [
         ToolCall(id="cmd-1", name="command", input={"command": "pytest"}),
-        ToolResult(id="cmd-1", output="passed"),
+        ToolResult(id="cmd-1", name="command", output="passed"),
     ]
 
 
@@ -1098,3 +1102,144 @@ def test_codex_output_schema_disallows_additional_properties():
     schema = _codex_output_schema(Answer)
 
     assert schema["additionalProperties"] is False
+
+
+def _usage_events(input_tokens: int, output_tokens: int):
+    return [
+        SimpleNamespace(
+            method="thread/tokenUsage/updated",
+            payload=SimpleNamespace(
+                token_usage={
+                    "total": {
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
+                    }
+                }
+            ),
+        ),
+        SimpleNamespace(
+            method="turn/completed",
+            payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reports_the_delta_when_a_thread_is_resumed():
+    from agent_sdk_wrapper.providers.openai_provider import _UsageBaseline
+
+    req = RunRequest(provider="openai", prompt="ignored")
+    baseline = _UsageBaseline()
+
+    first = [
+        event
+        async for event in _stream_turn(
+            FakeTurn(_usage_events(100, 20)), req, "thread-1", baseline
+        )
+    ]
+    second = [
+        event
+        async for event in _stream_turn(
+            FakeTurn(_usage_events(340, 55)), req, "thread-1", baseline
+        )
+    ]
+
+    # Codex snapshots are thread-cumulative, so the second turn reports only
+    # what it added rather than replaying the first turn's tokens.
+    assert next(e for e in first if isinstance(e, Usage)).usage.input_tokens == 100
+    delta = next(e for e in second if isinstance(e, Usage)).usage
+    assert delta.input_tokens == 240
+    assert delta.output_tokens == 35
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_baseline_resets_on_a_new_thread():
+    from agent_sdk_wrapper.providers.openai_provider import _UsageBaseline
+
+    req = RunRequest(provider="openai", prompt="ignored")
+    baseline = _UsageBaseline()
+
+    async for _ in _stream_turn(FakeTurn(_usage_events(100, 20)), req, "thread-1", baseline):
+        pass
+    events = [
+        event
+        async for event in _stream_turn(
+            FakeTurn(_usage_events(30, 5)), req, "thread-2", baseline
+        )
+    ]
+
+    usage = next(e for e in events if isinstance(e, Usage)).usage
+    assert usage.input_tokens == 30
+    assert usage.output_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_codex_retried_error_is_a_warning_and_a_final_one_is_an_error():
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
+        SimpleNamespace(
+            method="error",
+            payload=SimpleNamespace(
+                error=SimpleNamespace(message="upstream 503"), will_retry=True
+            ),
+        ),
+        SimpleNamespace(
+            method="error",
+            payload=SimpleNamespace(
+                error=SimpleNamespace(message="upstream 503"), will_retry=False
+            ),
+        ),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert [type(event) for event in out] == [WarningEvent, Error]
+    assert out[0].message == "upstream 503"
+    assert out[1].retryable is True
+
+
+@pytest.mark.asyncio
+async def test_codex_context_compaction_is_surfaced():
+    from agent_sdk_wrapper.events import ContextCompacted
+
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
+        SimpleNamespace(
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(root=SimpleNamespace(type="contextCompaction"))
+            ),
+        ),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert [type(event) for event in out] == [ContextCompacted]
+    assert out[0].trigger == "codex"
+
+
+@pytest.mark.asyncio
+async def test_codex_reasoning_item_without_a_summary_still_emits_thinking():
+    """Codex bills reasoning tokens for items that expose no summary text.
+
+    Dropping those items left a run that reasoned looking like one that did
+    not, and made Codex traces incomparable with Anthropic's redacted blocks.
+    """
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
+        SimpleNamespace(
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(
+                    root=SimpleNamespace(
+                        type="reasoning", id="rs_1", summary=[], content=[]
+                    )
+                )
+            ),
+        ),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert [type(event) for event in out] == [Thinking]
+    assert out[0].text == ""

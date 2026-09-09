@@ -238,7 +238,15 @@ class Agent:
             return env
 
         try:
-            record(RunStarted(provider=req.provider, model=req.model, cwd=_as_str(req.cwd)))
+            record(
+                RunStarted(
+                    provider=req.provider,
+                    model=req.model,
+                    cwd=_as_str(req.cwd),
+                    prompt=req.prompt or None,
+                    system_prompt=req.system_prompt,
+                )
+            )
             if artifacts_dir is not None:
                 write_manifest(
                     artifacts_dir,
@@ -526,7 +534,15 @@ class Agent:
             return env
 
         try:
-            yield record(RunStarted(provider=req.provider, model=req.model, cwd=_as_str(req.cwd)))
+            yield record(
+                RunStarted(
+                    provider=req.provider,
+                    model=req.model,
+                    cwd=_as_str(req.cwd),
+                    prompt=req.prompt or None,
+                    system_prompt=req.system_prompt,
+                )
+            )
             if artifacts_dir is not None:
                 write_manifest(
                     artifacts_dir,
