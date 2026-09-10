@@ -36,11 +36,23 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_sdk_wrapper"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src", "/tests", "/docs", "/examples", "/scripts",
+    "/README.md", "/LICENSE", "/pyproject.toml", "/uv.lock",
+    "/Dockerfile", "/Dockerfile.dockerignore",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../../docs/schemas" = "docs/schemas"
+"../../docs/fixtures" = "docs/fixtures"
+"../../docs/trace-viewer.html" = "docs/trace-viewer.html"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "integration: live provider tests; run through docker compose integration",
+    "integration: live provider tests; run through docker compose run --rm python-integration",
 ]
 
 [tool.ruff]

@@ -1,15 +1,20 @@
-.claude/
-.git/
-.pytest_cache/
-.ruff_cache/
-.venv/
-__pycache__/
-*.egg-info/
-*.py[cod]
-build/
-dist/
-wheels/
+# Build from the repository root; include only Python and shared contracts.
+**
+!packages/
+!packages/python/
+!packages/python/**
+!docs/
+!docs/**
 
-.env
-*.jsonl
-results/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.py[cod]
+**/*.egg-info/
+**/dist/
+**/build/
+**/results/
+**/.env
+**/.env.*
+**/.claude/

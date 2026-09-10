@@ -2,7 +2,7 @@
 
 Run through Docker Compose:
 
-    docker compose run --rm integration
+    docker compose run --rm python-integration
 
 The module is skipped unless ``AGENT_SDK_WRAPPER_RUN_INTEGRATION=1`` is set. Individual
 provider cases are skipped when their API key is missing.
@@ -81,7 +81,7 @@ def live_release_signal(topic: str) -> str:
     """Return a deterministic release-readiness signal for a topic."""
 
     if topic.lower() == "docker":
-        return "docker compose integration path is required"
+        return "docker compose run --rm python-integration path is required"
     return f"{topic} requires follow-up"
 
 

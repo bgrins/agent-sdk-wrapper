@@ -21,15 +21,16 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
-WORKDIR /workspace
+WORKDIR /workspace/packages/python
 
 # Keep dependency installation cached unless pyproject.toml or uv.lock changes.
-COPY pyproject.toml uv.lock ./
+COPY packages/python/pyproject.toml packages/python/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --extra dev --no-install-project
 RUN uv run --no-sync python -c 'from codex_cli_bin import bundled_codex_path; import subprocess; subprocess.run([str(bundled_codex_path()), "--version"], check=True)'
 
-COPY . .
+COPY packages/python/ ./
+COPY docs/ /workspace/docs/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --extra dev
 

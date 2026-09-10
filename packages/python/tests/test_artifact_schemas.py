@@ -33,7 +33,11 @@ from agent_sdk_wrapper.providers import base
 from agent_sdk_wrapper.providers import openai_provider as op_mod
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_DIR = ROOT / "docs" / "schemas"
+SCHEMA_DIR = next(
+    parent / "docs" / "schemas"
+    for parent in Path(__file__).resolve().parents
+    if (parent / "docs" / "schemas").is_dir()
+)
 TRACE_FIXTURES = ROOT / "tests" / "fixtures" / "traces"
 
 
@@ -118,8 +122,7 @@ def test_trace_schema_covers_every_event_type() -> None:
 
     schema = load_schema("agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json")
     branches = {
-        ref["$ref"].removeprefix("#/$defs/")
-        for ref in schema["properties"]["event"]["oneOf"]
+        ref["$ref"].removeprefix("#/$defs/") for ref in schema["properties"]["event"]["oneOf"]
     }
     assert {event.type for event in get_args(AgentEvent)} == branches
 

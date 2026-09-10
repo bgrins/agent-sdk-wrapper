@@ -49,7 +49,11 @@ from agent_sdk_wrapper.providers.base import ProviderAdapter  # noqa: E402
 
 DEFAULT_OFFLINE_DIR = ROOT / "tests" / "fixtures" / "traces"
 DEFAULT_LIVE_ROOT = ROOT / "results" / "fixture-runs"
-SCHEMA_DIR = ROOT / "docs" / "schemas"
+SCHEMA_DIR = next(
+    parent / "docs" / "schemas"
+    for parent in Path(__file__).resolve().parents
+    if (parent / "docs" / "schemas").is_dir()
+)
 TRACE_SCHEMA_NAME = "agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json"
 BASE_TIME = datetime(2026, 5, 31, tzinfo=UTC)
 OFFLINE_FIXTURE_NAMES = {
@@ -458,8 +462,7 @@ async def generate_live_fixtures(
         print("Skipped live providers: " + "; ".join(skipped), file=sys.stderr)
     if skipped and require_all:
         raise RuntimeError(
-            "missing credentials for selected live fixture providers: "
-            + "; ".join(skipped)
+            "missing credentials for selected live fixture providers: " + "; ".join(skipped)
         )
     if not artifacts:
         raise RuntimeError("no live fixtures were generated")

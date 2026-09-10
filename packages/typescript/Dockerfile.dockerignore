@@ -1,0 +1,23 @@
+# Build from the repository root; include only TypeScript and shared contracts.
+**
+!package.json
+!package-lock.json
+!.npmrc
+!packages/
+!packages/typescript/
+!packages/typescript/**
+!docs/
+!docs/fixtures/
+!docs/fixtures/**
+!docs/schemas/
+!docs/schemas/**
+
+**/node_modules/
+**/dist/
+**/.test-dist/
+**/coverage/
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+**/.claude/
+**/results/

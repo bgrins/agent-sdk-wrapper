@@ -174,7 +174,7 @@ def _fake_structured_output(schema: type):
                     "title": "Document fixture promotion",
                     "owner_role": "docs",
                     "details": "Keep the fixture workflow visible in README.",
-                    "validation": "Run docker compose run --rm fixtures.",
+                    "validation": "Run docker compose run --rm python-fixtures.",
                 }
             ],
             validation_steps=["Run the offline fixture check."],

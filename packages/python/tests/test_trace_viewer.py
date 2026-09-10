@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = next(
+    parent
+    for parent in Path(__file__).resolve().parents
+    if (parent / "docs" / "trace-viewer.html").is_file()
+)
 VIEWER = ROOT / "docs" / "trace-viewer.html"
 
 
@@ -97,9 +101,7 @@ def test_trace_viewer_has_conversation_first_information_architecture() -> None:
     for marker in tab_markers:
         assert marker in html
 
-    assert html.index('data-view="conversation-view"') < html.index(
-        'data-view="timeline-view"'
-    )
+    assert html.index('data-view="conversation-view"') < html.index('data-view="timeline-view"')
     assert 'id="conversation"' in html
     assert 'id="events"' in html
     assert ".tool-panel" in html

@@ -23,7 +23,7 @@ post-verification branch writes a rollout/fix plan instead of a diff.
 Run it with:
 
 ```bash
-docker compose run --rm example-auditor-style
+docker compose run --rm python-example-auditor-style
 ```
 
 Outputs land under

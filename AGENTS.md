@@ -2,20 +2,35 @@
 
 Repo-specific invariants for editing `agent-sdk-wrapper`.
 
-- Keep provider SDK imports inside `src/agent_sdk_wrapper/providers/`.
+- Keep provider SDK imports inside `packages/python/src/agent_sdk_wrapper/providers/`.
+  TypeScript production SDK imports belong in `packages/typescript/src/providers/`;
+  adapter tests may import SDK types to check fixtures against pinned declarations.
 - Keep Docker Ubuntu-based. Do not switch to Alpine/musl.
-- Do not install Node/npm, Claude Code, or a standalone Codex CLI in Docker;
-  runtimes come from the Python SDK packages.
+- Keep the Python Dockerfile free of Node/npm, Claude Code, and standalone Codex
+  CLI installs; its runtimes come from Python SDK packages. The separate
+  `packages/typescript/Dockerfile` supplies Node/npm and obtains runtimes from npm SDKs.
+  Both final images stay Ubuntu-based. TypeScript has its own build-context
+  ignore file so host node_modules and generated artifacts cannot enter it.
 - Keep `.env`, `.claude/`, `results/`, caches, and generated artifacts out of
   git.
+- Use Bash or Node for shared repository automation. Keep Python-specific
+  tooling under `packages/python/`.
+- Prefix Compose services with `python-` or `typescript-`; neither language
+  gets unprefixed services or a default profile.
 - Provider/model resolution belongs in the wrapper. `codex` is an alias for the
   `openai` adapter.
 - Unsupported provider combinations should raise `ConfigError`, not silently
   degrade.
 - `Agent.check_runtime()` validates the request before checking provider
   availability.
-- Default tests must stay offline. Live tests run through Docker Compose with
-  provider credentials.
+- Default tests must stay offline. Python live tests run through Docker Compose
+  with provider credentials. The native TypeScript smoke tests run on a Node host
+  or the explicit `typescript-integration` Compose service
+  only with `AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1` and provider credentials;
+  do not add Node to the Python Docker image.
+- Keep TypeScript dependencies minimal. Use Node's test runner. Select stable
+  releases from registry metadata after a seven-day cooldown, check advisories,
+  and commit exact SDK pins and the npm lockfile. Keep install scripts disabled.
 - `TokenUsage` fields mean the same thing across providers: `input_tokens`
   includes cache, `output_tokens` includes reasoning. Adapters normalize; they
   do not pass provider counters through raw.
@@ -23,6 +38,10 @@ Repo-specific invariants for editing `agent-sdk-wrapper`.
   `docs/schemas/agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json`, a case
   in `testing.event_from_dict`, and rendering in `docs/trace-viewer.html`.
   `test_trace_schema_covers_every_event_type` enforces the first.
+  The TypeScript event vocabulary is a subset of this same schema. Shared
+  fixtures in `docs/fixtures/native-twin-v1.json` are replayed by both suites.
+  TypeScript's `test/schema.test.ts` checks exhaustive event/field coverage;
+  `npm run test:package` verifies the packed public API with offline adapters.
 - A provider error that never raises still needs classifying. Map the terminal
   state onto a specific `error_type` (`max_turns`, `refused`,
   `transient_api_error`) and set `retryable`; do not emit a generic error.

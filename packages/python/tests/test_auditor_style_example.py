@@ -95,7 +95,7 @@ def test_auditor_style_prompts_chain_structured_outputs() -> None:
                 validation="Run examples offline.",
             )
         ],
-        validation_steps=["Run docker compose run --rm fixtures"],
+        validation_steps=["Run docker compose run --rm python-fixtures"],
         traceability=["O1"],
     )
 

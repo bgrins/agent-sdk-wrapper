@@ -65,15 +65,15 @@ def test_json_schema_optional_unwrap():
     assert schema["properties"]["x"] == {"type": "integer"}
 
 
-def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
+async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
     """The generated stdio server must actually start under the installed mcp.
 
     It runs in a subprocess, so an import that no longer resolves (mcp 2.x
     renamed FastMCP to MCPServer) surfaces only as a handshake failure inside a
     live Codex run. Driving the real protocol here catches it offline.
     """
+    import asyncio
     import json
-    import subprocess
     import sys
 
     from agent_sdk_wrapper.providers.openai_provider import _tool_entry, _tool_server_script
@@ -102,16 +102,49 @@ def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
     ]
-    proc = subprocess.run(
-        [sys.executable, str(script)],
-        input="\n".join(json.dumps(r) for r in requests) + "\n",
-        capture_output=True,
-        text=True,
-        timeout=60,
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(script),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
         cwd=tmp_path,
     )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    stderr_task = asyncio.create_task(proc.stderr.read())
 
-    responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-    assert responses, f"server produced no output; stderr:\n{proc.stderr}"
-    listed = next(r for r in responses if r.get("id") == 2)
+    async def send(request):
+        proc.stdin.write((json.dumps(request) + "\n").encode())
+        await proc.stdin.drain()
+
+    async def receive(request_id):
+        while line := await proc.stdout.readline():
+            response = json.loads(line)
+            if response.get("id") == request_id:
+                assert "error" not in response, response
+                return response
+        stderr = (await stderr_task).decode(errors="replace")
+        raise AssertionError(f"server closed before response {request_id}; stderr:\n{stderr}")
+
+    try:
+        async with asyncio.timeout(60):
+            # Await initialization before announcing readiness, and leave stdin
+            # open until tools/list completes. Sending everything then EOF races
+            # the MCP server's shutdown against its response tasks.
+            await send(requests[0])
+            initialized = await receive(1)
+            assert "tools" in initialized["result"]["capabilities"]
+            await send(requests[1])
+            await send(requests[2])
+            listed = await receive(2)
+    finally:
+        proc.stdin.close()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+        stderr = (await stderr_task).decode(errors="replace")
+
+    assert proc.returncode == 0, stderr
     assert [tool["name"] for tool in listed["result"]["tools"]] == ["add"]

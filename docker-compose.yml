@@ -1,11 +1,13 @@
 name: agent-sdk-wrapper
 
-x-agent-sdk-wrapper-dev: &agent-sdk-wrapper-dev
+x-agent-sdk-wrapper-python: &agent-sdk-wrapper-python
+  profiles: [python]
   build:
     context: .
+    dockerfile: packages/python/Dockerfile
     target: dev
-  image: agent-sdk-wrapper-dev
-  working_dir: /workspace
+  image: agent-sdk-wrapper-python-dev
+  working_dir: /workspace/packages/python
   volumes:
     - .:/workspace
     - uv-cache:/root/.cache/uv
@@ -19,47 +21,74 @@ x-agent-sdk-wrapper-dev: &agent-sdk-wrapper-dev
     UV_LINK_MODE: copy
     UV_PROJECT_ENVIRONMENT: /opt/venv
 
+x-agent-sdk-wrapper-typescript: &agent-sdk-wrapper-typescript
+  profiles: [typescript]
+  build:
+    context: .
+    dockerfile: packages/typescript/Dockerfile
+    target: dev
+  image: agent-sdk-wrapper-typescript-dev
+  working_dir: /workspace
+
 services:
-  dev:
-    <<: *agent-sdk-wrapper-dev
+  typescript-verify:
+    <<: *agent-sdk-wrapper-typescript
+    network_mode: none
+    command: npm run verify
+
+  typescript-integration:
+    <<: *agent-sdk-wrapper-typescript
+    profiles: [integration]
+    command: npm run test:integration
+    environment:
+      AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION: ${AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION:-0}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL: ${AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL:-}
+      AGENT_SDK_WRAPPER_TS_OPENAI_MODEL: ${AGENT_SDK_WRAPPER_TS_OPENAI_MODEL:-}
+
+  python-dev:
+    <<: *agent-sdk-wrapper-python
     command: bash
     stdin_open: true
     tty: true
 
-  test:
-    <<: *agent-sdk-wrapper-dev
+  python-test:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync pytest
 
-  lint:
-    <<: *agent-sdk-wrapper-dev
+  python-lint:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync ruff check
 
-  verify:
-    <<: *agent-sdk-wrapper-dev
+  python-verify:
+    <<: *agent-sdk-wrapper-python
+    network_mode: none
     command: sh -lc 'uv run --no-sync ruff check && uv run --no-sync pytest'
 
-  integration:
-    <<: *agent-sdk-wrapper-dev
+  python-integration:
+    <<: *agent-sdk-wrapper-python
+    profiles: [integration]
     command: sh -lc 'AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 uv run --no-sync pytest -m integration -s'
 
-  fixtures:
-    <<: *agent-sdk-wrapper-dev
+  python-fixtures:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python scripts/regenerate_fixtures.py --check
 
-  fixtures-live:
-    <<: *agent-sdk-wrapper-dev
+  python-fixtures-live:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python scripts/regenerate_fixtures.py --live
 
-  fixtures-live-promote:
-    <<: *agent-sdk-wrapper-dev
+  python-fixtures-live-promote:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python scripts/regenerate_fixtures.py --live --promote-live
 
-  examples-offline:
-    <<: *agent-sdk-wrapper-dev
+  python-examples-offline:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync pytest tests/test_examples_offline.py
 
-  examples:
-    <<: *agent-sdk-wrapper-dev
+  python-examples:
+    <<: *agent-sdk-wrapper-python
     command: >
       sh -lc 'set -e;
       for example in run_basic stream structured_output custom_tools subagent auditor_style; do
@@ -67,32 +96,32 @@ services:
       uv run --no-sync python "examples/$${example}.py";
       done'
 
-  example-run-basic:
-    <<: *agent-sdk-wrapper-dev
+  python-example-run-basic:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/run_basic.py
 
-  example-run-basic-codex:
-    <<: *agent-sdk-wrapper-dev
+  python-example-run-basic-codex:
+    <<: *agent-sdk-wrapper-python
     command: sh -lc 'PROVIDER=codex MODEL= uv run --no-sync python examples/run_basic.py'
 
-  example-stream:
-    <<: *agent-sdk-wrapper-dev
+  python-example-stream:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/stream.py
 
-  example-structured-output:
-    <<: *agent-sdk-wrapper-dev
+  python-example-structured-output:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/structured_output.py
 
-  example-custom-tools:
-    <<: *agent-sdk-wrapper-dev
+  python-example-custom-tools:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/custom_tools.py
 
-  example-subagent:
-    <<: *agent-sdk-wrapper-dev
+  python-example-subagent:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/subagent.py
 
-  example-auditor-style:
-    <<: *agent-sdk-wrapper-dev
+  python-example-auditor-style:
+    <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/auditor_style.py
 
 volumes:
