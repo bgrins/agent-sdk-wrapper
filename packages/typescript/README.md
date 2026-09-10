@@ -3,7 +3,7 @@
 A native Node/TypeScript twin of the Python abstraction. The adapters call
 `@anthropic-ai/claude-agent-sdk` and `@openai/codex-sdk` directly. Their packaged
 native runtimes execute locally; there is no Python process, service, or
-cross-language RPC. Requires Node 22 or later; ESM only.
+cross-language RPC. Requires Node 22.14+ in the 22.x line, or Node 24+; ESM only.
 
 This is the first vertical slice, not full Python feature parity. In particular,
 **host-defined callable tools and structured output are not implemented**.

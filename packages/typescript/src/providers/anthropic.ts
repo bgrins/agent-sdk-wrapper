@@ -1,4 +1,7 @@
-import { createRequire } from "node:module";
+import { constants } from "node:fs";
+import { access } from "node:fs/promises";
+import { findPackageJSON } from "node:module";
+import { dirname, join } from "node:path";
 import type {
   Options,
   SDKMessage,
@@ -148,14 +151,27 @@ export class AnthropicAdapter implements ProviderAdapter {
         req.providerOptions?.provider === "anthropic"
           ? req.providerOptions.options?.pathToClaudeCodeExecutable
           : undefined;
-      const require = createRequire(import.meta.url);
-      const suffix = process.platform === "win32" ? "claude.exe" : "claude";
-      await executable(
-        override ??
-          require.resolve(
-            `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/${suffix}`,
-          ),
-      );
+      if (override) {
+        // Match the pinned SDK's interpreter-launched entrypoint extensions.
+        // These files need to be readable, not directly executable.
+        if (
+          [".js", ".mjs", ".tsx", ".ts", ".jsx"].some((ext) =>
+            override.endsWith(ext),
+          )
+        )
+          await access(override, constants.R_OK);
+        else await executable(override);
+      } else {
+        // The runtime belongs to the SDK's dependency scope, which may live
+        // behind a package-manager symlink and need not be hoisted beside us.
+        const manifest = findPackageJSON(
+          `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`,
+          import.meta.resolve("@anthropic-ai/claude-agent-sdk"),
+        );
+        if (!manifest) throw new Error("Claude platform package not found");
+        const suffix = process.platform === "win32" ? "claude.exe" : "claude";
+        await executable(join(dirname(manifest), suffix));
+      }
     } catch (cause) {
       throw new RuntimeUnavailableError(
         "Claude SDK/runtime unavailable; install its platform optional dependency or supply pathToClaudeCodeExecutable",

@@ -1,8 +1,9 @@
 # Validation
 
 Run these commands from a repository checkout, at its root. TypeScript requires
-Node 22+ and npm; Python uses the existing uv environment. Default tests do not
-need credentials. No command below publishes either package.
+Node 22.14+ in the 22.x line (or Node 24+) and npm; Python uses the existing uv
+environment. Default tests do not need credentials. No command below publishes
+either package.
 
 The packages are siblings under `packages/python/` and `packages/typescript/`.
 Shared schemas, fixtures and the viewer remain under root `docs/`. Python's sdist
@@ -34,6 +35,14 @@ repository. The two TypeScript live cases (including the Compose service) and
 Python live module skipped without live opt-in.
 The Python MCP handshake test was corrected to await initialize/list responses
 before closing stdin, eliminating a shutdown race observed during this pass.
+
+The Claude availability review adds three offline regressions (55 TypeScript
+tests total): an isolated SDK dependency tree with a pnpm-style symlink,
+readable interpreter scripts without executable bits, and native binary
+permission checks. Availability checks do not launch a query. Runtime lookup
+uses Node's [findPackageJSON](https://nodejs.org/download/release/v22.14.0/docs/api/module.html#modulefindpackagejsonspecifier-base)
+from the SDK's ESM entrypoint; that API sets the Node 22.14 minimum. No resolver
+dependency or experimental Node flag is needed.
 
 | Check | What it establishes |
 |---|---|
