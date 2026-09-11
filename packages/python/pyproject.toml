@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     "claude-agent-sdk==0.2.152",
-    "openai-codex==0.147.0",
+    "openai-codex==0.154.0",
     "pydantic>=2.12,<3",
 ]
 

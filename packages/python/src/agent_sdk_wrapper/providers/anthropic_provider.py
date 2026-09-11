@@ -291,11 +291,12 @@ class AnthropicProvider(ProviderAdapter):
                     if not seen_session and message.session_id:
                         seen_session = True
                         yield SessionInfo(id=message.session_id)
-                    if message.usage:
+                    if message.model_usage or message.usage:
                         yield _usage_event(
-                            message.usage,
+                            message.usage or {},
                             message.total_cost_usd,
                             requests=message.num_turns,
+                            model_usage=message.model_usage,
                         )
                     if req.output_schema is not None and message.structured_output is not None:
                         yield StructuredOutput(
@@ -530,16 +531,36 @@ def _anthropic_tool_names(servers: list[McpServer], *, enabled: bool) -> list[st
     return out
 
 
-def _usage_event(usage: dict[str, Any], cost: float | None, *, requests: int = 0) -> Usage:
+def _usage_event(
+    usage: dict[str, Any],
+    cost: float | None,
+    *,
+    requests: int = 0,
+    model_usage: dict[str, Any] | None = None,
+) -> Usage:
     """Normalize an SDK usage mapping onto :class:`TokenUsage`.
 
     Anthropic reports ``input_tokens`` net of cache, with the cached portion in
     its own counters, so the cache counts are folded back in to match the
     convention the wrapper publishes (and what the Codex adapter already
-    emits). The SDK carries no request count in the usage mapping, so the
-    result's turn count stands in for it.
+    emits). Prefer model_usage, which includes subagents and auxiliary calls;
+    the legacy usage field covers only the main loop. Never add both together.
+    The result's main-loop turn count remains a proxy for requests, not a count
+    of all requests made by subagents.
     """
 
+    raw = usage
+    if model_usage:
+        raw = {"usage": usage, "model_usage": model_usage}
+        usage = {
+            normalized: sum(int(model.get(native, 0) or 0) for model in model_usage.values())
+            for normalized, native in (
+                ("input_tokens", "inputTokens"),
+                ("output_tokens", "outputTokens"),
+                ("cache_read_input_tokens", "cacheReadInputTokens"),
+                ("cache_creation_input_tokens", "cacheCreationInputTokens"),
+            )
+        }
     cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
     cache_write = int(usage.get("cache_creation_input_tokens", 0) or 0)
     inp = int(usage.get("input_tokens", 0) or 0) + cache_read + cache_write
@@ -554,5 +575,5 @@ def _usage_event(usage: dict[str, Any], cost: float | None, *, requests: int = 0
             cache_write_tokens=cache_write,
         ),
         cost_usd=cost,
-        raw=usage,
+        raw=raw,
     )

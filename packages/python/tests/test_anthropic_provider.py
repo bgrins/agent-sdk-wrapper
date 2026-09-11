@@ -302,6 +302,63 @@ def test_anthropic_usage_folds_cache_into_input_and_counts_requests():
     assert event.cost_usd == 0.25
 
 
+@pytest.mark.parametrize("legacy_usage", [None, {"input_tokens": 100, "output_tokens": 50}])
+async def test_anthropic_run_counts_subagent_models_without_adding_main_loop_twice(
+    monkeypatch, legacy_usage
+):
+    import claude_agent_sdk
+
+    from agent_sdk_wrapper import Agent, TokenUsage
+
+    models = {
+        "claude-main": {
+            "inputTokens": 100,
+            "outputTokens": 50,
+            "cacheReadInputTokens": 1000,
+            "cacheCreationInputTokens": 200,
+            "costUSD": 1.5,
+        },
+        "claude-subagent": {
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "cacheReadInputTokens": 100,
+            "cacheCreationInputTokens": 0,
+            "costUSD": 0.01,
+        },
+    }
+
+    async def fake_query(**kwargs):
+        yield _result(usage=legacy_usage, model_usage=models, total_cost_usd=1.51)
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    result = await Agent(provider="anthropic").run("Count main and subagent usage")
+    assert result.status == "success"
+    assert result.usage == TokenUsage(
+        input_tokens=1410,
+        output_tokens=55,
+        total_tokens=1465,
+        cache_read_tokens=1100,
+        cache_write_tokens=200,
+        requests=3,
+    )
+    assert result.cost_usd == 1.51
+    usage_events = [env.event for env in result.events if env.event.type == "usage"]
+    assert len(usage_events) == 1
+    assert usage_events[0].raw["model_usage"] == models
+
+
+def test_anthropic_sparse_model_usage_is_authoritative_even_with_zero_counts():
+    from agent_sdk_wrapper.providers.anthropic_provider import _usage_event
+
+    event = _usage_event(
+        {"input_tokens": 999},
+        0.0,
+        model_usage={"claude-main": {"outputTokens": None}},
+    )
+    assert event.usage.total_tokens == 0
+    assert event.cost_usd == 0.0
+
+
 def test_anthropic_max_turns_result_reports_max_turns_not_a_generic_error():
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 

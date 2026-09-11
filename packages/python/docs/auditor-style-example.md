@@ -1,33 +1,14 @@
-# Auditor-Style Example Notes
+# Multi-stage audit example
 
-`examples/auditor_style.py` exercises a structured auditor workflow using
-`agent-sdk-wrapper`.
+`examples/auditor_style.py` runs planning, analysis, verification and fix-plan
+stages using separate agents, structured output and read-only MCP tools.
 
-The example covers:
+From the repository root:
 
-- multiple role-specific `Agent` instances
-- structured output contracts between stages
-- a verifier-approved follow-up stage that produces a non-code fix plan
-- provider/model switching through `PROVIDER` and `MODEL`
-- read-only stdio MCP tools for project facts and artifact policy
-- per-stage `max_turns`
-- top-level workflow event and usage aggregation
-- per-stage `trace.jsonl`, `manifest.json`, and `result.json`
-- top-level JSON artifacts for plan, analysis, verification, fix plan, context,
-  stats, and final report
-
-The example intentionally does not recreate the downstream audit MCP harness or
-write source patches. Its MCP server is a small read-only facts source, and the
-post-verification branch writes a rollout/fix plan instead of a diff.
-
-Run it with:
-
-```bash
+```sh
 docker compose run --rm python-example-auditor-style
 ```
 
-Outputs land under
-`results/<provider>/auditor_style/<timestamp>/artifacts/`.
-
-The stable replay surface is still `manifest.json` plus `trace.jsonl`.
-Provider side files are diagnostic only.
+Set `PROVIDER` and optionally `MODEL`; provider credentials are required.
+Outputs are under `packages/python/results/<provider>/auditor_style/<timestamp>/artifacts/`,
+including per-stage traces and a final report. Open them with `docs/trace-viewer.html`.

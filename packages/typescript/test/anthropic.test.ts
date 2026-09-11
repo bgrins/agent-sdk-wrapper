@@ -181,7 +181,7 @@ test("Claude maps completed blocks, hidden reasoning, tool results, final usage 
     text,
   );
 });
-test("Claude uses modelUsage including auxiliary calls and already-inclusive thinking tokens", async () => {
+test("Claude sums main and subagent modelUsage without adding main-loop usage or thinking twice", async () => {
   const { agent } = harness([
     result({
       modelUsage: {
@@ -196,19 +196,32 @@ test("Claude uses modelUsage including auxiliary calls and already-inclusive thi
           contextWindow: 1000,
           maxOutputTokens: 100,
         },
+        "claude-subagent": {
+          inputTokens: 5,
+          outputTokens: 3,
+          thinkingTokens: 1,
+          cacheReadInputTokens: 6,
+          cacheCreationInputTokens: 2,
+          webSearchRequests: 0,
+          costUSD: 0.01,
+          contextWindow: 1000,
+          maxOutputTokens: 100,
+        },
       },
+      total_cost_usd: 0.04,
     }),
   ]);
   const run = await agent.run("usage");
   assert.deepEqual(run.usage, {
-    input_tokens: 34,
-    output_tokens: 7,
-    total_tokens: 41,
-    cache_read_tokens: 20,
-    cache_write_tokens: 4,
-    reasoning_output_tokens: 3,
+    input_tokens: 47,
+    output_tokens: 10,
+    total_tokens: 57,
+    cache_read_tokens: 26,
+    cache_write_tokens: 6,
+    reasoning_output_tokens: 4,
     requests: 0,
   });
+  assert.equal(run.cost_usd, 0.04);
   assert.equal(run.final_text, "answer");
   assert.deepEqual(
     run.events

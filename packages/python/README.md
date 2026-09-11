@@ -1,214 +1,73 @@
-# Python guide
+# Python API
 
-Run Python commands from `packages/python/` in a repository checkout. Run
-Docker Compose from the repository root. See the [root README](../../README.md)
-for the package design and TypeScript implementation.
+Python 3.12+. Calls the native Claude Agent SDK or Codex SDK directly.
+Run `uv sync --extra dev` from this directory to install locally.
 
-## Install
-
-Requires Python `>=3.12`.
-
-```bash
-uv sync
-uv sync --extra dev
-```
-
-The package exposes the `agent-sdk-wrapper` console script.
-
-## Quick Start
+## Run and stream
 
 ```python
 import asyncio
 from agent_sdk_wrapper import Agent
 
-async def main() -> None:
-    agent = Agent(model="claude-haiku-4-5")
-    result = await agent.run("Say hello.")
+async def main():
+    agent = Agent(provider="codex", continue_session=True)  # or "anthropic"
+    result = await agent.run("Remember ALPHA42. Reply READY.")
+    if result.status != "success":
+        raise RuntimeError(result.error)
     print(result.final_text)
 
-    async for env in agent.stream("Count to three."):
-        print(env.to_json())
+    async for event in agent.stream("Repeat the token."):
+        print(event.to_json())
 
 asyncio.run(main())
 ```
 
-Provider can be explicit or inferred from common model names:
+Supply provider credentials through the native SDK's environment or login.
+To resume in another process, save `result.session_id` and pass it as
+`Agent(provider=..., session_id=...)` with the same working directory.
 
-```python
-Agent(provider="anthropic", model="claude-haiku-4-5")
-Agent(provider="openai", model="gpt-5")
-Agent(provider="codex")          # alias for provider="openai"
-Agent(model="codex:gpt-5")       # provider:model syntax
-```
+## Options
 
-## Core Features
+Constructor keywords are defaults; `run()` and `stream()` accept per-call overrides.
+`RunRequest` is the resolved request passed to adapters.
 
-| Feature | Anthropic | OpenAI / Codex |
-|---|---|---|
-| `run()` / `stream()` | Yes | Yes |
-| Text, thinking, tools, usage | Normalized events | Normalized events |
-| Subagent lifecycle | `Task*` messages | Collab-agent action items |
-| Context compaction | `compact_boundary` | `contextCompaction` item |
-| Python callable tools | In-process MCP server | Temporary stdio MCP server |
-| External MCP servers | stdio/http | stdio/http via Codex config |
-| Subagents | Claude `AgentDefinition` | Codex multi-agent config |
-| Structured output | Native structured output + validation | Codex `outputSchema` + validation |
-| `max_turns` | Native option | Wrapper-enforced over completed action items |
-| Session resume | Claude resume | Codex thread resume |
-| Provider-native event sidecar | Yes | Yes |
-
-Provider-specific controls stay provider-specific when there is no reliable
-cross-provider meaning. Unsupported combinations raise `ConfigError` rather
-than being silently ignored.
-
-Important configuration notes:
-
-- `provider="codex"` is an alias for the `openai` adapter.
-- `web_tools=False` disables Claude `WebSearch`/`WebFetch` and Codex
-  `tools.web_search`.
-- Codex rejects `builtin_tools`, provider-native tool filters, non-empty
-  `SubagentDef.tools`, and `SubagentDef.max_turns`.
-- Codex callable tools must be importable or simple enough for
-  `inspect.getsource()`.
-- `Agent.check_runtime()` validates the request before checking provider
-  availability.
-
-### Token Accounting
-
-`TokenUsage` publishes one convention across providers, so the same field
-means the same thing whichever backend ran:
-
-- `input_tokens` counts every prompt token the request billed, cached ones
-  included. Anthropic reports input net of cache, so the adapter folds the
-  cache counters back in.
-- `output_tokens` counts every generated token, reasoning included. Codex
-  reports reasoning apart from output, so the adapter folds it in.
-- `cache_read_tokens`, `cache_write_tokens`, and `reasoning_output_tokens`
-  break out the shares of those two totals. Codex bills no cache writes, so its
-  `cache_write_tokens` stays zero.
-
-Codex reports thread-cumulative totals, so a resumed thread's snapshot already
-covers earlier turns. The adapter subtracts what it already reported and emits
-only the delta. Resuming a thread the adapter never ran — an externally
-supplied `session_id` — starts from an empty baseline, so that first run also
-counts the thread's prior history.
-
-Anthropic reports a dollar cost; Codex does not, so `cost_usd` is `None` for
-Codex runs.
-
-## MCP And Subagents
-
-```python
-from agent_sdk_wrapper import Agent, McpStdioServer, SubagentDef
-
-agent = Agent(
-    model="gpt-5",
-    mcp_servers=[
-        McpStdioServer(
-            name="repo",
-            command="uv",
-            args=["run", "python", "-m", "repo_tools.server"],
-            enabled_tools=["search", "summarize"],
-        )
-    ],
-    subagents={
-        "reviewer": SubagentDef(
-            description="Reviews short code snippets.",
-            prompt="Return a concise review verdict.",
-        )
-    },
-)
-```
-
-## Traces And Artifacts
-
-- `trace_file=...` writes normalized `EventEnvelope` JSONL.
-- `artifacts_dir=...` writes `trace.jsonl`, `manifest.json`, `result.json`,
-  and `provider-events.jsonl`.
-- `provider-events.jsonl` records serialized provider-native SDK messages before
-  wrapper normalization.
-- `on_provider_event=...` receives those provider events live. Use
-  `envelope.message` for the serialized payload or `envelope.raw` for the SDK
-  object.
-- Versioned JSON Schemas live under the repository's shared `docs/schemas/`
-  (also bundled in the Python source distribution).
-- `run_started` records the prompt and system prompt, so a trace is readable
-  without knowing what the run was asked.
-- `docs/trace-viewer.html` is a dependency-free local viewer. Serve the repository
-  root (`python3 -m http.server --directory ../..` from this package) and open `/docs/trace-viewer.html`; it
-  auto-discovers runs under root `/results/`; use **Open Files** for runs under
-  `packages/python/results/`. Opening it as `file://` disables
-  discovery, but the **Open Files** picker still works.
-- `scripts/compare_providers.py` runs matched scenarios (basic, tools,
-  structured, thinking) against both providers so their traces can be compared
-  side by side in the viewer. Live and billed; needs both API keys.
-
-Examples write timestamped artifacts under the gitignored
-`results/<provider>/<example>/<timestamp>/`.
-
-## CLI
-
-```bash
-uv run agent-sdk-wrapper run --provider anthropic --prompt "Say hello" --output text
-uv run agent-sdk-wrapper run --model gpt-5 --prompt "Say hello" --output jsonl
-uv run agent-sdk-wrapper run --config agent-sdk-wrapper.toml --prompt "Audit this change"
-```
-
-Output modes:
-
-| Mode | Output |
+| Options | Purpose |
 |---|---|
-| `jsonl` | one serialized `EventEnvelope` per line |
-| `text` | final assistant text |
-| `json` | serialized `RunResult` |
-| `--stream` | streamed text output |
+| `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings |
+| `tools`, `mcp_servers`, `subagents` | Callable tools, external MCP and subagents |
+| `output_schema` | Validated structured output |
+| `session_id`, `continue_session` | Explicit resume or automatic continuation |
+| `max_retries`, `timeout`, `max_turns` | Retry budget, deadline and action limit |
+| `provider_options`, `extra_options` | Provider-specific settings; unsupported combinations fail |
 
-Longer run definitions can live in TOML or JSON. CLI env/options override
-config values, and repeatable tool filters append to config lists.
+Check `result.status`; runtime errors can produce failed results without raising.
+Use `raise_on_error=True` for `RunFailedError`. `check_runtime()` validates settings
+and runtime availability. `run_sync()` is available outside an event loop.
 
-## Docker
+| Capability | Claude | Codex |
+|---|---|---|
+| Callable tools | In-process MCP | Temporary stdio MCP; functions must be importable or source-extractable |
+| Structured output, external MCP, resume | Supported | Supported |
+| Subagents | Native definitions | Native multi-agent config; per-subagent tools/turn limits rejected |
+| `max_turns` | Native turn limit | Wrapper limit on completed action items |
+| Built-in tool filtering | Native controls | Unsupported; `web_tools` and MCP controls are separate |
 
-The development image is Ubuntu 24.04.
+See [examples](examples/) for tools and structured output, and
+[API differences](../typescript/PARITY.md) for limits shared with TypeScript.
 
-```bash
-docker compose build python-verify
-docker compose run --rm python-verify
-docker compose run --rm python-examples
-docker compose run --rm python-integration    # live; requires credentials
-docker compose run --rm python-fixtures
-```
+## Events and traces
 
-Run individual examples with services such as `python-example-run-basic`,
-`python-example-subagent`, and `python-example-auditor-style`. Set `PROVIDER=codex` or
-`MODEL=...` to switch providers.
+`EventEnvelope` contains `run_id`, `sequence`, `timestamp` and `event`.
+`RunResult` contains status, text, usage/cost, session ID and retained events.
 
-## Tests
+- `on_event`: normalized envelopes.
+- `on_provider_event`: native envelopes; `.raw` is the SDK object, `.message` is serialized.
+- `trace_file`: normalized JSONL.
+- `artifacts_dir`: trace, result, manifest and native-event files.
 
-```bash
-uv run pytest
-docker compose run --rm python-verify
-docker compose run --rm python-integration
-```
+Open root `docs/trace-viewer.html` and select **Open Files** or **Open Artifact Directory**.
+Claude token totals include subagents via `model_usage`; `requests` remains a
+main-loop turn-count proxy. Codex cost is unavailable. [Accounting limits](../typescript/PARITY.md).
 
-Default tests are offline. Live integration tests require
-`AGENT_SDK_WRAPPER_RUN_INTEGRATION=1` and provider credentials; Docker Compose
-sets the integration flag for the `python-integration` service.
-
-Downstream projects can use fake providers for offline tests:
-
-```python
-from agent_sdk_wrapper import Agent, Text, install_fake_providers
-
-def test_agent_flow(monkeypatch):
-    seen = []
-    install_fake_providers(
-        monkeypatch,
-        events=lambda req: [Text(text=f"prompt={req.prompt}")],
-        seen_requests=seen,
-    )
-
-    result = Agent(provider="codex").run_sync("hello")
-
-    assert result.final_text == "prompt=hello"
-    assert seen[0].provider == "openai"
-```
+CLI: `uv run agent-sdk-wrapper run --provider codex --prompt "Say hello" --output jsonl`.
+Run tests with `uv run pytest`; see [validation](../typescript/VALIDATION.md) for Compose and live tests.
