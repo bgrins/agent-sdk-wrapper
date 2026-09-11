@@ -1,0 +1,283 @@
+[
+  {
+    "run_id": "contract-success",
+    "provider": "openai",
+    "model": "gpt-test",
+    "status": "success",
+    "ended_reason": "success",
+    "final_text": "Hello world",
+    "structured_output": null,
+    "usage": {
+      "input_tokens": 20,
+      "output_tokens": 7,
+      "total_tokens": 27,
+      "cache_read_tokens": 5,
+      "cache_write_tokens": 2,
+      "reasoning_output_tokens": 3,
+      "requests": 0
+    },
+    "cost_usd": null,
+    "duration_ms": 0,
+    "session_id": "session-contract",
+    "artifacts_dir": null,
+    "error": null,
+    "events": [
+      {
+        "run_id": "contract-success",
+        "sequence": 0,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "run_started",
+          "provider": "openai",
+          "model": "gpt-test",
+          "prompt": "contract question"
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 1,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "session_info",
+          "id": "session-contract"
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 2,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "thinking",
+          "text": "",
+          "redacted_bytes": 3
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 3,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "tool_call",
+          "id": "call-1",
+          "name": "read",
+          "input": {
+            "path": "file"
+          }
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 4,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "tool_result",
+          "id": "call-1",
+          "name": "read",
+          "output": "contents",
+          "is_error": false
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 5,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "text",
+          "text": "Hello "
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 6,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "text",
+          "text": "world"
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 7,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "usage",
+          "usage": {
+            "input_tokens": 20,
+            "output_tokens": 7,
+            "total_tokens": 27,
+            "cache_read_tokens": 5,
+            "cache_write_tokens": 2,
+            "reasoning_output_tokens": 3,
+            "requests": 0
+          }
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 8,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "warning",
+          "message": "Native detail omitted"
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 9,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "run_finished",
+          "status": "success",
+          "ended_reason": "success",
+          "duration_ms": 0
+        }
+      }
+    ]
+  },
+  {
+    "run_id": "contract-failure",
+    "provider": "openai",
+    "model": "gpt-test",
+    "status": "failure",
+    "ended_reason": "max_turns",
+    "final_text": "Hello world",
+    "structured_output": null,
+    "usage": {
+      "input_tokens": 20,
+      "output_tokens": 7,
+      "total_tokens": 27,
+      "cache_read_tokens": 5,
+      "cache_write_tokens": 2,
+      "reasoning_output_tokens": 3,
+      "requests": 0
+    },
+    "cost_usd": null,
+    "duration_ms": 0,
+    "session_id": "session-contract",
+    "artifacts_dir": null,
+    "error": "Turn limit",
+    "events": [
+      {
+        "run_id": "contract-failure",
+        "sequence": 0,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "run_started",
+          "provider": "openai",
+          "model": "gpt-test",
+          "prompt": "contract question"
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 1,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "session_info",
+          "id": "session-contract"
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 2,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "thinking",
+          "text": "",
+          "redacted_bytes": 3
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 3,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "tool_call",
+          "id": "call-1",
+          "name": "read",
+          "input": {
+            "path": "file"
+          }
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 4,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "tool_result",
+          "id": "call-1",
+          "name": "read",
+          "output": "contents",
+          "is_error": false
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 5,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "text",
+          "text": "Hello "
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 6,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "text",
+          "text": "world"
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 7,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "usage",
+          "usage": {
+            "input_tokens": 20,
+            "output_tokens": 7,
+            "total_tokens": 27,
+            "cache_read_tokens": 5,
+            "cache_write_tokens": 2,
+            "reasoning_output_tokens": 3,
+            "requests": 0
+          }
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 8,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "warning",
+          "message": "Native detail omitted"
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 9,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "error",
+          "message": "Turn limit",
+          "error_type": "max_turns",
+          "retryable": false
+        }
+      },
+      {
+        "run_id": "contract-failure",
+        "sequence": 10,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "run_finished",
+          "status": "failure",
+          "ended_reason": "max_turns",
+          "duration_ms": 0
+        }
+      }
+    ]
+  }
+]

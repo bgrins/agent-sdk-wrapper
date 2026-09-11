@@ -1,46 +1,37 @@
-# Agent Notes
+# Agent notes
 
-Repo-specific invariants for editing `agent-sdk-wrapper`.
-
-- Keep provider SDK imports inside `src/agent_sdk_wrapper/providers/`.
-- Keep Docker Ubuntu-based. Do not switch to Alpine/musl.
-- Do not install Node/npm, Claude Code, or a standalone Codex CLI in Docker;
-  runtimes come from the Python SDK packages.
-- Keep `.env`, `.claude/`, `results/`, caches, and generated artifacts out of
-  git.
-- Provider/model resolution belongs in the wrapper. `codex` is an alias for the
-  `openai` adapter.
-- Unsupported provider combinations should raise `ConfigError`, not silently
-  degrade.
-- `Agent.check_runtime()` validates the request before checking provider
-  availability.
-- Default tests must stay offline. Live tests run through Docker Compose with
-  provider credentials.
-- `TokenUsage` fields mean the same thing across providers: `input_tokens`
-  includes cache, `output_tokens` includes reasoning. Adapters normalize; they
-  do not pass provider counters through raw.
-- Every member of the `AgentEvent` union needs a branch in
-  `docs/schemas/agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json`, a case
-  in `testing.event_from_dict`, and rendering in `docs/trace-viewer.html`.
-  `test_trace_schema_covers_every_event_type` enforces the first.
-- A provider error that never raises still needs classifying. Map the terminal
-  state onto a specific `error_type` (`max_turns`, `refused`,
-  `transient_api_error`) and set `retryable`; do not emit a generic error.
-- A signal-killed runtime raises `ProcessTerminatedError`, never
-  `TransientError`. Retrying in-place only burns the shutdown window.
-- The Codex callable-tool server is generated source run in a subprocess, so
-  offline unit tests do not import it. Changing `_tool_server_script()` or
-  bumping `mcp` needs `test_codex_tool_server_script_completes_an_mcp_handshake`
-  to pass; it drives the real stdio protocol. `mcp` 2.x renamed `FastMCP` to
-  `MCPServer`, and the script supports both.
-- `RunStarted` carries the prompt and system prompt. A trace that records every
-  answer and none of the questions cannot be read on its own.
-- Neither SDK ships fault injection. To exercise error paths, point the runtime
-  at a local mock: Anthropic via `env={"ANTHROPIC_BASE_URL": ...}` (forwarded to
-  the spawned CLI), Codex via a `model_providers.<id>.base_url` config override.
-  The CLI retries 429/5xx internally, so a retryable status stalls rather than
-  surfacing; use a 4xx to reach the terminal-error path.
-- Reasoning is on by default for both providers (Anthropic `thinking`
-  adaptive/summarized, Codex `summary="auto"`). A reasoning item that exposes no
-  text still emits a `Thinking` event: the tokens were billed, so a dropped item
-  would make a run that reasoned look like one that did not.
+- Keep docs short: API usage, limits and commands. Never mention downstream
+  projects or narrate development history.
+- Python SDK imports belong in `packages/python/src/agent_sdk_wrapper/providers/`;
+  TypeScript SDK imports belong in `packages/typescript/src/providers/`.
+  Adapter tests may import SDK types.
+- Keep final Docker images Ubuntu-based. Python gets runtimes from Python SDKs;
+  do not install Node/npm or standalone CLIs there. TypeScript has its own image
+  and build-context ignore file; exclude host node_modules and generated files.
+- Keep `.env`, `.claude/`, `results/`, caches and generated artifacts out of git.
+- Shared automation uses Bash or Node. Python tooling stays in `packages/python/`.
+- Prefix Compose services with `python-` or `typescript-`; neither is the default.
+- Keep dependencies minimal: Node's test runner, exact SDK pins and lockfiles,
+  npm install scripts disabled. Verify registry metadata/advisories. Use a
+  seven-day cooldown unless a newer release is explicitly requested.
+- Provider/model resolution belongs in the wrapper; `codex` aliases `openai`.
+  Reject unsupported combinations with `ConfigError`.
+- `check_runtime()` / `checkRuntime()` validate requests before availability.
+- Default tests stay offline. Python live tests use Compose. TypeScript live
+  tests require `AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1` and provider keys.
+- Input token totals include cache; output totals include reasoning.
+  Claude `usage` excludes subagents: prefer `model_usage` / `modelUsage`, using
+  `usage` only when that map is absent/empty. Never add both; cost includes subagents.
+- Every Python event union member needs a shared schema branch,
+  `testing.event_from_dict` case and trace-viewer rendering. TypeScript uses a
+  subset; keep its exhaustive schema checks and shared replay fixtures aligned.
+- `RunStarted` includes prompt and system prompt. Preserve empty/redacted
+  `Thinking` events when reasoning occurred; both providers reason by default.
+- Classify terminal provider failures even when the SDK never raises:
+  specific `error_type` and `retryable`, not a generic error.
+- Signal-killed runtimes raise `ProcessTerminatedError`, never `TransientError`.
+- Changes to Python `_tool_server_script()` or `mcp` require the real offline
+  MCP handshake test. The generated server supports `FastMCP` and `MCPServer`.
+- Fault tests use local mock endpoints: Claude `ANTHROPIC_BASE_URL` via `env`;
+  Codex `model_providers.<id>.base_url`. Use 4xx for terminal paths; runtimes
+  internally retry 429/5xx. Neither SDK provides fault injection.
