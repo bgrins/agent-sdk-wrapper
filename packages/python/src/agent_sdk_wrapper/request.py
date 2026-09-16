@@ -1,4 +1,4 @@
-"""The unified request surface that both provider adapters consume."""
+"""Request types and provider/model resolution."""
 
 from __future__ import annotations
 
@@ -133,11 +133,9 @@ def normalize_model_for_provider(provider: Provider, model: str | None) -> str |
 
 
 def normalize_builtin_tools(value: BuiltinToolsInput) -> BuiltinTools | None:
-    """Normalize built-in tool controls.
+    """``None`` keeps defaults; ``"none"`` or ``[]`` disables built-ins where supported.
 
-    ``None`` keeps the provider default. ``"none"`` or ``[]`` request no
-    built-in tools where the active provider can enforce that hard guarantee.
-    A non-empty list requests a provider-native built-in allowlist.
+    A non-empty list requests a provider-native allowlist.
     """
 
     if value is None:
@@ -175,16 +173,11 @@ def normalize_effort_for_provider(provider: Provider, value: str | None) -> Effo
 
 @dataclass
 class SubagentDef:
-    """A subagent the parent can delegate a task to and get a result back.
+    """A delegated agent: Claude ``AgentDefinition`` or Codex multi-agent config.
 
-    anthropic: mapped to a Claude Agent SDK ``AgentDefinition`` (invoked via the
-    built-in ``Agent``/``Task`` tool).
-    openai: mapped to Codex multi-agent config. ``tools`` and subagent
-    ``max_turns`` have no direct Codex equivalent. For Codex, ``tools=None`` and
-    ``tools=[]`` are both accepted and mean provider defaults; non-empty
-    ``tools`` lists and any ``max_turns`` value raise ``ConfigError``.
-    ``model=None`` inherits the parent model; ``model=INHERIT_MODEL`` is also
-    accepted for YAML/config files that need an explicit inherit sentinel.
+    Codex accepts ``tools=None`` or ``[]`` as defaults. Non-empty tool lists
+    and any subagent ``max_turns`` raise ``ConfigError``.
+    ``model=None`` and ``INHERIT_MODEL`` inherit the parent model.
     """
 
     description: str
@@ -222,8 +215,7 @@ class RunRequest:
     model: str | None = None
     system_prompt: str | None = None
 
-    # Custom Python-function tools. Plain callables; schema is derived from
-    # type hints + docstring. See agent_sdk_wrapper.tools.
+    # Derive callable schemas from type hints and docstrings.
     tools: list[Callable[..., Any]] = field(default_factory=list)
 
     # Subagents keyed by name.
@@ -247,25 +239,17 @@ class RunRequest:
     include_events_in_result: bool = True
     artifacts_dir: str | Path | None = None
     on_provider_event: ProviderEventCallback | None = None
-    # Provider built-in tools. ``None`` keeps provider defaults; ``"none"`` is a
-    # hard no-builtins request and providers that cannot enforce it must reject.
+    # None keeps defaults; "none" requires disabling all built-ins or rejection.
     builtin_tools: BuiltinTools | None = None
-    # Whether the model is offered web tools. ``None`` keeps provider defaults.
-    # ``False`` removes WebSearch/WebFetch (Anthropic) and sets
-    # ``tools.web_search=false`` (Codex). ``True`` explicitly enables them.
-    # Controls tool affordances only; does not enforce network egress (a model
-    # with shell access can still fetch URLs).
+    # None keeps defaults. False disables Claude WebSearch/WebFetch or Codex
+    # tools.web_search; True enables them. This does not restrict network egress.
     web_tools: bool | None = None
-
-    # ── Provider-specific passthrough ──────────────────────────────────
-    # anthropic: built-in tools to allow (e.g. ["Read", "Bash"]). The
-    # subagent ("Agent") tool is added automatically when subagents exist.
+    # Claude tool approvals; Agent is added when subagents exist.
     allowed_tools: list[str] = field(default_factory=list)
     # anthropic: built-in/MCP tools to deny.
     # openai: applied to wrapper-managed callable/external MCP servers.
     disallowed_tools: list[str] = field(default_factory=list)
-    # Provider session/thread to resume. ``Agent(continue_session=True)`` stores
-    # the latest emitted session id and reuses it on later calls.
+    # Resume this session. continue_session=True reuses the latest emitted ID.
     session_id: str | None = None
     continue_session: bool = False
     # anthropic: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'

@@ -1,14 +1,8 @@
-"""Opt-in live integration coverage for both providers.
+"""Run live tests with ``docker compose run --rm python-integration``.
 
-Run through Docker Compose:
-
-    docker compose run --rm python-integration
-
-The module is skipped unless ``AGENT_SDK_WRAPPER_RUN_INTEGRATION=1`` is set. Individual
-provider cases are skipped when their API key is missing.
-Artifacts default to ``results/integration-runs/<timestamp>/`` so Docker
-Compose runs leave inspectable traces on the host bind mount. Set
-``AGENT_SDK_WRAPPER_TEST_ARTIFACTS_DIR`` to override the root.
+Requires ``AGENT_SDK_WRAPPER_RUN_INTEGRATION=1`` and provider keys.
+Artifacts default to ``results/integration-runs/<timestamp>/``; override with
+``AGENT_SDK_WRAPPER_TEST_ARTIFACTS_DIR``.
 """
 
 from __future__ import annotations
@@ -141,8 +135,7 @@ def _model_for(provider: str) -> str | None:
         os.environ.get("AGENT_SDK_WRAPPER_OPENAI_MODEL")
         or os.environ.get("OPENAI_MODEL")
         or (os.environ.get("MODEL") if selected_provider == "openai" else None)
-        # Pin the cheapest model that exercises the full Codex surface rather
-        # than letting the runtime pick, so live-test cost stays predictable.
+        # Set an explicit model for predictable live-test cost.
         or "gpt-5.6-luna"
     )
 

@@ -1,9 +1,6 @@
-"""Expose Python functions as tools to the agent.
+"""Expose Python functions through MCP.
 
-The callables are wrapped as an in-process MCP server for Anthropic and as a
-temporary stdio MCP server for Codex.
-
-    uv run python examples/custom_tools.py
+uv run python examples/custom_tools.py
 """
 
 from __future__ import annotations

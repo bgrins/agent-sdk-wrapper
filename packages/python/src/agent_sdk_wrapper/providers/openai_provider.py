@@ -1,9 +1,4 @@
-"""OpenAI adapter, backed by the OpenAI Codex Python SDK (``openai_codex``).
-
-The Codex SDK drives a local Codex app-server runtime and reuses an existing
-Codex login, or can log in with an API key. It exposes Codex threads and turns;
-this adapter maps one ``agent_sdk_wrapper`` run to one Codex turn.
-"""
+"""Codex SDK adapter. Each wrapper run maps to one Codex turn."""
 
 from __future__ import annotations
 
@@ -248,11 +243,7 @@ async def _stream_turn(
     thread_id: str | None = None,
     baseline: _UsageBaseline | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Drain one Codex turn's event stream into normalized events.
-
-    ``baseline`` carries the usage this adapter already reported for
-    ``thread_id``; omitting it accounts the turn as a fresh thread.
-    """
+    """Normalize one Codex turn. ``baseline`` tracks previously reported thread usage."""
 
     baseline = _UsageBaseline() if baseline is None else baseline
     provider_log = ProviderEventLogger(
@@ -263,8 +254,7 @@ async def _stream_turn(
     text_parts: list[str] = []
     completed_texts: list[str] = []
     last_usage: Any = None
-    # Codex sends one token-usage update per model request, so counting them
-    # gives the request count the payload itself never carries.
+    # Count usage updates as a proxy for model requests.
     usage_updates = 0
     completed_action_items = 0
     max_turns_interrupted = False
@@ -307,10 +297,7 @@ async def _stream_turn(
                 item_id = _codex_item_id(root)
                 buffered_text = _pop_delta_buffer(thinking_delta_parts, item_id)
                 text = _reasoning_text(root) or buffered_text
-                # A short reasoning item can complete with an empty summary even
-                # though reasoning tokens were billed. Dropping it would leave no
-                # trace that the model reasoned at all, so emit the event anyway
-                # (parallel to an Anthropic redacted thinking block).
+                # Preserve empty reasoning items: they can carry billed tokens.
                 yield Thinking(text=text, raw=_raw(event) if req.include_raw else None)
                 continue
             if root_type == "plan":
@@ -357,9 +344,7 @@ async def _stream_turn(
         if method == "error":
             error = getattr(payload, "error", None)
             text = _error_message(error) or "Codex reported an error"
-            # The SDK retries some failures itself. Surfacing a retried one as
-            # an Error would fail a run that goes on to succeed, so report it
-            # as a warning and let the terminal turn state decide the outcome.
+            # Keep SDK retries as warnings; the terminal state determines success.
             if getattr(payload, "will_retry", False):
                 yield WarningEvent(message=text)
             else:
@@ -440,13 +425,9 @@ _CODEX_ACTION_ITEM_TYPES = {
 
 @dataclasses.dataclass
 class _UsageBaseline:
-    """Cumulative Codex usage this adapter has already reported for a thread.
+    """Track reported thread usage and subtract it from new cumulative snapshots.
 
-    Codex reports thread-cumulative token totals, so a resumed thread's first
-    snapshot already covers every earlier turn. Subtracting the baseline keeps
-    each run's ``Usage`` event scoped to that run. Resuming a thread the
-    adapter never ran (an externally supplied ``session_id``) starts from an
-    empty baseline, so that first run still counts the thread's prior history.
+    An external session starts without a baseline and can include prior history.
     """
 
     thread_id: str | None = None
@@ -570,9 +551,7 @@ def _unsupported_tool_filters(req: RunRequest) -> _UnsupportedToolFilters:
 def _unsupported_subagent_controls(subagents: dict[str, Any]) -> list[str]:
     unsupported: list[str] = []
     for name, subagent in subagents.items():
-        # Codex treats an omitted tool list and an explicit empty list the same
-        # way today: both mean "use provider defaults." Reject only non-empty
-        # lists that ask the wrapper to enforce a tool allowlist.
+        # Codex treats None and [] as defaults. Reject non-empty tool allowlists.
         if subagent.tools:
             unsupported.append(
                 f"SubagentDef.tools for Codex subagent {name!r}. Codex subagent "
@@ -1176,12 +1155,7 @@ def _enum_value(enum_type: Any, value: Any) -> Any:
 
 
 def _tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:
-    """Map one completed Codex action item onto a tool call and its result.
-
-    Codex names an action item only on the call side, so the tool name is
-    copied onto the matching result; callers then read a result without having
-    to correlate item ids themselves.
-    """
+    """Map a completed action to a tool call and result, both carrying the tool name."""
 
     events = _build_tool_events(root, event, include_raw)
     names = {e.id: e.name for e in events if isinstance(e, ToolCall) and e.id}
@@ -1427,15 +1401,10 @@ def _usage_event(
     thread_id: str | None,
     baseline: _UsageBaseline,
 ) -> Usage:
-    """Normalize a Codex token-usage snapshot into a per-run ``Usage`` event.
+    """Convert cumulative counters to per-run usage.
 
-    Codex reports ``output_tokens`` net of reasoning even though reasoning
-    bills as output, so reasoning is folded in to match the convention the
-    wrapper publishes (and what the Anthropic adapter already emits); the
-    reasoning share stays available on its own field. Codex bills no cache
-    writes, so that counter stays zero. The snapshot is thread-cumulative, so
-    the reported counts are the delta against what this thread already
-    accounted.
+    This adapter adds reasoning to raw output; raw output inclusivity is unverified.
+    Cache-write counts remain zero.
     """
 
     data = _to_plain(usage)

@@ -1,4 +1,4 @@
-/** JSON field names deliberately match the language-neutral v1 schemas. */
+/** JSON fields match the shared v1 schemas. */
 export type Provider = "anthropic" | "openai";
 export type RunStatus = "success" | "failure" | "cancelled";
 export type RunEndedReason =

@@ -1,8 +1,6 @@
-"""Run artifact helpers.
+"""Write trace, result, manifest and native-event files.
 
-Artifacts are intentionally file-based and viewer-friendly. The stable replay
-surface is ``trace.jsonl``: one serialized ``EventEnvelope`` per line. The
-manifest records the trace, result, and provider side files for local tooling.
+``trace.jsonl`` contains one normalized ``EventEnvelope`` per line.
 """
 
 from __future__ import annotations

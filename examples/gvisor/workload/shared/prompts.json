@@ -1,0 +1,4 @@
+[
+  "The Node project is installed in /job/work. Run node --test, fix the bug in src/deadline.js, then rerun node --test. Do not change tests or dependencies. Save git diff -- src/deadline.js to /job/output/fix.patch.",
+  "Summarize what you changed and which commands you ran. Leave /job/output/fix.patch in place."
+]

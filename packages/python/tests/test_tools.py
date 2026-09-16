@@ -66,12 +66,7 @@ def test_json_schema_optional_unwrap():
 
 
 async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
-    """The generated stdio server must actually start under the installed mcp.
-
-    It runs in a subprocess, so an import that no longer resolves (mcp 2.x
-    renamed FastMCP to MCPServer) surfaces only as a handshake failure inside a
-    live Codex run. Driving the real protocol here catches it offline.
-    """
+    """Check the generated MCP server with a real offline handshake."""
     import asyncio
     import json
     import sys
@@ -128,9 +123,7 @@ async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
 
     try:
         async with asyncio.timeout(60):
-            # Await initialization before announcing readiness, and leave stdin
-            # open until tools/list completes. Sending everything then EOF races
-            # the MCP server's shutdown against its response tasks.
+            # Wait for initialization; keep stdin open until tools/list responds.
             await send(requests[0])
             initialized = await receive(1)
             assert "tools" in initialized["result"]["capabilities"]

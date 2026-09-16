@@ -166,8 +166,7 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
         '{"ok":true}'
     ]
     usage = next(event for event in out if isinstance(event, Usage))
-    # Reasoning bills as output, so it is folded into output_tokens; the
-    # request count comes from the number of token-usage updates.
+    # Add reasoning to output; count usage updates as requests.
     assert usage.usage == TokenUsage(
         input_tokens=10,
         output_tokens=7,
@@ -1144,8 +1143,7 @@ async def test_codex_usage_reports_the_delta_when_a_thread_is_resumed():
         )
     ]
 
-    # Codex snapshots are thread-cumulative, so the second turn reports only
-    # what it added rather than replaying the first turn's tokens.
+    # Subtract prior thread usage from the second turn.
     assert next(e for e in first if isinstance(e, Usage)).usage.input_tokens == 100
     delta = next(e for e in second if isinstance(e, Usage)).usage
     assert delta.input_tokens == 240
@@ -1220,11 +1218,7 @@ async def test_codex_context_compaction_is_surfaced():
 
 @pytest.mark.asyncio
 async def test_codex_reasoning_item_without_a_summary_still_emits_thinking():
-    """Codex bills reasoning tokens for items that expose no summary text.
-
-    Dropping those items left a run that reasoned looking like one that did
-    not, and made Codex traces incomparable with Anthropic's redacted blocks.
-    """
+    """Preserve reasoning events with empty summaries."""
     req = RunRequest(provider="openai", prompt="ignored")
     events = [
         SimpleNamespace(

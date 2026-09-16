@@ -165,8 +165,7 @@ export class CodexAdapter implements ProviderAdapter {
           terminal = true;
           const nativeUsage = event.usage;
           const input = nativeUsage.input_tokens;
-          // Pinned exec forwards ThreadTokenUsage.total, not per-turn usage. The
-          // Responses output_tokens total already includes its reasoning subset.
+          // ThreadTokenUsage.total is cumulative; output includes reasoning.
           const output = nativeUsage.output_tokens;
           const cumulative: TokenUsage = {
             input_tokens: input,

@@ -98,11 +98,7 @@ def install_fake_providers(
     seen_requests: list[RunRequest] | None = None,
     providers: Iterable[Provider | str] = ("anthropic", "openai"),
 ) -> FakeProvider:
-    """Patch provider adapter constructors to return a reusable fake provider.
-
-    The ``monkeypatch`` argument is intentionally typed as ``Any`` so importing
-    this module does not require pytest at runtime.
-    """
+    """Patch provider constructors to return a fake. ``Any`` keeps pytest optional."""
 
     fake_provider = fake or FakeProvider(events, seen_requests=seen_requests)
 
@@ -194,13 +190,10 @@ def load_trace(path: str | Path) -> list[EventEnvelope]:
 
 
 def load_trace_replay(path: str | Path) -> TraceReplay:
-    """Load a trace fixture and prepare provider events plus expected result summary.
+    """Load provider events and the expected result summary from a trace.
 
-    ``TraceReplay.events`` excludes wrapper boundary events (`run_started` and
-    `run_finished`) because ``Agent.run()`` will emit fresh boundaries during
-    replay. The expected summary normalizes volatile run ids, timestamps, and
-    durations while preserving the event payload sequence and aggregation
-    fields.
+    Exclude run boundaries, which the Agent recreates. Ignore volatile IDs,
+    timestamps and durations when comparing results.
     """
 
     trace_path = Path(path)
@@ -221,8 +214,7 @@ def load_trace_replay(path: str | Path) -> TraceReplay:
         provider=provider,
         model=started.model,
         cwd=started.cwd,
-        # The fixture records what the run was asked; replaying with the same
-        # prompt keeps the re-emitted run_started identical to the committed one.
+        # Reuse the fixture prompt when recreating run_started.
         prompt=started.prompt or "",
         system_prompt=started.system_prompt,
         events=events,

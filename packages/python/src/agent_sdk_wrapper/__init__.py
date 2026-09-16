@@ -1,14 +1,4 @@
-"""agent-sdk-wrapper — a unified wrapper over the Claude Agent SDK and the OpenAI
-Codex SDK.
-
-Quick start::
-
-    from agent_sdk_wrapper import Agent
-
-    agent = Agent(model="claude-sonnet-4-6")
-    result = agent.run_sync("Say hello")
-    print(result.final_text)
-"""
+"""Python interface for the native Claude Agent SDK and Codex SDK."""
 
 from __future__ import annotations
 

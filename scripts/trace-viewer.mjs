@@ -1,0 +1,187 @@
+import { constants } from "node:fs";
+import { lstat, open, readdir, readFile, realpath } from "node:fs/promises";
+import { createServer } from "node:http";
+import { resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const viewer = fileURLToPath(
+  new URL("../docs/trace-viewer.html", import.meta.url),
+);
+const urlPath = (path) => path.split("/").map(encodeURIComponent).join("/");
+
+async function listRuns(directory, depth) {
+  const queue = [""];
+  const runs = [];
+  for (let visited = 0; queue.length && visited < 500; visited++) {
+    const relative = queue.shift();
+    let entries;
+    try {
+      entries = await readdir(resolve(directory, relative), {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    const prefix = relative ? `${relative}/` : "";
+    const hasManifest = entries.some(
+      (entry) => entry.name === "manifest.json" && entry.isFile(),
+    );
+    const traceCount = entries.filter(
+      (entry) =>
+        entry.isFile() &&
+        (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
+    ).length;
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      if (
+        entry.isDirectory() &&
+        depth > 0 &&
+        (!relative || relative.split("/").length < depth)
+      )
+        queue.push(prefix + entry.name);
+      if (
+        !entry.isFile() ||
+        !(hasManifest
+          ? entry.name === "manifest.json"
+          : entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl"))
+      )
+        continue;
+      const path = prefix + entry.name;
+      let info;
+      try {
+        info = await lstat(resolve(directory, path));
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      if (!info.isFile() || info.nlink !== 1) continue;
+      runs.push({
+        label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
+        trace: hasManifest ? null : `/results/${urlPath(path)}`,
+        manifest: hasManifest ? `/results/${urlPath(path)}` : null,
+        updated_at: info.mtime.toISOString(),
+      });
+    }
+  }
+  return runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+// Ancestors must be host-controlled. Depth 1 reads only files in fixed job mounts.
+export function createTraceServer(directory, { depth = 20 } = {}) {
+  if (!Number.isInteger(depth) || depth < 0 || depth > 20)
+    throw new Error("Trace directory depth must be 0–20");
+  directory = resolve(directory);
+  return createServer(async (request, response) => {
+    const send = (status, type, body) => {
+      response.writeHead(status, {
+        "content-type": type,
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(request.method === "HEAD" ? undefined : body);
+    };
+    if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(request.headers.host || "")) {
+      return send(403, "text/plain", "Forbidden");
+    }
+    if (!["GET", "HEAD"].includes(request.method))
+      return send(405, "text/plain", "Read only");
+    try {
+      const path = decodeURIComponent(
+        new URL(request.url, "http://localhost").pathname,
+      );
+      if (path === "/") {
+        response.writeHead(302, {
+          location: "/docs/trace-viewer.html?index=/api/runs",
+        });
+        return response.end();
+      }
+      if (path === "/docs/trace-viewer.html")
+        return send(200, "text/html; charset=utf-8", await readFile(viewer));
+      if (path === "/api/runs")
+        return send(
+          200,
+          "application/json",
+          JSON.stringify(await listRuns(directory, depth)),
+        );
+      if (
+        !path.startsWith("/results/") ||
+        path.split("/").some((part) => part.startsWith(".")) ||
+        path.slice("/results/".length).split("/").length > depth + 1
+      ) {
+        return send(404, "text/plain", "Not found");
+      }
+      const root = await realpath(directory);
+      const requested = resolve(root, path.slice("/results/".length));
+      const file = await realpath(requested);
+      if (!file.startsWith(root + sep))
+        return send(403, "text/plain", "Forbidden");
+      if (file !== requested) return send(403, "text/plain", "Forbidden");
+      const handle = await open(
+        file,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.nlink !== 1 || info.size > 16 * 1024 * 1024)
+          return send(413, "text/plain", "Unsupported file");
+        // Keep one descriptor and a bounded read if the file changes or grows.
+        const bytes = Buffer.alloc(info.size);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const { bytesRead } = await handle.read(
+            bytes,
+            offset,
+            bytes.length - offset,
+            offset,
+          );
+          if (!bytesRead) break;
+          offset += bytesRead;
+        }
+        let content = bytes.subarray(0, offset);
+        // A live SDK trace can end between writes. Serve complete JSONL lines.
+        if (file.endsWith(".jsonl"))
+          content = content.subarray(0, content.lastIndexOf(10) + 1);
+        // Artifacts are data, even when named .html or .js.
+        return send(200, "text/plain; charset=utf-8", content);
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR")
+        return send(404, "text/plain", "Not found");
+      if (error.code === "ELOOP") return send(403, "text/plain", "Forbidden");
+      if (error instanceof URIError)
+        return send(400, "text/plain", "Invalid path");
+      console.error(error.message);
+      return send(500, "text/plain", "Could not read trace");
+    }
+  });
+}
+
+if (
+  process.argv[1] &&
+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+) {
+  const [directory = "results", option, depth] = process.argv.slice(2);
+  if (
+    (option !== undefined && option !== "--depth") ||
+    (option && depth === undefined) ||
+    process.argv.length > 5
+  )
+    throw new Error("Use: trace-viewer [directory] [--depth 0–20]");
+  const port = Number(process.env.TRACE_VIEWER_PORT || 8765);
+  if (!Number.isInteger(port) || port < 0 || port > 65535)
+    throw new Error("Invalid TRACE_VIEWER_PORT");
+  const server = createTraceServer(directory, {
+    depth: depth === undefined ? 20 : Number(depth),
+  });
+  server.on("error", (error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+  server.listen(port, "127.0.0.1", () => {
+    console.log(`Trace viewer: http://127.0.0.1:${server.address().port}`);
+    console.log(`Watching ${resolve(directory)}`);
+  });
+}

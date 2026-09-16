@@ -11,6 +11,13 @@ export type {
   RunStatus,
   TokenUsage,
 } from "./events.js";
+export type { ProviderAdapter, ProviderContext } from "./providers/base.js";
+export type {
+  AnthropicNativeOptions,
+  CodexNativeOptions,
+  CodexThreadOptions,
+  ProviderOptions,
+} from "./providers/options.js";
 export type {
   AgentDefaults,
   Effort,
@@ -19,10 +26,3 @@ export type {
   RunRequest,
 } from "./request.js";
 export { normalizeProvider, resolveProvider } from "./request.js";
-export type { ProviderAdapter, ProviderContext } from "./providers/base.js";
-export type {
-  AnthropicNativeOptions,
-  CodexNativeOptions,
-  CodexThreadOptions,
-  ProviderOptions,
-} from "./providers/options.js";

@@ -15,7 +15,7 @@ JSON envelopes. TypeScript implements a subset of Python's API.
 | Callback exceptions | Logged and ignored | Fail/close consumption |
 | Native callback | Envelope with `.raw` SDK object | Original SDK object, typed `unknown` |
 | Tools, structured output, MCP, subagent lifecycle | Supported with provider limits | Not yet implemented |
-| Traces | Managed artifact files | Caller writes JSONL |
+| Traces | `trace_file` and managed artifacts | `traceFile`; no managed artifact bundle |
 | Effort | Codex includes `none` | Codex excludes `none`, includes `persistent` |
 
 SDK symbols and internal client/thread handles are not re-exported in either package.
@@ -39,5 +39,5 @@ Python Claude does not expose a separate reasoning-token count.
 
 Codex resume accounting uses cumulative snapshots; an external session without
 a baseline can include prior history. Python adds reasoning to raw output;
-TypeScript treats output as inclusive. **Python's raw output accounting still
-needs verification**, so numerical parity is not established.
+TypeScript treats output as inclusive. Python's raw output accounting is
+unverified; numerical parity is not established.

@@ -8,9 +8,12 @@
 - Keep final Docker images Ubuntu-based. Python gets runtimes from Python SDKs;
   do not install Node/npm or standalone CLIs there. TypeScript has its own image
   and build-context ignore file; exclude host node_modules and generated files.
+  The gVisor Python example also includes Node/git to run its target Node project;
+  its provider runtimes still come from Python SDKs.
 - Keep `.env`, `.claude/`, `results/`, caches and generated artifacts out of git.
 - Shared automation uses Bash or Node. Python tooling stays in `packages/python/`.
-- Prefix Compose services with `python-` or `typescript-`; neither is the default.
+- Prefix language-specific Compose services with `python-` or `typescript-`;
+  neither language is the default. Shared example services use neutral names.
 - Keep dependencies minimal: Node's test runner, exact SDK pins and lockfiles,
   npm install scripts disabled. Verify registry metadata/advisories. Use a
   seven-day cooldown unless a newer release is explicitly requested.

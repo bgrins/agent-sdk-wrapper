@@ -1,7 +1,6 @@
 # Python API
 
-Python 3.12+. Calls the native Claude Agent SDK or Codex SDK directly.
-Run `uv sync --extra dev` from this directory to install locally.
+Requires Python 3.12+. Run `uv sync --extra dev` from this directory.
 
 ## Run and stream
 
@@ -22,7 +21,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Supply provider credentials through the native SDK's environment or login.
+Set native SDK credentials through environment variables or login.
 To resume in another process, save `result.session_id` and pass it as
 `Agent(provider=..., session_id=...)` with the same working directory.
 
@@ -52,8 +51,7 @@ and runtime availability. `run_sync()` is available outside an event loop.
 | `max_turns` | Native turn limit | Wrapper limit on completed action items |
 | Built-in tool filtering | Native controls | Unsupported; `web_tools` and MCP controls are separate |
 
-See [examples](examples/) for tools and structured output, and
-[API differences](../typescript/PARITY.md) for limits shared with TypeScript.
+See [examples](examples/) and [API differences](../typescript/PARITY.md).
 
 ## Events and traces
 
@@ -65,7 +63,8 @@ See [examples](examples/) for tools and structured output, and
 - `trace_file`: normalized JSONL.
 - `artifacts_dir`: trace, result, manifest and native-event files.
 
-Open root `docs/trace-viewer.html` and select **Open Files** or **Open Artifact Directory**.
+From the repository root, run `npm run trace-viewer -- packages/python/results`.
+Open the printed URL and select a trace.
 Claude token totals include subagents via `model_usage`; `requests` remains a
 main-loop turn-count proxy. Codex cost is unavailable. [Accounting limits](../typescript/PARITY.md).
 

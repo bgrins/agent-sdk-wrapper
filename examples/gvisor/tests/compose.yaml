@@ -1,0 +1,15 @@
+services:
+  gateway:
+    image: agent-sdk-wrapper-gvisor-gateway-tests
+    network_mode: none
+    environment:
+      ANTHROPIC_UPSTREAM: http://127.0.0.1:8080
+      OPENAI_UPSTREAM: http://127.0.0.1:8080
+
+  test-worker:
+    extends:
+      file: compose.yaml
+      service: typescript-agent
+    profiles: [test]
+    image: agent-sdk-wrapper-gvisor-checks
+    entrypoint: [node]

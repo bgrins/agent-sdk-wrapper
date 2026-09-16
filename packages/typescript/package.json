@@ -1,7 +1,7 @@
 {
   "name": "agent-sdk-wrapper",
   "version": "0.1.0",
-  "description": "Native TypeScript twin of agent-sdk-wrapper for Claude Agent SDK and Codex SDK",
+  "description": "Native TypeScript wrapper for the Claude Agent SDK and Codex SDK",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {

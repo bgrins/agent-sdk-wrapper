@@ -1,9 +1,6 @@
-"""Run a structured planner/analyst/verifier/fix-planner/reporter workflow.
+"""Run a multi-stage audit with structured output.
 
-The example exercises multi-agent chaining and structured artifacts without a
-custom MCP harness or vulnerability-search setup.
-
-    uv run python examples/auditor_style.py
+uv run python examples/auditor_style.py
 """
 
 from __future__ import annotations

@@ -13,6 +13,7 @@ export class TransientError extends AgentSdkWrapperError {
 }
 export class ProcessTerminatedError extends AgentSdkWrapperError {}
 export class ProviderProtocolError extends AgentSdkWrapperError {}
+export class TraceWriteError extends AgentSdkWrapperError {}
 export class ProviderError extends AgentSdkWrapperError {
   constructor(
     message: string,

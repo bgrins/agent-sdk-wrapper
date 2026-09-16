@@ -11,6 +11,9 @@
 !docs/fixtures/**
 !docs/schemas/
 !docs/schemas/**
+!docs/trace-viewer.html
+!scripts/
+!scripts/trace-viewer*.mjs
 
 **/node_modules/
 **/dist/

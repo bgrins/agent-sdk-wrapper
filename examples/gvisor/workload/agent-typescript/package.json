@@ -1,0 +1,8 @@
+{
+  "name": "gvisor-agent-typescript",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "agent-sdk-wrapper": "file:../../../../packages/typescript"
+  }
+}

@@ -328,7 +328,7 @@ def test_aggregate_via_fake_provider(monkeypatch, tmp_path):
     assert types[0] == "RunStarted"
     assert types[-1] == "RunFinished"
     assert "ToolCall" in types
-    # Trace file got every envelope on its own line.
+    # One envelope per JSONL line.
     lines = trace_file.read_text().splitlines()
     assert len(lines) == len(result.events)
     assert all(json.loads(line) for line in lines)

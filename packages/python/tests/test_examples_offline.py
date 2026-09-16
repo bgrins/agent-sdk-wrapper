@@ -1,9 +1,4 @@
-"""Offline validation for example scripts.
-
-These tests run the example ``main()`` functions with fake providers. That keeps
-the default test suite API-key free while still checking example control flow,
-artifact paths, stdout capture, and provider/model environment switching.
-"""
+"""Run examples with fake providers; check output, artifacts and configuration."""
 
 from __future__ import annotations
 

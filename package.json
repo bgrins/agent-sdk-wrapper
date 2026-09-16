@@ -1,9 +1,13 @@
 {
   "name": "agent-sdk-wrapper-workspace",
   "private": true,
-  "workspaces": ["packages/typescript"],
+  "workspaces": [
+    "packages/typescript"
+  ],
   "scripts": {
-    "verify": "npm test && npm run typecheck && npm run lint && npm run format:check && npm run test:package",
+    "verify": "npm test && npm run typecheck && npm run lint && npm run format:check && npm run test:package && npm run test:viewer",
+    "trace-viewer": "node scripts/trace-viewer.mjs",
+    "test:viewer": "node --test scripts/trace-viewer.test.mjs",
     "build": "npm run build --workspace agent-sdk-wrapper",
     "test": "npm run test --workspace agent-sdk-wrapper",
     "test:integration": "npm run test:integration --workspace agent-sdk-wrapper",

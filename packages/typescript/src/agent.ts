@@ -6,13 +6,14 @@ import {
   ProviderError,
   ProviderProtocolError,
   RuntimeUnavailableError,
+  TraceWriteError,
   TransientError,
 } from "./errors.js";
 import {
-  emptyUsage,
   type AgentEvent,
   type ErrorEvent,
   type EventEnvelope,
+  emptyUsage,
   type Provider,
   type RunEndedReason,
   type RunResult,
@@ -21,11 +22,12 @@ import {
 import type { ProviderAdapter } from "./providers/base.js";
 import { buildProvider } from "./providers/index.js";
 import {
-  resolveRequest,
   type AgentDefaults,
   type ResolvedRequest,
   type RunRequest,
+  resolveRequest,
 } from "./request.js";
+import { TraceWriter } from "./trace.js";
 
 export class Agent {
   private readonly defaults: AgentDefaults;
@@ -75,17 +77,23 @@ export class Agent {
       typeof input === "string" ? { prompt: input } : input,
     );
     this.active = true;
+    let writer: TraceWriter | undefined;
     try {
       await adapter.ensureAvailable(req);
+      if (req.traceFile !== undefined) writer = new TraceWriter(req.traceFile);
       const start = performance.now();
       const runId = randomUUID();
       let sequence = 0;
-      const frame = (event: AgentEvent): EventEnvelope => ({
-        run_id: runId,
-        sequence: sequence++,
-        timestamp: new Date().toISOString(),
-        event,
-      });
+      const frame = (event: AgentEvent): EventEnvelope => {
+        const envelope = {
+          run_id: runId,
+          sequence: sequence++,
+          timestamp: new Date().toISOString(),
+          event,
+        };
+        writer?.write(envelope);
+        return envelope;
+      };
       const systemPrompt =
         req.providerOptions?.provider === "anthropic"
           ? req.providerOptions.options?.systemPrompt
@@ -123,6 +131,7 @@ export class Agent {
         } catch (cause) {
           if (
             cause instanceof ProcessTerminatedError ||
+            cause instanceof TraceWriteError ||
             cause instanceof ConfigError
           )
             throw cause;
@@ -204,12 +213,16 @@ export class Agent {
         duration_ms: Math.max(0, Math.round(performance.now() - start)),
       });
     } finally {
-      this.active = false;
+      try {
+        writer?.close();
+      } finally {
+        this.active = false;
+      }
     }
   }
 }
 
-/** Consume one stream while optionally rendering/writing every envelope. No second model call. */
+/** Collect one stream, optionally passing each envelope to a callback. */
 export async function collectRun(
   events: AsyncIterable<EventEnvelope>,
   onEvent?: (event: EventEnvelope) => void | Promise<void>,

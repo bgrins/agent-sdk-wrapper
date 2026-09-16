@@ -1,4 +1,4 @@
-"""``agent-sdk-wrapper`` — a thin CLI over the unified :class:`Agent`."""
+"""Command-line interface for ``Agent``."""
 
 from __future__ import annotations
 

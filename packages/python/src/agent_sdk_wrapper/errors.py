@@ -1,9 +1,4 @@
-"""Exception hierarchy.
-
-Provider-specific exceptions (from the Claude Agent SDK or the OpenAI Codex
-SDK) are wrapped into these so callers can catch one family regardless of
-backend. ``transient`` marks errors worth retrying at the run level.
-"""
+"""Provider-independent errors. ``transient`` marks retryable failures."""
 
 from __future__ import annotations
 
@@ -33,13 +28,7 @@ class TransientError(AgentSdkWrapperError):
 
 
 class ProcessTerminatedError(AgentSdkWrapperError):
-    """The provider runtime was killed by a signal (e.g. SIGTERM, SIGKILL).
-
-    Deliberately not a :class:`TransientError`: an external kill aborts the
-    whole process tree, so retrying the run in-place only burns the shutdown
-    window. Callers running a batch should treat it as a stop signal for the
-    batch, not a per-item failure.
-    """
+    """The runtime was killed by a signal. Stop the batch; do not retry in place."""
 
     def __init__(
         self, signal: int, *, message: str | None = None, cause: BaseException | None = None

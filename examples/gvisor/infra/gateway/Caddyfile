@@ -1,0 +1,72 @@
+{
+	admin off
+	auto_https off
+	persist_config off
+	grace_period 2s
+}
+
+(request) {
+	request_body {
+		max_size 16MB
+	}
+}
+
+(proxy) {
+	header_up Host {upstream_hostport}
+	header_up -Proxy-Authorization
+	header_up -OpenAI-Organization
+	header_up -OpenAI-Project
+	header_up -X-Forwarded-*
+	flush_interval -1
+	stream_timeout 150s
+	transport http {
+		response_header_timeout 150s
+		read_timeout 150s
+	}
+	@redirect status 3xx
+	handle_response @redirect {
+		respond 502
+	}
+}
+
+http:// {
+	bind {$GATEWAY_LISTEN:unix//socket/gateway.sock|0666}
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+			}
+		}
+	}
+	@claude {
+		expression `{env.PROVIDER} == "anthropic"`
+		header X-Api-Key {env.GATEWAY_TOKEN}
+		method POST
+		path /v1/messages /v1/messages/count_tokens
+	}
+	@codex {
+		expression `{env.PROVIDER} == "openai"`
+		header Authorization "Bearer {env.GATEWAY_TOKEN}"
+		method GET POST
+		path /v1/responses /v1/responses/compact /v1/models
+	}
+	handle @claude {
+		import request
+		reverse_proxy {$ANTHROPIC_UPSTREAM:https://api.anthropic.com} {
+			header_up -Authorization
+			header_up X-Api-Key {env.UPSTREAM_KEY}
+			import proxy
+		}
+	}
+	handle @codex {
+		import request
+		reverse_proxy {$OPENAI_UPSTREAM:https://api.openai.com} {
+			header_up -X-Api-Key
+			header_up Authorization "Bearer {env.UPSTREAM_KEY}"
+			import proxy
+		}
+	}
+	respond 403
+}

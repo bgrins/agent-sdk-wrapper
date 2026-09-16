@@ -24,6 +24,8 @@ RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --no-audit --no
 COPY packages/typescript/ packages/typescript/
 COPY docs/fixtures/ docs/fixtures/
 COPY docs/schemas/ docs/schemas/
+COPY docs/trace-viewer.html docs/trace-viewer.html
+COPY scripts/trace-viewer*.mjs scripts/
 
 # Provider runtimes come from the two SDK dependencies. No standalone CLI install.
 CMD ["npm", "run", "verify"]

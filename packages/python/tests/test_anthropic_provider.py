@@ -292,8 +292,7 @@ def test_anthropic_usage_folds_cache_into_input_and_counts_requests():
         requests=4,
     )
 
-    # Anthropic reports input net of cache; the wrapper publishes the full
-    # prompt count so both providers mean the same thing by input_tokens.
+    # Normalized input includes cache.
     assert event.usage.input_tokens == 1000
     assert event.usage.cache_read_tokens == 700
     assert event.usage.cache_write_tokens == 200
@@ -529,12 +528,7 @@ def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeyp
 
 
 def test_anthropic_error_type_ignores_a_normal_stop_reason():
-    """A failing status must not be labelled with how generation happened to end.
-
-    A real 400 arrives with ``stop_reason='stop_sequence'``; reporting that as
-    the error type hides the actual failure behind an unrelated, healthy-looking
-    label.
-    """
+    """Classify HTTP 400 as a failure even when ``stop_reason`` is ``stop_sequence``."""
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 
     error = _result_error(

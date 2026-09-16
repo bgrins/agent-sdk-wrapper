@@ -5,6 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info
+.agent-state
+.playwright-cli
 
 # Virtual environments
 .venv

@@ -1,10 +1,4 @@
-"""Anthropic adapter, backed by the Claude Agent SDK (``claude_agent_sdk``).
-
-The SDK launches a Claude Code runtime internally, preferring its bundled binary
-when available and falling back to ``PATH``. It retries transient API errors
-internally; we map its process-level exceptions onto the unified error
-hierarchy.
-"""
+"""Claude Agent SDK adapter. The SDK manages the runtime and API retries."""
 
 from __future__ import annotations
 
@@ -48,14 +42,10 @@ from .base import ProviderAdapter
 _DEFAULT_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
 _WEB_TOOL_NAMES: tuple[str, ...] = ("WebSearch", "WebFetch")
 
-# HTTP statuses worth another attempt. A mid-run API call that returned one of
-# these — or that got no response at all — is the common transient failure; the
-# SDK reports it as an errored ``ResultMessage`` rather than raising.
+# Retryable statuses reported in errored ResultMessage values.
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
-# Exit codes the runtime reports when an external signal killed it. The control
-# protocol uses the shell convention (128 + signum); the subprocess transport
-# reports asyncio's negative return code.
+# Signal exits use 128 + signum in the SDK protocol, or -signum in asyncio.
 _SIGNALS_BY_EXIT_CODE: dict[int, int] = {137: 9, 143: 15, 130: 2, -9: 9, -15: 15, -2: 2}
 
 
@@ -221,8 +211,7 @@ class AnthropicProvider(ProviderAdapter):
 
         options = self._build_options(req)
         seen_session = False
-        # tool_use_id -> tool name, so a tool result can name the tool it
-        # answers without the caller having to correlate ids itself.
+        # Map tool_use_id to the tool name for result events.
         tool_names: dict[str, str] = {}
         provider_log = ProviderEventLogger(
             "anthropic", req.artifacts_dir, req.on_provider_event
@@ -334,12 +323,7 @@ class AnthropicProvider(ProviderAdapter):
 
 
 def _thinking_event(block: Any) -> Thinking:
-    """Map a thinking block, reporting redacted length when the text is hidden.
-
-    Some thinking display modes return an encrypted signature the provider
-    round-trips but never exposes. Reporting its size keeps a redacted item
-    distinguishable from an empty one.
-    """
+    """Map thinking text, or report the encrypted signature length for redacted blocks."""
 
     text = block.thinking or ""
     signature = getattr(block, "signature", None) or ""
@@ -363,14 +347,7 @@ def _compaction_event(message: Any) -> ContextCompacted | None:
 
 
 def _result_error(message: Any) -> Error | None:
-    """Classify a terminal ``ResultMessage`` into a normalized error, if any.
-
-    The SDK reports most failures as an errored result rather than an
-    exception, so the terminal reason is only recoverable from ``subtype``,
-    ``stop_reason``, and ``api_error_status``. Mapping them here is what lets
-    the run report ``max_turns`` or ``refused`` instead of a generic error, and
-    lets callers tell a retryable upstream blip from a permanent failure.
-    """
+    """Classify result errors by subtype, stop reason and HTTP status."""
 
     if message.subtype == "error_max_turns":
         return Error(
@@ -392,10 +369,7 @@ def _result_error(message: Any) -> Error | None:
             error_type="transient_api_error",
             retryable=True,
         )
-    # Not stop_reason: that describes how generation ended (``end_turn``,
-    # ``stop_sequence``) and is unrelated to why the run failed, so using it
-    # here labels an HTTP 400 as "stop_sequence". Prefer the failing status,
-    # then a genuine error subtype.
+    # Use the HTTP status or error subtype; stop_reason describes generation.
     if message.api_error_status is not None:
         error_type = f"api_error_{message.api_error_status}"
     elif message.subtype and message.subtype.startswith("error"):
@@ -422,12 +396,9 @@ def _error_detail(message: Any) -> str:
 
 
 def _is_transient_result(message: Any) -> bool:
-    """Whether an errored result is a retryable upstream failure.
+    """Retry success-subtype errors with a retryable HTTP status or no response.
 
-    A mid-run API call that failed leaves ``subtype`` at ``success`` — the run
-    itself did not fail structurally. It is worth retrying when the call
-    returned a retryable status, or got no response at all (a dropped
-    connection). Client errors and structural run failures are not.
+    Client errors and structural run failures are not retryable.
     """
 
     if message.subtype != "success":
@@ -538,15 +509,9 @@ def _usage_event(
     requests: int = 0,
     model_usage: dict[str, Any] | None = None,
 ) -> Usage:
-    """Normalize an SDK usage mapping onto :class:`TokenUsage`.
+    """Include cache in input totals. Prefer ``model_usage`` for subagent coverage.
 
-    Anthropic reports ``input_tokens`` net of cache, with the cached portion in
-    its own counters, so the cache counts are folded back in to match the
-    convention the wrapper publishes (and what the Codex adapter already
-    emits). Prefer model_usage, which includes subagents and auxiliary calls;
-    the legacy usage field covers only the main loop. Never add both together.
-    The result's main-loop turn count remains a proxy for requests, not a count
-    of all requests made by subagents.
+    Fall back to ``usage``; never add both. Requests use the main-loop turn count.
     """
 
     raw = usage

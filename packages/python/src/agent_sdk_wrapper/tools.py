@@ -1,9 +1,6 @@
-"""Normalize plain Python callables into backend tool representations.
+"""Expose typed Python callables through MCP.
 
-Callers pass ordinary functions (sync or async) with type hints and a
-docstring. Anthropic tools are exposed through an in-process MCP server via
-``create_sdk_mcp_server``; Codex tools are exposed through a temporary stdio MCP
-server configured for the Codex runtime.
+Claude uses an in-process server; Codex uses a temporary stdio server.
 """
 
 from __future__ import annotations

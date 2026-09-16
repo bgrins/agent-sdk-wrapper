@@ -1,14 +1,11 @@
-# Multi-stage audit example
+# Multi-stage audit
 
-`examples/auditor_style.py` runs planning, analysis, verification and fix-plan
-stages using separate agents, structured output and read-only MCP tools.
-
-From the repository root:
+Run separate agents for planning, analysis, verification and reporting:
 
 ```sh
 docker compose run --rm python-example-auditor-style
 ```
 
-Set `PROVIDER` and optionally `MODEL`; provider credentials are required.
-Outputs are under `packages/python/results/<provider>/auditor_style/<timestamp>/artifacts/`,
-including per-stage traces and a final report. Open them with `docs/trace-viewer.html`.
+Run from the repository root with provider credentials. Set `PROVIDER` and optional `MODEL`.
+Find traces and reports under `packages/python/results/<provider>/auditor_style/<timestamp>/artifacts/`.
+View them with `npm run trace-viewer -- packages/python/results`.

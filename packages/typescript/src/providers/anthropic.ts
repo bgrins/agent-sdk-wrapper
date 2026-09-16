@@ -92,9 +92,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     )
       throw new ConfigError("Invalid settingSources");
     if (opts?.tools !== undefined && !Array.isArray(opts.tools))
-      throw new ConfigError(
-        "This slice accepts only an explicit native tools array",
-      );
+      throw new ConfigError("tools must be an array");
     stringsOption(opts?.tools, "tools");
     stringOption(
       opts?.pathToClaudeCodeExecutable,
@@ -104,9 +102,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       opts?.systemPrompt !== undefined &&
       typeof opts.systemPrompt !== "string"
     )
-      throw new ConfigError(
-        "This slice accepts only a string native systemPrompt",
-      );
+      throw new ConfigError("systemPrompt must be a string");
     if (
       opts?.maxTurns !== undefined &&
       (!Number.isSafeInteger(opts.maxTurns) || opts.maxTurns < 1)
@@ -152,8 +148,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           ? req.providerOptions.options?.pathToClaudeCodeExecutable
           : undefined;
       if (override) {
-        // Match the pinned SDK's interpreter-launched entrypoint extensions.
-        // These files need to be readable, not directly executable.
+        // The SDK launches these scripts through an interpreter; require readability.
         if (
           [".js", ".mjs", ".tsx", ".ts", ".jsx"].some((ext) =>
             override.endsWith(ext),
@@ -162,8 +157,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           await access(override, constants.R_OK);
         else await executable(override);
       } else {
-        // The runtime belongs to the SDK's dependency scope, which may live
-        // behind a package-manager symlink and need not be hoisted beside us.
+        // Resolve in the SDK dependency scope to support non-hoisted installs.
         const manifest = findPackageJSON(
           `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`,
           import.meta.resolve("@anthropic-ai/claude-agent-sdk"),
@@ -221,8 +215,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         const raw = req.includeRaw
           ? { raw: message as unknown as Record<string, unknown> }
           : {};
-        // v1 text/tool events are append-only: we cannot retract output the
-        // consumer has already received without extending the shared contract.
+        // The v1 contract cannot retract emitted text or tool events.
         if (
           (message.type === "assistant" && message.supersedes?.length) ||
           (message.type === "system" &&
@@ -356,8 +349,7 @@ export class AnthropicAdapter implements ProviderAdapter {
                   : message.subtype),
               status ?? undefined,
             );
-            // A success-subtype error with no HTTP response is the SDK's
-            // dropped-connection shape. Structural reasons still take priority.
+            // No HTTP response indicates a dropped connection unless a structural error exists.
             if (
               message.subtype === "success" &&
               message.is_error &&

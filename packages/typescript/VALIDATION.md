@@ -12,11 +12,8 @@ npm ci
 npm run verify
 ```
 
-`npm run verify` runs unit tests, typecheck, lint, format and a packed-consumer check.
-Individual commands: `npm test`, `npm run typecheck`, `npm run lint`,
-`npm run format:check`, `npm run test:package`.
-Shared JSON fixtures test normalized aggregation; native streams are mocked.
-The package check uses existing dependencies, `tar` and symlinks on macOS/Linux.
+`npm run verify` runs unit/viewer tests, typecheck, lint, format and package checks.
+Package checks require `tar` and symlinks on macOS/Linux.
 
 ## Containers
 
@@ -24,9 +21,8 @@ The package check uses existing dependencies, `tar` and symlinks on macOS/Linux.
 docker compose up --build --abort-on-container-failure python-verify typescript-verify
 ```
 
-Both images use Ubuntu; verify services have no network. Builds need network access.
-Services use `python-` or `typescript-` prefixes. TypeScript source is copied into
-its image, so rebuild after edits; Python uses a repository bind mount.
+Builds need network access; verify services have none. Rebuild after TypeScript
+edits. Python source uses a bind mount.
 
 ## Live tests
 
@@ -37,11 +33,10 @@ AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 docker compose run --rm --build typescrip
 AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 npm run test:integration
 ```
 
-These make billed calls and require `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY`.
-Python Compose sets its integration flag; TypeScript requires the explicit flag above.
-Missing flags/keys skip tests. TypeScript tests cover stream, continue and resume.
-Optional model overrides: `AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL` and
-`AGENT_SDK_WRAPPER_TS_OPENAI_MODEL`. Host commands do not load `.env`; Compose does.
+Set `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY`; live tests make billed calls.
+Missing keys/flags skip tests. Python Compose sets its flag; TypeScript requires
+the flag above. Override models with `AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL` or
+`AGENT_SDK_WRAPPER_TS_OPENAI_MODEL`. Compose loads `.env`; host commands do not.
 
 ## Build packages
 

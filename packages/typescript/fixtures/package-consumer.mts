@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   Agent,
   collectRun,
@@ -26,7 +27,8 @@ for (const selected of ["anthropic", "codex"] as const) {
       yield { type: "text", text: turn === 1 ? "READY" : "NATIVE_TWIN_42" };
     },
   };
-  const defaults = { provider: selected, continueSession: true };
+  const traceFile = `traces/${provider}/first.jsonl`;
+  const defaults = { provider: selected, continueSession: true, traceFile };
   const agent = new Agent(defaults, { [provider]: adapter });
   const seen: string[] = [];
   const first: RunResult = await collectRun(
@@ -39,6 +41,13 @@ for (const selected of ["anthropic", "codex"] as const) {
   assert.equal(seen[0], "run_started");
   assert.equal(seen.at(-1), "run_finished");
   assert.ok(first.session_id);
+  assert.deepEqual(
+    readFileSync(traceFile, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line)),
+    first.events,
+  );
   const saved: { provider: typeof provider; sessionId: string } = JSON.parse(
     JSON.stringify({ provider, sessionId: first.session_id }),
   );

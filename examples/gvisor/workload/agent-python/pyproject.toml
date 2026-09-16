@@ -1,0 +1,11 @@
+[project]
+name = "gvisor-agent-python"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["agent-sdk-wrapper"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+agent-sdk-wrapper = { path = "../../../../packages/python" }

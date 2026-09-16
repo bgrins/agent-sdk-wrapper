@@ -109,12 +109,7 @@ def test_each_event_type_validates_against_trace_schema() -> None:
 
 
 def test_trace_schema_covers_every_event_type() -> None:
-    """Every member of the ``AgentEvent`` union must have a schema branch.
-
-    The hand-written example list above exercises realistic payloads but can
-    silently fall behind the union; this walks the union itself so adding an
-    event without a schema entry fails here rather than in a consumer.
-    """
+    """Require a schema branch for every ``AgentEvent`` union member."""
 
     from typing import get_args
 

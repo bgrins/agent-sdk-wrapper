@@ -478,11 +478,11 @@ test("Claude forwards the explicit permission bypass prerequisite", async () => 
 });
 test("Claude native option types and runtime agree on unsupported shapes", () => {
   const invalid: AnthropicNativeOptions[] = [
-    // @ts-expect-error SDK presets are deliberately outside the public contract.
+    // @ts-expect-error SDK presets are unsupported.
     { tools: { type: "preset", preset: "claude_code" } },
-    // @ts-expect-error SDK presets are deliberately outside the public contract.
+    // @ts-expect-error SDK presets are unsupported.
     { systemPrompt: { type: "preset", preset: "claude_code" } },
-    // @ts-expect-error This slice requires defined strings in native env.
+    // @ts-expect-error Native env values must be strings.
     { env: { EXAMPLE: undefined } },
   ];
   for (const options of invalid)

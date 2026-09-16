@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate trace fixtures.
-
-Offline fixtures are deterministic and safe to commit. Live fixtures are
-integration-only and write timestamped artifacts under ``results/`` by default.
-"""
+"""Generate deterministic offline fixtures or capture live traces under ``results/``."""
 
 from __future__ import annotations
 

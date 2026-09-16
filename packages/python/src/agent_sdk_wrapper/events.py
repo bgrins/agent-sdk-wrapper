@@ -1,11 +1,6 @@
-"""Normalized event model shared by every provider.
+"""Normalized provider events and results.
 
-Both the Claude Agent SDK and the OpenAI Codex SDK emit their own streaming
-event shapes. Each provider adapter translates those into the small, stable set
-of events defined here, so callers see one vocabulary regardless of backend.
-
-Every event a run produces is wrapped in an :class:`EventEnvelope` (run id,
-monotonic sequence, timestamp) and can be serialized to a single JSONL line.
+Each event has a run ID, sequence and timestamp in an ``EventEnvelope``.
 """
 
 from __future__ import annotations
@@ -61,26 +56,12 @@ def _jsonable(value: Any) -> Any:
 
 @dataclass
 class TokenUsage:
-    """Normalized token counts for one or more model requests.
+    """Normalized token counts.
 
-    Providers disagree about what their raw counters include, so adapters
-    normalize onto one convention before emitting:
-
-    ``input_tokens``
-        Every prompt token the request billed, cached ones included. Anthropic
-        reports uncached input only, so its adapter folds the cache counters
-        back in; Codex already reports the full prompt count.
-    ``output_tokens``
-        Every generated token, reasoning included. Codex reports reasoning
-        apart from output, so its adapter folds it in.
-    ``cache_read_tokens`` / ``cache_write_tokens``
-        The cached portion of ``input_tokens``, broken out. Codex does not bill
-        cache writes, so its ``cache_write_tokens`` stays zero.
-    ``reasoning_output_tokens``
-        The reasoning portion of ``output_tokens``, broken out where the
-        provider reports it.
-    ``requests``
-        Model requests the counts cover.
+    ``input_tokens`` includes cache; ``output_tokens`` includes reasoning.
+    Cache read/write and reasoning fields are subsets of those totals.
+    ``requests`` counts model requests where available; provider proxies differ.
+    Codex cache-write counts are unavailable and remain zero.
     """
 
     input_tokens: int = 0
@@ -122,11 +103,7 @@ class _EventBase:
 
 @dataclass
 class RunStarted(_EventBase):
-    """The opening event of every run, carrying what the run was asked to do.
-
-    ``prompt`` and ``system_prompt`` are recorded so a trace is readable on its
-    own. Without them a trace holds every answer and none of the questions.
-    """
+    """Start of a run, including its prompt and system prompt."""
 
     type: ClassVar[str] = "run_started"
     provider: str = ""
@@ -138,11 +115,9 @@ class RunStarted(_EventBase):
 
 @dataclass
 class Text(_EventBase):
-    """A completed assistant text item.
+    """One completed assistant message.
 
-    One event per finalized assistant message item. Codex deltas are buffered
-    inside the adapter; Anthropic partial frames are explicitly disabled. The
-    name parallels the sibling :class:`Thinking` event.
+    Codex deltas are buffered; Anthropic partial frames are disabled.
     """
 
     type: ClassVar[str] = "text"
@@ -156,9 +131,7 @@ class Thinking(_EventBase):
 
     type: ClassVar[str] = "thinking"
     text: str = ""
-    # Bytes of encrypted reasoning the provider round-trips but never exposes.
-    # Set when a thinking item carries no readable text, so callers can tell a
-    # redacted item from an empty one.
+    # Encrypted signature length for reasoning with no readable text.
     redacted_bytes: int | None = None
     raw: dict[str, Any] | None = None
 
@@ -176,8 +149,7 @@ class ToolCall(_EventBase):
 class ToolResult(_EventBase):
     type: ClassVar[str] = "tool_result"
     id: str | None = None
-    # The tool this result belongs to, when the provider reports it, so callers
-    # need not track call ids themselves.
+    # Tool name, when reported by the provider.
     name: str | None = None
     output: str | None = None
     is_error: bool = False
@@ -258,9 +230,7 @@ class Error(_EventBase):
     type: ClassVar[str] = "error"
     message: str = ""
     error_type: str | None = None
-    # Whether re-running the request stands a chance of succeeding. Set for
-    # provider-reported errors that never raise, so callers that decide their
-    # own retry policy do not have to re-classify the message text.
+    # Retry classification, including provider errors that do not raise.
     retryable: bool = False
     raw: dict[str, Any] | None = None
 
@@ -313,7 +283,7 @@ class EventEnvelope:
 
 @dataclass
 class RunResult:
-    """The collected outcome of a completed (non-streamed) run."""
+    """The collected run result."""
 
     run_id: str
     provider: str

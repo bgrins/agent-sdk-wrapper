@@ -1,6 +1,6 @@
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
-/** Deliberately curated native controls. Unknown keys are rejected at runtime. */
+/** Supported native options. Reject unknown keys at runtime. */
 export type AnthropicNativeOptions = Pick<
   Options,
   | "permissionMode"
@@ -12,7 +12,7 @@ export type AnthropicNativeOptions = Pick<
   | "maxTurns"
   | "thinking"
 > & {
-  /** Preset objects are not implemented in this slice. */
+  /** SDK preset objects are unsupported. */
   tools?: string[];
   systemPrompt?: string;
   env?: Record<string, string>;

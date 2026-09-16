@@ -156,8 +156,7 @@ def test_live_fixture_promotion_models_ignore_generic_model_env(monkeypatch) -> 
     monkeypatch.setenv("PROVIDER", "codex")
     monkeypatch.setenv("MODEL", "claude-haiku-4-5")
 
-    # The generic MODEL is ignored, so openai falls back to its own default
-    # rather than picking up an Anthropic model name.
+    # Ignore generic MODEL; use the OpenAI default.
     assert (
         regenerate_fixtures._live_model_for(  # noqa: SLF001
             "openai",

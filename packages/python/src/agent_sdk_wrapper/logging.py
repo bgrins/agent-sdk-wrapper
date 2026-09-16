@@ -1,9 +1,6 @@
-"""Logging: a JSONL trace writer plus structured stdlib logging.
+"""Write all events to JSONL and the ``agent_sdk_wrapper`` logger.
 
-Every event a run produces is written to the trace file (full fidelity) and
-emitted through the stdlib ``agent_sdk_wrapper`` logger. Lifecycle events
-(run_started, tool_call, error, run_finished) log at INFO; everything else at
-DEBUG, so the default console stays quiet while the JSONL keeps everything.
+Lifecycle events log at INFO; other events log at DEBUG.
 """
 
 from __future__ import annotations

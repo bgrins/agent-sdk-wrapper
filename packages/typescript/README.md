@@ -1,8 +1,7 @@
 # TypeScript API
 
 ESM; Node 22.14+ in the 22.x line, or Node 24+.
-Calls the native Claude Agent SDK or Codex SDK directly.
-From the repository root: `npm ci && npm run build`.
+Run `npm ci && npm run build` from the repository root.
 
 ## Run, stream and resume
 
@@ -29,7 +28,7 @@ if (result.session_id) {
 }
 ```
 
-Supply native SDK credentials through environment/login. Codex also accepts
+Set native SDK credentials through environment variables or login. Codex also accepts
 `OPENAI_API_KEY`. The wrapper does not load `.env`.
 
 ## Contract
@@ -43,7 +42,8 @@ overridden per field, without deep merging. One active run per Agent.
 | `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider |
 | `maxRetries`, `retryDelayMs` | Default 0 retries; transient failures retry only before any events |
 | `signal` | Cancellation or `AbortSignal.timeout(ms)` |
-| `providerOptions` | Curated native controls below; unknown keys fail |
+| `traceFile` | Write normalized JSONL during `run()` or `stream()` |
+| `providerOptions` | Native options below; unknown keys fail |
 | `onProviderEvent`, `includeRaw` | Original SDK-event callback, or raw data on mapped events |
 
 `EventEnvelope` has `run_id`, zero-based `sequence`, `timestamp` and `event`.
@@ -54,13 +54,15 @@ session ID and events. `collectRun` rejects incomplete or misordered streams.
 `checkRuntime()` validates configuration and runtime availability without a model call.
 Setup throws `ConfigError` or `RuntimeUnavailableError`; runtime failures usually
 produce failed results. Signal-killed processes throw `ProcessTerminatedError`.
-Custom `ProviderAdapter`s implement validation, availability and streaming.
+Trace I/O or serialization failures throw `TraceWriteError` without retrying inference.
+Implement `ProviderAdapter` for custom validation, runtime checks and streaming.
 
 ## Capabilities
 
 | Capability | Claude | Codex |
 |---|---|---|
 | Run, stream, resume, effort, cwd | Supported | Supported |
+| Trace files | Supported | Supported |
 | Permissions and built-in tool controls | Provider-specific | Provider-specific |
 | System prompt and max turns | Provider-specific | Not yet implemented |
 | Host callbacks, MCP registration, structured output | Not yet implemented | Not yet implemented |
@@ -76,17 +78,24 @@ Native options use `providerOptions.provider: "anthropic"` or `"openai"`:
 
 Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
 `allowedTools` grants approval, not a hard filter. Codex `env` replaces inheritance.
-Native tool activity does not imply host callback support. See [API limits](PARITY.md).
+Host tool callbacks are unsupported. See [API limits](PARITY.md).
 
 ## Native events and traces
 
 `onProviderEvent` receives original SDK events, typed `unknown`, including unmapped
-frames. Callback exceptions fail the run. Native SDK symbols and client handles
-are not re-exported; import native symbols directly when needed.
+frames. Callback exceptions fail the run. Import native SDK symbols from their
+packages; the wrapper does not re-export them or expose client handles.
 
-Write each envelope as a JSONL line, then open it with root `docs/trace-viewer.html`.
-The [session example](examples/continue-session.ts) saves its first successful
-trace to `results/typescript/trace.jsonl`; later turns are printed only.
-There is no automatic artifact manifest or Results-sidebar discovery.
+```ts
+await agent.run({ prompt: "Inspect the project", traceFile: "results/run/trace.jsonl" });
+```
 
-[Validation commands](VALIDATION.md) cover tests, packaging and opt-in live runs.
+Use a distinct path per call, including resumes: each call overwrites its file.
+Relative paths use the caller's working directory. Parent directories are created.
+Envelopes are written before yielding; interrupted streams leave partial traces.
+Validation and runtime checks leave files untouched. Managed bundles are unsupported.
+
+The [session example](examples/continue-session.ts) writes a trace for each call.
+View them with `npm run trace-viewer -- results/typescript` from the repository root.
+
+[Test and build commands](VALIDATION.md).

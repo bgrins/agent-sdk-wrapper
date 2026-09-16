@@ -1,9 +1,4 @@
-"""Helpers for structured output: build a JSON schema from a type, and
-validate a raw value back into that type.
-
-Accepts Pydantic models, dataclasses, and TypedDicts — anything Pydantic's
-``TypeAdapter`` understands.
-"""
+"""Build JSON schemas and validate output with Pydantic ``TypeAdapter``."""
 
 from __future__ import annotations
 

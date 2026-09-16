@@ -1,6 +1,4 @@
-"""Provider adapters: translate each backend SDK's stream into the unified
-event model defined in :mod:`agent_sdk_wrapper.events`.
-"""
+"""Map native SDK streams to normalized events."""
 
 from __future__ import annotations
 

@@ -1,0 +1,68 @@
+x-limits: &limits
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  cpus: 2
+  mem_limit: 2g
+  pids_limit: 256
+  ulimits:
+    nofile: {soft: 512, hard: 512}
+    fsize: {soft: 16777216, hard: 16777216}
+  tmpfs: ['/tmp:rw,nosuid,nodev,size=128m']
+  logging:
+    driver: local
+    options: {max-size: 1m, max-file: '2'}
+  labels: {agent-sdk-wrapper.gvisor-example: '1'}
+  pull_policy: never
+
+x-worker: &worker
+  <<: *limits
+  runtime: runsc-agent
+  network_mode: none
+  user: '1000:1000'
+  volumes:
+    - state:/job
+    - socket:/inference:ro
+    - type: bind
+      source: ${GVISOR_RUN_OUTPUT:?Use run.sh}
+      target: /job/output
+  environment:
+    HOME: /job/home
+    CODEX_HOME: /job/home/.codex
+    CLAUDE_CONFIG_DIR: /job/home/.claude
+    GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Use run.sh}
+    PROVIDER: ${PROVIDER:-anthropic}
+    GVISOR_MODEL: ${GVISOR_MODEL:-}
+    JOB_REQUEST: ${JOB_REQUEST:-}
+
+services:
+  gateway:
+    <<: *limits
+    image: agent-sdk-wrapper-gvisor-gateway
+    network_mode: bridge
+    volumes: [socket:/socket]
+    healthcheck:
+      test: [CMD-SHELL, 'test -S /socket/gateway.sock']
+      interval: 1s
+      timeout: 1s
+      retries: 10
+    environment:
+      PROVIDER: ${PROVIDER:-anthropic}
+      UPSTREAM_KEY: ${UPSTREAM_KEY:?Use run.sh}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Use run.sh}
+
+  python-agent:
+    <<: *worker
+    profiles: [python]
+    image: agent-sdk-wrapper-gvisor-python
+
+  typescript-agent:
+    <<: *worker
+    profiles: [typescript]
+    image: agent-sdk-wrapper-gvisor-typescript
+
+volumes:
+  state:
+    labels: {agent-sdk-wrapper.gvisor-example: '1'}
+  socket:
+    labels: {agent-sdk-wrapper.gvisor-example: '1'}

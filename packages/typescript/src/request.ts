@@ -25,6 +25,7 @@ export interface AgentDefaults {
   signal?: AbortSignal;
   providerOptions?: ProviderOptions;
   onProviderEvent?: (event: unknown) => void;
+  traceFile?: string;
   // Reserved features fail at compile time and at runtime, including empty values.
   tools?: never;
   mcpServers?: never;
@@ -61,6 +62,7 @@ const keys = new Set([
   "signal",
   "providerOptions",
   "onProviderEvent",
+  "traceFile",
 ]);
 export function checkKeys(
   value: object,
@@ -69,9 +71,7 @@ export function checkKeys(
 ): void {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key))
-      throw new ConfigError(
-        `${label}.${key} is not implemented or recognized in this TypeScript slice`,
-      );
+      throw new ConfigError(`${label}.${key} is not implemented or recognized`);
   }
 }
 export function normalizeProvider(value: string): Provider {
@@ -125,13 +125,15 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
   checkKeys(input, keys, "request");
   if (typeof input.prompt !== "string")
     throw new ConfigError("prompt must be a string");
-  for (const key of ["cwd", "sessionId"] as const) {
+  for (const key of ["cwd", "sessionId", "traceFile"] as const) {
     if (
       input[key] !== undefined &&
       (typeof input[key] !== "string" || !input[key]?.trim())
     )
       throw new ConfigError(`${key} must be a non-empty string`);
   }
+  if (input.traceFile?.includes("\0"))
+    throw new ConfigError("traceFile must not contain NUL characters");
   for (const key of ["includeRaw", "continueSession"] as const) {
     if (input[key] !== undefined && typeof input[key] !== "boolean")
       throw new ConfigError(`${key} must be boolean`);

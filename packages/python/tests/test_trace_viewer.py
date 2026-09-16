@@ -38,7 +38,7 @@ def test_trace_viewer_accepts_artifact_directories_and_core_files() -> None:
     assert "result.json" in html
 
 
-def test_trace_viewer_auto_discovers_served_results_tree() -> None:
+def test_trace_viewer_loads_the_shared_server_index() -> None:
     html = viewer_html()
 
     for marker in (
@@ -46,9 +46,9 @@ def test_trace_viewer_auto_discovers_served_results_tree() -> None:
         'class="results-scroll"',
         'id="refreshResults"',
         'id="runs"',
-        '"/results/"',
+        '"/api/runs"',
         "manifest.json",
-        "Serve the repository root to scan /results/.",
+        "Run npm run trace-viewer for live traces.",
     ):
         assert marker in html
 
@@ -109,11 +109,7 @@ def test_trace_viewer_has_conversation_first_information_architecture() -> None:
 
 
 def test_trace_viewer_workspace_scrolls_instead_of_clipping() -> None:
-    """The workspace pane must stretch into a bounded row and scroll itself.
-
-    Left content-sized, it grows past main's overflow:hidden and every event
-    below the fold becomes unreachable.
-    """
+    """Keep the workspace scrollable inside its bounded grid row."""
 
     html = viewer_html()
 

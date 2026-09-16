@@ -1,11 +1,4 @@
-"""The unified ``Agent`` — one surface over both backend SDKs.
-
-``Agent`` holds the persistent configuration (provider, model, system prompt,
-tools, subagents, output schema). Each call to :meth:`Agent.run` or
-:meth:`Agent.stream` builds a :class:`RunRequest`, drives the provider's event
-stream, frames every event in an :class:`EventEnvelope`, logs it, and either
-collects a :class:`RunResult` or yields envelopes to the caller.
-"""
+"""Agent configuration, provider dispatch and event collection."""
 
 from __future__ import annotations
 
@@ -99,11 +92,9 @@ _ALLOWED_OVERRIDES = frozenset({
 
 
 class Agent:
-    """A unified agent over the Claude Agent SDK or the OpenAI Codex SDK.
+    """Run or stream calls through Claude or Codex.
 
-    The same ``run()`` / ``stream()`` surface works for either backend. Keyword
-    arguments to the constructor are defaults; the same names on ``run`` /
-    ``stream`` override them per call.
+    Constructor arguments are defaults; per-call arguments override them.
     """
 
     def __init__(
@@ -174,14 +165,8 @@ class Agent:
 
         self._provider = build_provider(self.provider, **(provider_options or {}))
 
-    # ── public API ──────────────────────────────────────────────────────
-
     def check_runtime(self) -> None:
-        """Validate the resolved request, then raise if runtime is unavailable.
-
-        This runs provider-specific request validation first, so most
-        ``ConfigError`` cases surface before provider I/O or the first run.
-        """
+        """Validate the request before checking runtime availability."""
 
         req = self._build_request("", {})
         self._provider.validate_request(req)
@@ -426,8 +411,6 @@ class Agent:
         **overrides: Any,
     ) -> RunResult:
         return asyncio.run(self.dump_context(path, prompt=prompt, **overrides))
-
-    # ── internals ───────────────────────────────────────────────────────
 
     def _build_request(self, prompt: str, overrides: dict[str, Any]) -> RunRequest:
         def pick(name: str, default: Any) -> Any:

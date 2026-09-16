@@ -1,15 +1,8 @@
-"""Run matched scenarios on both providers so their traces can be compared.
+"""Compare provider traces using matched prompts, tools and schemas.
 
-Each scenario runs the same prompt, tools, and schema against an Anthropic and
-an OpenAI model, writing artifacts to
-``results/compare/<timestamp>/<scenario>/<label>/``. Load the pairs side by side
-in ``docs/trace-viewer.html`` to see how each backend's native stream lands in
-the normalized event model.
-
-    uv run python scripts/compare_providers.py
     uv run python scripts/compare_providers.py --scenario tools --scenario basic
 
-Requires ANTHROPIC_API_KEY and OPENAI_API_KEY; these are live, billed runs.
+Requires both API keys. Writes ``results/compare/<timestamp>/<scenario>/<label>/``.
 """
 
 from __future__ import annotations
@@ -160,8 +153,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
 
     rows = []
     for name in scenarios:
-        # Both providers run the scenario concurrently; scenarios run in order
-        # so the console output stays readable as a paired comparison.
+        # Run providers concurrently within each scenario.
         rows.extend(
             await asyncio.gather(
                 *(

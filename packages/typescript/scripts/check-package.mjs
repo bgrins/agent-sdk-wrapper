@@ -60,8 +60,7 @@ try {
     installed,
     "--strip-components=1",
   ]);
-  // Reuse the exact locked dependencies without a registry request or install.
-  // Consumer code resolves the wrapper from the extracted tarball, not the workspace.
+  // Use locked dependencies and resolve the wrapper from the extracted tarball.
   symlinkSync(
     join(repository, "node_modules"),
     join(installed, "node_modules"),

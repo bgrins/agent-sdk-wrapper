@@ -443,10 +443,7 @@
       font-size: 11px;
     }
 
-    /* Runtime and usage are different kinds of data, so they read as two
-       separate blocks rather than one joined table. Each sizes to its content
-       and sits left — stretched across a wide viewport the numbers drift so far
-       apart they stop being comparable. */
+
     .metrics {
       display: flex;
       flex-wrap: wrap;
@@ -720,10 +717,7 @@
 
     .viewer-layout {
       height: 100%;
-      /* The single row must be bounded, and both panes must stretch into it.
-         Left content-sized (align-items: start), the workspace grows to its
-         full scroll height and main's overflow:hidden clips everything past
-         the fold instead of letting the workspace scroll. */
+      /* Bound the row so the workspace scrolls within it. */
       grid-template-rows: minmax(0, 1fr);
       grid-template-columns: 300px minmax(0, 1fr);
       align-items: stretch;
@@ -815,9 +809,7 @@
       padding: 14px 16px 24px;
     }
 
-    /* Each tab panel is a plain container, not a card. Its contents are already
-       cards, and wrapping cards in a card cost ~8% of the reading width to
-       nested padding and borders. */
+
     section.view {
       padding: 0;
       border: 0;
@@ -1055,8 +1047,7 @@
       color: var(--warn);
     }
 
-    /* A marker that content is absent, not the content itself: no panel, no
-       body text styling, just a muted badge and a dim note. */
+
     .trace-note {
       display: flex;
       align-items: center;
@@ -1167,6 +1158,8 @@
       <h1>agent-sdk-wrapper Trace Viewer</h1>
       <div class="controls">
         <button id="toggleResults" class="button" type="button" aria-expanded="true" aria-controls="resultsSidebar">Hide Results</button>
+        <label class="button"><input id="autoRefresh" type="checkbox" checked> Live</label>
+        <button id="latestRun" class="button" type="button">Latest run</button>
         <label class="button" for="artifactFiles">Open Artifact Directory</label>
         <input id="artifactFiles" type="file" webkitdirectory directory multiple>
         <label class="button" for="looseFiles">Open Files</label>
@@ -1252,6 +1245,8 @@
     const toggleResultsButton = document.querySelector("#toggleResults");
     const resultsSidebarEl = document.querySelector("#resultsSidebar");
     const refreshResultsButton = document.querySelector("#refreshResults");
+    const autoRefresh = document.querySelector("#autoRefresh");
+    const latestRunButton = document.querySelector("#latestRun");
     const resultsStatusEl = document.querySelector("#resultsStatus");
     const runsEl = document.querySelector("#runs");
     const summaryEl = document.querySelector("#summary");
@@ -1270,10 +1265,14 @@
     const loadErrorEl = document.querySelector("#load-error");
     const tabButtons = [...document.querySelectorAll(".tab-btn")];
     const RESULTS_SIDEBAR_STORAGE_KEY = "agent-sdk-wrapper.trace-viewer.resultsCollapsed";
-    const MAX_RESULT_DIRECTORIES = 500;
     let objectUrls = [];
     let discoveredRuns = [];
     let activeRunUrl = "";
+    let followLatest = true;
+    let discovering = false;
+    let loadVersion = 0;
+    let loadedContent = "";
+    let renderedRuns = "";
 
     applyResultsSidebarState(loadResultsSidebarCollapsed());
     artifactInput.addEventListener("change", () => loadFiles([...artifactInput.files]));
@@ -1283,7 +1282,15 @@
       applyResultsSidebarState(collapsed);
       saveResultsSidebarCollapsed(collapsed);
     });
-    refreshResultsButton.addEventListener("click", () => discoverResults());
+    refreshResultsButton.addEventListener("click", () => discoverResults(true));
+    latestRunButton.addEventListener("click", () => {
+      followLatest = true;
+      autoRefresh.checked = true;
+      discoverResults(true);
+    });
+    autoRefresh.addEventListener("change", () => {
+      if (autoRefresh.checked) discoverResults();
+    });
     copyRawButton.addEventListener("click", copyRawTrace);
     runFilterEl.addEventListener("input", () => renderRuns(discoveredRuns));
     tabButtons.forEach((button) => {
@@ -1291,105 +1298,78 @@
     });
 
     discoverResults();
+    if (window.location.protocol !== "file:") {
+      setInterval(() => {
+        if (autoRefresh.checked && !document.hidden) discoverResults();
+      }, 2000);
+    } else {
+      autoRefresh.checked = false;
+      autoRefresh.disabled = true;
+      latestRunButton.disabled = true;
+    }
 
-    async function discoverResults() {
+    async function discoverResults(force = false) {
       if (window.location.protocol === "file:") {
-        setResultsStatus("Serve the repository root to scan /results/.");
+        setResultsStatus("Run npm run trace-viewer for live traces.");
         renderRuns([]);
         return;
       }
+      if (discovering) return;
+      discovering = true;
+      const selectionVersion = loadVersion;
 
-      const rootUrl = resultsRootUrl();
-      setResultsStatus(`Scanning ${rootUrl.pathname}.`);
       try {
-        discoveredRuns = await findResultRuns(rootUrl);
+        const previous = new Map(discoveredRuns.map((run) => [run.runUrl.href, run]));
+        discoveredRuns = (await findResultRuns()).map((run) => ({
+          ...run, manifest: run.manifest || previous.get(run.runUrl.href)?.manifest,
+        }));
         renderRuns(discoveredRuns);
+        if (selectionVersion !== loadVersion) return;
         if (discoveredRuns.length) {
           setResultsStatus(`Found ${discoveredRuns.length} result run(s).`);
-          await loadRunFromUrl(discoveredRuns[0]);
+          const selected = followLatest ? discoveredRuns[0]
+            : discoveredRuns.find((run) => run.runUrl.href === activeRunUrl) || discoveredRuns[0];
+          await loadRunFromUrl(selected, { refresh: !force && selected.runUrl.href === activeRunUrl });
         } else {
-          setResultsStatus(`No manifest.json files found under ${rootUrl.pathname}.`);
+          setResultsStatus("Waiting for traces.");
         }
       } catch (error) {
         renderRuns([]);
         setResultsStatus(error instanceof Error ? error.message : String(error));
+      } finally {
+        discovering = false;
       }
     }
 
-    function resultsRootUrl() {
-      const configured = new URLSearchParams(window.location.search).get("results");
-      return new URL(configured || "/results/", window.location.href);
-    }
-
-    async function findResultRuns(rootUrl) {
-      const queue = [rootUrl];
-      const visited = new Set();
-      const manifestUrls = new Map();
-
-      while (queue.length && visited.size < MAX_RESULT_DIRECTORIES) {
-        const directoryUrl = queue.shift();
-        const directoryKey = directoryUrl.href;
-        if (visited.has(directoryKey)) continue;
-        visited.add(directoryKey);
-
-        const html = await fetchText(directoryUrl, directoryUrl.pathname);
-        for (const linkUrl of directoryLinks(html, directoryUrl, rootUrl)) {
-          const name = decodeURIComponent(linkUrl.pathname.split("/").filter(Boolean).pop() || "");
-          if (name === "manifest.json") {
-            const runUrl = new URL(".", linkUrl);
-            manifestUrls.set(runUrl.href, { runUrl, manifestUrl: linkUrl });
-          } else if (linkUrl.pathname.endsWith("/")) {
-            queue.push(linkUrl);
-          }
-        }
-      }
-
-      const runs = [];
-      for (const { runUrl, manifestUrl } of manifestUrls.values()) {
-        const manifest = await fetchJson(manifestUrl, manifestUrl.pathname);
-        runs.push({
-          runUrl,
-          manifestUrl,
-          manifest,
-          label: relativeResultsPath(runUrl, rootUrl),
-        });
-      }
-      return runs.sort(compareRuns);
-    }
-
-    function directoryLinks(html, directoryUrl, rootUrl) {
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      const links = [];
-      for (const anchor of doc.querySelectorAll("a[href]")) {
-        const href = anchor.getAttribute("href");
-        if (!href || href.startsWith("#")) continue;
-        const url = new URL(href, directoryUrl);
-        if (url.origin !== rootUrl.origin) continue;
-        if (!url.pathname.startsWith(rootUrl.pathname)) continue;
-        if (url.pathname === directoryUrl.pathname) continue;
-        links.push(url);
-      }
-      return links;
+    async function findResultRuns() {
+      const index = new URLSearchParams(window.location.search).get("index");
+      const url = new URL(index || "/api/runs", window.location.href);
+      const entries = await fetchJson(url, url.pathname);
+      return entries.map((entry) => ({
+        runUrl: new URL(entry.trace || entry.manifest, window.location.href),
+        traceRel: entry.trace,
+        manifestUrl: entry.manifest ? new URL(entry.manifest, window.location.href) : null,
+        label: entry.label,
+        updatedAt: entry.updated_at,
+      })).sort(compareRuns);
     }
 
     function compareRuns(left, right) {
-      const leftTime = left.manifest?.updated_at || left.label;
-      const rightTime = right.manifest?.updated_at || right.label;
+      const leftTime = left.updatedAt || left.manifest?.updated_at || left.label;
+      const rightTime = right.updatedAt || right.manifest?.updated_at || right.label;
       return rightTime.localeCompare(leftTime);
     }
 
-    function relativeResultsPath(runUrl, rootUrl) {
-      const rootPath = rootUrl.pathname.endsWith("/") ? rootUrl.pathname : `${rootUrl.pathname}/`;
-      return decodeURIComponent(runUrl.pathname.slice(rootPath.length).replace(/\/$/, ""));
-    }
-
     function renderRuns(runs) {
+      const query = (runFilterEl?.value || "").trim().toLowerCase();
+      const content = JSON.stringify([activeRunUrl, query, runs, runs.map(runMeta)]);
+      if (content === renderedRuns) return;
+      renderedRuns = content;
       if (!runs.length) {
         runsEl.replaceChildren(emptyListItem("No result runs found."));
         return;
       }
 
-      const query = (runFilterEl?.value || "").trim().toLowerCase();
       const visible = query
         ? runs.filter((run) => runSearchText(run).includes(query))
         : runs;
@@ -1405,14 +1385,15 @@
         button.type = "button";
         button.className = `run-button status-${status}`.trim();
         button.setAttribute("aria-current", run.runUrl.href === activeRunUrl ? "true" : "false");
-        button.addEventListener("click", () => loadRunFromUrl(run));
+        button.addEventListener("click", () => {
+          followLatest = false;
+          loadRunFromUrl(run);
+        });
 
         const label = run.label || run.runUrl.pathname;
         const title = document.createElement("div");
         title.className = "run-title";
-        // Nested run paths share long prefixes, so the leaf identifies the run;
-        // clamping from the start would hide exactly that. Show the leaf, keep
-        // its parent dimmed ahead of it, and put the full path on the tooltip.
+        // Show the leaf name; keep the full path in the tooltip.
         const segments = label.split("/").filter(Boolean);
         const leaf = segments.pop() || label;
         if (segments.length) {
@@ -1439,12 +1420,10 @@
     }
 
     function runMeta(run) {
-      // The status is already carried by the card's colored edge, and a full
-      // ISO timestamp is unscannable, so the meta line is model plus age.
       const manifest = run.manifest || {};
       const parts = [
         manifest.model || manifest.provider || "",
-        relativeTime(manifest.updated_at),
+        relativeTime(run.updatedAt || manifest.updated_at),
       ].filter(Boolean);
       return parts.join(" · ");
     }
@@ -1483,35 +1462,58 @@
       return label;
     }
 
-    async function loadRunFromUrl(run) {
+    async function loadRunFromUrl(run, { refresh = false } = {}) {
+      const version = ++loadVersion;
       clearObjectUrls();
       setLoadError("");
       activeRunUrl = run.runUrl.href;
       renderRuns(discoveredRuns);
 
       try {
-        const manifest = run.manifest || await fetchJson(run.manifestUrl, run.manifestUrl.pathname);
-        const traceRel = manifest?.files?.trace || "trace.jsonl";
+        const manifest = run.manifestUrl ? await fetchJson(run.manifestUrl, run.manifestUrl.pathname) : null;
+        const traceRel = manifest?.files?.trace || run.traceRel || "trace.jsonl";
         const resultRel = manifest?.files?.result || null;
-        const traceUrl = new URL(traceRel, run.runUrl);
-        const resultUrl = resultRel ? new URL(resultRel, run.runUrl) : null;
+        const traceUrl = runFileUrl(traceRel, run.runUrl);
+        const resultUrl = resultRel ? runFileUrl(resultRel, run.runUrl) : null;
         const traceText = await fetchText(traceUrl, traceUrl.pathname);
         const trace = parseTrace(traceText, traceRel);
         const result = resultUrl ? await fetchJson(resultUrl, resultUrl.pathname) : null;
+        if (version !== loadVersion) return;
+        const content = JSON.stringify([traceText, manifest, result]);
+        if (refresh && content === loadedContent) return;
+        loadedContent = content;
+        const scroll = workspaceEl.scrollTop;
+        const atBottom = workspaceEl.scrollHeight - workspaceEl.clientHeight - scroll < 40;
+        const openDetails = [...workspaceEl.querySelectorAll("details")].map((node) => node.open);
 
-        run.manifest = manifest;
+        run.manifest = { ...traceMetadata(trace), ...manifest };
+        renderRuns(discoveredRuns);
         renderSummary(manifest, result, trace);
         renderResult(result, trace);
         renderConversation(trace);
         renderTimeline(trace);
         renderEvents(trace);
-        renderServerFiles(manifest, run.runUrl);
+        renderServerFiles(manifest, run.runUrl, traceRel);
         renderRaw(traceText);
-        resetWorkspaceScroll();
+        if (refresh) {
+          [...workspaceEl.querySelectorAll("details")].forEach((node, index) => {
+            if (openDetails[index] !== undefined) node.open = openDetails[index];
+          });
+          workspaceEl.scrollTop = atBottom ? workspaceEl.scrollHeight : scroll;
+        } else resetWorkspaceScroll();
       } catch (error) {
-        renderEmpty();
+        if (version !== loadVersion) return;
+        if (!refresh) renderEmpty();
         setLoadError(error instanceof Error ? error.message : String(error));
       }
+    }
+
+    function runFileUrl(path, runUrl) {
+      const url = new URL(path, runUrl);
+      if (url.origin !== runUrl.origin || !url.pathname.startsWith(new URL(".", runUrl).pathname)) {
+        throw new Error("Artifact must be inside the run directory");
+      }
+      return url;
     }
 
     async function fetchJson(url, label) {
@@ -1532,6 +1534,9 @@
     }
 
     async function loadFiles(files) {
+      const version = ++loadVersion;
+      autoRefresh.checked = false;
+      loadedContent = "";
       clearObjectUrls();
       setLoadError("");
       activeRunUrl = "";
@@ -1553,6 +1558,7 @@
         const result = resultFile ? await readJson(resultFile) : null;
         const traceText = traceFile ? await traceFile.text() : "";
         const trace = traceFile ? parseTrace(traceText, relativeName(traceFile)) : [];
+        if (version !== loadVersion) return;
 
         renderSummary(manifest, result, trace);
         renderResult(result, trace);
@@ -1563,6 +1569,7 @@
         renderRaw(traceText);
         resetWorkspaceScroll();
       } catch (error) {
+        if (version !== loadVersion) return;
         renderEmpty();
         setLoadError(error instanceof Error ? error.message : String(error));
       }
@@ -1586,10 +1593,7 @@
     }
 
     function findTraceByExtension(byPath) {
-      // Picking loose files, the trace is often not named trace.jsonl — the
-      // committed fixtures are <name>.trace.jsonl. Fall back to extension so a
-      // hand-picked trace loads instead of rendering an empty view. The
-      // provider-native sidecar is a .jsonl too, so it is never the fallback.
+      // Accept named trace fixtures; exclude the native-event sidecar.
       let fallback = null;
       for (const [path, file] of byPath) {
         const name = path.split("/").pop() || path;
@@ -1625,16 +1629,31 @@
         });
     }
 
+    function traceMetadata(trace) {
+      const started = trace.findLast((row) => row.event?.type === "run_started");
+      const current = started ? trace.filter((row) => row.run_id === started.run_id) : trace;
+      const finished = current.findLast((row) => row.event?.type === "run_finished")?.event;
+      const durations = trace.filter((row) => row.event?.type === "run_finished" && Number.isFinite(row.event.duration_ms));
+      return {
+        ...started?.event,
+        run_id: started?.run_id,
+        status: finished?.status || (started ? "running" : "unknown"),
+        ended_reason: finished?.ended_reason,
+        session_id: current.findLast((row) => row.event?.type === "session_info")?.event.id,
+        duration_ms: durations.length ? durations.reduce((total, row) => total + row.event.duration_ms, 0) : undefined,
+        error: finished?.status === "failure" ? current.findLast((row) => row.event?.type === "error")?.event.message : undefined,
+        updated_at: trace.at(-1)?.timestamp,
+      };
+    }
+
     function renderSummary(manifest, result, trace) {
-      // Everything a run is judged on, laid out flat: outcome as badges, the
-      // numbers as one scannable row. Nothing here is collapsed, because eight
-      // facts behind a disclosure cost more attention than they save.
-      const status = manifest?.status || result?.status || "unknown";
+      const metadata = { ...traceMetadata(trace), ...manifest, ...result };
+      const status = metadata.status || "unknown";
       const stats = traceStats(trace, result);
-      const provider = manifest?.provider || result?.provider || "";
-      const model = manifest?.model || result?.model || "";
-      const endedReason = result?.ended_reason || "";
-      const error = manifest?.error || result?.error || "";
+      const provider = metadata.provider || "";
+      const model = metadata.model || "";
+      const endedReason = metadata.ended_reason || "";
+      const error = metadata.error || "";
 
       const badges = [statusBadge(status)];
       if (endedReason && endedReason !== "success" && endedReason !== "unknown") {
@@ -1651,13 +1670,13 @@
       runBadgesEl.replaceChildren(...badges);
 
       const identParts = [];
-      const runId = manifest?.run_id || result?.run_id || "";
+      const runId = metadata.run_id || "";
       if (runId) identParts.push(["run", runId.slice(0, 8), runId]);
-      if (result?.session_id) {
-        identParts.push(["session", result.session_id, result.session_id]);
+      if (metadata.session_id) {
+        identParts.push(["session", metadata.session_id, metadata.session_id]);
       }
-      if (manifest?.updated_at) {
-        identParts.push(["", relativeTime(manifest.updated_at), manifest.updated_at]);
+      if (metadata.updated_at) {
+        identParts.push(["", relativeTime(metadata.updated_at), metadata.updated_at]);
       }
       runIdentEl.replaceChildren(
         ...identParts.map(([label, value, full]) => {
@@ -1670,19 +1689,15 @@
       );
 
       const usage = stats.usage || {};
-      // Two labeled rows: what the run did, then what it spent. Mixing token
-      // counts in with event counts made both harder to read.
       const runtime = [
-        ["Duration", formatDuration(manifest?.duration_ms ?? result?.duration_ms)],
+        ["Duration", formatDuration(metadata.duration_ms)],
         ["Events", String(trace.length)],
         ["Tools", String(stats.toolCalls)],
         ["Requests", usage.requests ? String(usage.requests) : ""],
       ];
       const spend = [
         ["Input", formatCount(usage.input_tokens)],
-        // Cache reads and reasoning are provider-specific; a cell that always
-        // reads zero is wasted width, so these appear only when they carry a
-        // number.
+        // Hide optional counters when zero.
         ["Cached", usage.cache_read_tokens ? formatCount(usage.cache_read_tokens) : ""],
         ["Output", formatCount(usage.output_tokens)],
         [
@@ -1701,6 +1716,7 @@
       let toolCalls = 0;
       let usage = result?.usage || null;
       let cost = typeof result?.cost_usd === "number" ? result.cost_usd : null;
+      let eventCost = null;
       const totals = {};
       let sawUsageEvent = false;
 
@@ -1712,17 +1728,16 @@
         for (const [key, value] of Object.entries(event.usage || {})) {
           totals[key] = (totals[key] || 0) + value;
         }
-        if (cost === null && typeof event.cost_usd === "number") cost = event.cost_usd;
+        if (typeof event.cost_usd === "number") eventCost = (eventCost || 0) + event.cost_usd;
       }
-      // result.json is authoritative; fall back to summing the stream so a
-      // trace opened without its result still reports spend.
+      // Prefer result.json totals; otherwise sum trace usage.
       if (!usage && sawUsageEvent) usage = totals;
+      if (cost === null) cost = eventCost;
 
       return {
         toolCalls,
         usage,
-        // A dash is deliberate: Codex reports no dollar cost, and showing the
-        // cell empty-handed is more honest than hiding that it exists.
+        // Use a dash when cost is unavailable.
         costLabel: cost === null ? "—" : formatCost(cost),
       };
     }
@@ -1734,8 +1749,7 @@
 
     function formatCost(cost) {
       if (cost === 0) return "$0";
-      // Runs routinely land in fractions of a cent, so two decimals would
-      // round most of them to the same uninformative $0.01.
+      // Keep sub-cent precision.
       return cost < 1 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
     }
 
@@ -1779,9 +1793,7 @@
     }
 
     function renderResult(result, trace) {
-      // The conversation already renders the final text and the structured
-      // output, so this is only a fallback for a result.json opened without
-      // its trace.
+      // Use result.json when the trace has no final output.
       if (!result || trace.length) {
         resultEl.replaceChildren();
         return;
@@ -2201,14 +2213,15 @@
       filesEl.replaceChildren(...items.length ? items : emptyListItem("No files loaded."));
     }
 
-    function renderServerFiles(manifest, runUrl) {
-      const names = new Set(["manifest.json"]);
+    function renderServerFiles(manifest, runUrl, traceRel) {
+      const names = new Set(manifest ? ["manifest.json"] : []);
+      if (traceRel) names.add(traceRel);
       for (const rel of Object.values(manifest?.files || {})) names.add(rel);
 
       const items = [...names].sort().map((name) => {
         const li = document.createElement("li");
         const link = document.createElement("a");
-        link.href = new URL(name, runUrl).href;
+        link.href = runFileUrl(name, runUrl).href;
         link.textContent = name;
         link.target = "_blank";
         link.rel = "noreferrer";
@@ -2288,8 +2301,7 @@
       for (const view of document.querySelectorAll(".view")) {
         view.classList.toggle("active", view.id === viewId);
       }
-      // The workspace is one scroller shared by every tab, so a deep scroll in
-      // a long view would otherwise drop you mid-content in the next one.
+      // Reset the shared scroll position when switching tabs.
       resetWorkspaceScroll();
     }
 
@@ -2341,8 +2353,7 @@
     let rawTraceText = "";
 
     function renderRaw(text) {
-      // The trace file verbatim, not a re-serialization: the Raw tab exists to
-      // show exactly what is on disk, byte for byte.
+      // Show the loaded trace text without re-serializing it.
       rawTraceText = text || "";
       if (!rawTraceText) {
         rawEl.innerHTML = '<span class="empty">No trace loaded.</span>';
@@ -2379,6 +2390,7 @@
     }
 
     function renderEmpty() {
+      loadedContent = "";
       summaryEl.innerHTML = '<div class="empty">No trace loaded.</div>';
       runBadgesEl.replaceChildren();
       runIdentEl.replaceChildren();

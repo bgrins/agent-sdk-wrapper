@@ -1,10 +1,6 @@
-"""Delegate to a subagent. The parent invokes the subagent as a tool and gets
-the result back, with control returning to the parent.
+"""Delegate through Claude agent definitions or Codex multi-agent config.
 
-Anthropic maps ``SubagentDef`` to ``AgentDefinition``. Codex maps it to
-Codex multi-agent configuration.
-
-    uv run python examples/subagent.py
+uv run python examples/subagent.py
 """
 
 from __future__ import annotations
