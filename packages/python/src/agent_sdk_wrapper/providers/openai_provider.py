@@ -104,7 +104,6 @@ class OpenAIProvider(ProviderAdapter):
         self._debug = debug
         self._thread_options = dict(thread_options or {})
         self._turn_options = dict(turn_options or {})
-        self._usage_baseline = _UsageBaseline()
 
     def ensure_available(self) -> None:
         try:
@@ -185,9 +184,7 @@ class OpenAIProvider(ProviderAdapter):
                         yield WarningEvent(message=warning)
 
                     turn = await thread.turn(req.prompt, **turn_kwargs)
-                    async for event in _stream_turn(
-                        turn, req, thread.id, self._usage_baseline
-                    ):
+                    async for event in _stream_turn(turn, req, thread.id):
                         yield event
         except (ProviderNotAvailableError, ConfigError, AgentSdkWrapperError):
             raise
@@ -262,11 +259,9 @@ async def _stream_turn(
     turn: Any,
     req: RunRequest,
     thread_id: str | None = None,
-    baseline: _UsageBaseline | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Normalize one Codex turn. ``baseline`` tracks previously reported thread usage."""
+    """Normalize one Codex turn."""
 
-    baseline = _UsageBaseline() if baseline is None else baseline
     provider_log = ProviderEventLogger(
         "openai",
         req.artifacts_dir,
@@ -278,9 +273,7 @@ async def _stream_turn(
     thinking_delta_parts: dict[str | None, list[str]] = {}
     text_parts: list[str] = []
     completed_texts: list[str] = []
-    last_usage: Any = None
-    # Count usage updates as a proxy for model requests.
-    usage_updates = 0
+    usage = _TurnUsage()
     completed_action_items = 0
     max_turns_interrupted = False
 
@@ -360,10 +353,7 @@ async def _stream_turn(
             continue
 
         if method == "thread/tokenUsage/updated":
-            last_usage = getattr(payload, "token_usage", None) or getattr(
-                payload, "tokenUsage", None
-            )
-            usage_updates += 1
+            usage.add(getattr(payload, "token_usage", None) or getattr(payload, "tokenUsage", None))
             continue
 
         if method == "error":
@@ -383,8 +373,9 @@ async def _stream_turn(
                 yield Text(text=text)
             for text in _drain_delta_buffers(thinking_delta_parts):
                 yield Thinking(text=text)
-            if last_usage is not None:
-                yield _usage_event(last_usage, req.include_raw, usage_updates, thread_id, baseline)
+            usage_event = usage.event(req.include_raw)
+            if usage_event is not None:
+                yield usage_event
             turn_info = getattr(payload, "turn", None)
             if _turn_failed(turn_info):
                 raise AgentSdkWrapperError(_turn_error_message(turn_info))
@@ -452,35 +443,58 @@ _CODEX_ACTION_ITEM_TYPES = {
 }
 
 
-@dataclasses.dataclass
-class _UsageBaseline:
-    """Track reported thread usage and subtract it from new cumulative snapshots.
+_USAGE_FIELDS = {
+    "input_tokens": ("inputTokens", "input_tokens"),
+    "cache_read_tokens": ("cachedInputTokens", "cached_input_tokens"),
+    "cache_write_tokens": ("cacheWriteInputTokens", "cache_write_input_tokens"),
+    "output_tokens": ("outputTokens", "output_tokens"),
+    "reasoning_output_tokens": ("reasoningOutputTokens", "reasoning_output_tokens"),
+    "total_tokens": ("totalTokens", "total_tokens"),
+}
 
-    An external session starts without a baseline and can include prior history.
+
+@dataclasses.dataclass
+class _TurnUsage:
+    """Per-turn usage from the thread's cumulative ``total`` and per-request ``last``.
+
+    The first update's ``total - last`` is the thread's usage before this turn,
+    which covers resumed history without state kept across runs. Native output
+    already includes reasoning and ``totalTokens`` is input plus output.
     """
 
-    thread_id: str | None = None
-    total: TokenUsage = dataclasses.field(default_factory=TokenUsage)
+    before: dict[str, int] | None = None
+    total: dict[str, int] | None = None
+    updates: int = 0
+    raw: dict[str, Any] | None = None
 
-    def delta(self, thread_id: str | None, total: TokenUsage) -> TokenUsage:
-        """Return the usage added since the last snapshot and adopt the new one."""
-
-        if thread_id != self.thread_id:
-            self.thread_id = thread_id
-            self.total = TokenUsage()
-        previous = self.total
+    def add(self, token_usage: Any) -> None:
+        data = _to_plain(token_usage)
+        if not isinstance(data, dict):
+            return
+        total = _usage_breakdown(data.get("total", data))
+        last = _usage_breakdown(data["last"]) if "last" in data else total
+        if self.before is None:
+            self.before = {key: total[key] - last[key] for key in total}
         self.total = total
-        return TokenUsage(
-            input_tokens=max(0, total.input_tokens - previous.input_tokens),
-            output_tokens=max(0, total.output_tokens - previous.output_tokens),
-            total_tokens=max(0, total.total_tokens - previous.total_tokens),
-            cache_read_tokens=max(0, total.cache_read_tokens - previous.cache_read_tokens),
-            cache_write_tokens=max(0, total.cache_write_tokens - previous.cache_write_tokens),
-            reasoning_output_tokens=max(
-                0, total.reasoning_output_tokens - previous.reasoning_output_tokens
-            ),
-            requests=total.requests,
+        self.updates += 1
+        self.raw = data
+
+    def event(self, include_raw: bool) -> Usage | None:
+        if self.total is None or self.before is None:
+            return None
+        delta = {key: max(0, self.total[key] - self.before[key]) for key in self.total}
+        # Count usage updates as a proxy for model requests.
+        return Usage(
+            usage=TokenUsage(**delta, requests=self.updates),
+            raw=self.raw if include_raw else None,
         )
+
+
+def _usage_breakdown(data: Any) -> dict[str, int]:
+    values = {key: _int_field(data, *aliases) for key, aliases in _USAGE_FIELDS.items()}
+    if not values["total_tokens"]:
+        values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
+    return values
 
 
 def _counts_toward_max_turns(root_type: str) -> bool:
@@ -1569,54 +1583,6 @@ def _stringify_output(value: Any) -> str | None:
     if isinstance(plain, str):
         return plain
     return json.dumps(plain)
-
-
-def _usage_event(
-    usage: Any,
-    include_raw: bool,
-    requests: int,
-    thread_id: str | None,
-    baseline: _UsageBaseline,
-) -> Usage:
-    """Convert cumulative counters to per-run usage.
-
-    This adapter adds reasoning to raw output; raw output inclusivity is unverified.
-    Cache-write counts remain zero.
-    """
-
-    data = _to_plain(usage)
-    total = data.get("total", data) if isinstance(data, dict) else {}
-    inp = _int_field(total, "input_tokens", "inputTokens", "input", "prompt_tokens", "promptTokens")
-    out = _int_field(
-        total,
-        "output_tokens",
-        "outputTokens",
-        "output",
-        "completion_tokens",
-        "completionTokens",
-    )
-    cached = _int_field(
-        total,
-        "cached_input_tokens",
-        "cachedInputTokens",
-        "cache_read_input_tokens",
-        "cacheReadInputTokens",
-    )
-    reasoning = _int_field(total, "reasoning_output_tokens", "reasoningOutputTokens")
-    out += reasoning
-    cumulative = TokenUsage(
-        requests=requests,
-        input_tokens=inp,
-        output_tokens=out,
-        total_tokens=inp + out,
-        cache_read_tokens=cached,
-        reasoning_output_tokens=reasoning,
-    )
-    return Usage(
-        usage=baseline.delta(thread_id, cumulative),
-        cost_usd=None,
-        raw=data if include_raw and isinstance(data, dict) else None,
-    )
 
 
 def _int_field(data: Any, *keys: str) -> int:

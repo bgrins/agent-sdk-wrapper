@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypedDict
 
@@ -190,11 +191,10 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
         '{"ok":true}'
     ]
     usage = next(event for event in out if isinstance(event, Usage))
-    # Add reasoning to output; count usage updates as requests.
     assert usage.usage == TokenUsage(
         input_tokens=10,
-        output_tokens=7,
-        total_tokens=17,
+        output_tokens=3,
+        total_tokens=13,
         cache_read_tokens=2,
         reasoning_output_tokens=4,
         requests=1,
@@ -1215,72 +1215,61 @@ def test_codex_rejects_output_schemas_strict_mode_cannot_express(output_schema, 
         OpenAIProvider().validate_request(req)
 
 
-def _usage_events(input_tokens: int, output_tokens: int):
-    return [
-        SimpleNamespace(
-            method="thread/tokenUsage/updated",
-            payload=SimpleNamespace(
-                token_usage={
-                    "total": {
-                        "inputTokens": input_tokens,
-                        "outputTokens": output_tokens,
-                    }
-                }
-            ),
-        ),
-        SimpleNamespace(
-            method="turn/completed",
-            payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
-        ),
-    ]
+CODEX_FIXTURES = Path(__file__).parent / "fixtures" / "codex"
+
+
+def codex_frames(name: str) -> list[Any]:
+    """Load redacted real provider events as SDK notification objects."""
+
+    from openai_codex.generated.notification_registry import NOTIFICATION_MODELS
+    from openai_codex.models import Notification
+
+    frames = []
+    for line in (CODEX_FIXTURES / name).read_text(encoding="utf-8").splitlines():
+        message = json.loads(line)["message"]
+        payload = NOTIFICATION_MODELS[message["method"]].model_validate(message["payload"])
+        frames.append(Notification(method=message["method"], payload=payload))
+    return frames
 
 
 @pytest.mark.asyncio
-async def test_codex_usage_reports_the_delta_when_a_thread_is_resumed():
-    from agent_sdk_wrapper.providers.openai_provider import _UsageBaseline
-
+async def test_codex_usage_replays_a_multi_request_turn():
     req = RunRequest(provider="openai", prompt="ignored")
-    baseline = _UsageBaseline()
+    turn = FakeTurn(codex_frames("tool-turn.provider-events.jsonl"))
 
-    first = [
-        event
-        async for event in _stream_turn(
-            FakeTurn(_usage_events(100, 20)), req, "thread-1", baseline
-        )
-    ]
-    second = [
-        event
-        async for event in _stream_turn(
-            FakeTurn(_usage_events(340, 55)), req, "thread-1", baseline
-        )
-    ]
+    out = [event async for event in _stream_turn(turn, req)]
 
-    # Subtract prior thread usage from the second turn.
-    assert next(e for e in first if isinstance(e, Usage)).usage.input_tokens == 100
-    delta = next(e for e in second if isinstance(e, Usage)).usage
-    assert delta.input_tokens == 240
-    assert delta.output_tokens == 35
+    [usage] = [event.usage for event in out if isinstance(event, Usage)]
+    assert usage == TokenUsage(
+        input_tokens=27707,
+        output_tokens=109,
+        total_tokens=27816,
+        cache_read_tokens=13786,
+        cache_write_tokens=13915,
+        reasoning_output_tokens=22,
+        requests=2,
+    )
 
 
 @pytest.mark.asyncio
-async def test_codex_usage_baseline_resets_on_a_new_thread():
-    from agent_sdk_wrapper.providers.openai_provider import _UsageBaseline
+async def test_codex_usage_of_a_resumed_turn_excludes_thread_history():
+    req = RunRequest(provider="openai", prompt="ignored", session_id="thread-fixture")
 
-    req = RunRequest(provider="openai", prompt="ignored")
-    baseline = _UsageBaseline()
-
-    async for _ in _stream_turn(FakeTurn(_usage_events(100, 20)), req, "thread-1", baseline):
-        pass
-    events = [
+    out = [
         event
         async for event in _stream_turn(
-            FakeTurn(_usage_events(30, 5)), req, "thread-2", baseline
+            FakeTurn(codex_frames("resumed-turn.provider-events.jsonl")), req
         )
     ]
 
-    usage = next(e for e in events if isinstance(e, Usage)).usage
-    assert usage.input_tokens == 30
-    assert usage.output_tokens == 5
+    [usage] = [event.usage for event in out if isinstance(event, Usage)]
+    assert usage == TokenUsage(
+        input_tokens=12730,
+        output_tokens=7,
+        total_tokens=12737,
+        cache_read_tokens=12672,
+        requests=1,
+    )
 
 
 @pytest.mark.asyncio
