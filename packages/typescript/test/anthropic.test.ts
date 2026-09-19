@@ -691,3 +691,31 @@ test("Claude session_info reports the runtime model from init", async () => {
   );
   assert.equal(run.model, "claude-resolved");
 });
+test("Claude rate limit events become warnings", async () => {
+  const run = await harness([
+    {
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "five_hour",
+        utilization: 0.9,
+        resetsAt: 1700000000,
+      },
+      uuid: randomUUID(),
+      session_id: "claude-session",
+    },
+    result(),
+  ]).agent.run("limits");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "warning")
+      .map((env) => env.event),
+    [
+      {
+        type: "warning",
+        message:
+          "Claude rate limit status: allowed_warning, type=five_hour, utilization=0.9, resets_at=1700000000",
+      },
+    ],
+  );
+});

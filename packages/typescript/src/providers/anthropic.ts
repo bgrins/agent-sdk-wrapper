@@ -346,6 +346,15 @@ export class AnthropicAdapter implements ProviderAdapter {
           else if (!seenText && message.subtype === "success" && message.result)
             yield { type: "text", text: message.result, ...raw };
           return;
+        } else if (message.type === "rate_limit_event") {
+          const info = message.rate_limit_info;
+          const details = [`Claude rate limit status: ${info.status}`];
+          if (info.rateLimitType) details.push(`type=${info.rateLimitType}`);
+          if (info.utilization !== undefined)
+            details.push(`utilization=${info.utilization}`);
+          if (info.resetsAt !== undefined)
+            details.push(`resets_at=${info.resetsAt}`);
+          yield { type: "warning", message: details.join(", "), ...raw };
         } else if (message.type === "stream_event")
           throw new ProviderProtocolError(
             "Unexpected partial Claude frames with includePartialMessages disabled",
