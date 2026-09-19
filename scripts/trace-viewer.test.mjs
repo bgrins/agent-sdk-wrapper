@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import fs, {
   chmod,
@@ -17,7 +18,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
-import { createTraceServer, MAX_DIRECTORIES } from "./trace-viewer.mjs";
+import {
+  contentSecurityPolicy,
+  createTraceServer,
+  MAX_DIRECTORIES,
+} from "./trace-viewer.mjs";
 
 test("server discovers new traces and reads updates without exposing files outside the results directory", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "trace-viewer-"));
@@ -191,6 +196,42 @@ async function listen(t, directory, options) {
   await once(server, "listening");
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test("the viewer page gets a CSP that allows exactly its inline script and style", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "csp-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const base = await listen(t, root);
+  const html = await readFile(
+    new URL("../docs/trace-viewer.html", import.meta.url),
+    "utf8",
+  );
+  const response = await get(base, "/docs/trace-viewer.html");
+  const policy = response.headers["content-security-policy"];
+  const hash = (text) =>
+    `'sha256-${createHash("sha256").update(text).digest("base64")}'`;
+  assert.equal(response.body, html);
+  assert.match(policy, /^default-src 'none';/);
+  for (const directive of [
+    `script-src ${hash(html.match(/<script>([\s\S]*?)<\/script>/)[1])}`,
+    `style-src ${hash(html.match(/<style>([\s\S]*?)<\/style>/)[1])}`,
+    "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ])
+    assert.ok(policy.split("; ").includes(directive), directive);
+  // The policy blocks inline handlers and style attributes.
+  assert.doesNotMatch(html, /\son[a-z]+=|\sstyle=|setAttribute\("style"/);
+  assert.equal(
+    contentSecurityPolicy("<style>a\r\nb</style><script>c\rd</script>"),
+    contentSecurityPolicy("<style>a\nb</style><script>c\nd</script>"),
+  );
+  const artifactPolicy = (await get(base, "/api/runs")).headers[
+    "content-security-policy"
+  ];
+  assert.match(artifactPolicy, /default-src 'none'/);
+  assert.match(artifactPolicy, /sandbox/);
+});
 
 test("run discovery skips unreadable directories and keeps the newest runs when capped", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "run-discovery-"));

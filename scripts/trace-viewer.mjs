@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -73,6 +74,30 @@ async function listRuns(directory, depth) {
   };
 }
 
+const inlineHashes = (html, tag) =>
+  [...html.matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, "g"))]
+    .map(
+      ([, text]) =>
+        `'sha256-${createHash("sha256").update(text).digest("base64")}'`,
+    )
+    .join(" ") || "'none'";
+
+// Hash the served bytes so the policy always matches the page.
+export function contentSecurityPolicy(html) {
+  // Browsers hash inline blocks after the parser normalizes newlines.
+  html = html.replace(/\r\n?/g, "\n");
+  return [
+    "default-src 'none'",
+    `script-src ${inlineHashes(html, "script")}`,
+    `style-src ${inlineHashes(html, "style")}`,
+    "connect-src 'self'",
+    "img-src 'self' data:",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
 // Ancestors must be host-controlled. Depth 1 reads only files in fixed job mounts.
 export function createTraceServer(directory, { depth = 20 } = {}) {
   if (!Number.isInteger(depth) || depth < 0 || depth > 20)
@@ -84,6 +109,8 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
         "content-type": type,
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
+        "content-security-policy":
+          "default-src 'none'; frame-ancestors 'none'; sandbox",
         ...headers,
       });
       response.end(request.method === "HEAD" ? undefined : body);
@@ -106,7 +133,9 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
       }
       if (path === "/docs/trace-viewer.html") {
         const html = await readFile(viewer, "utf8");
-        return send(200, "text/html; charset=utf-8", html);
+        return send(200, "text/html; charset=utf-8", html, {
+          "content-security-policy": contentSecurityPolicy(html),
+        });
       }
       if (path === "/api/runs") {
         const { runs, truncated } = await listRuns(directory, depth);
