@@ -186,7 +186,6 @@ export class AnthropicAdapter implements ProviderAdapter {
     req.signal?.addEventListener("abort", onAbort, { once: true });
     if (req.signal?.aborted) abort.abort();
     let query: NativeQuery | undefined;
-    let terminal = false;
     let seenText = false;
     let seenThinking = false;
     let interrupted = false;
@@ -304,11 +303,6 @@ export class AnthropicAdapter implements ProviderAdapter {
               };
           }
         } else if (message.type === "result") {
-          if (terminal)
-            throw new ProviderProtocolError(
-              "Claude emitted more than one terminal result",
-            );
-          terminal = true;
           const usage = usageEvent(message, raw);
           if (usage.usage.reasoning_output_tokens > 0 && !seenThinking)
             yield { type: "thinking", text: "", ...raw };
@@ -325,7 +319,7 @@ export class AnthropicAdapter implements ProviderAdapter {
               retryable: false,
               ...raw,
             };
-            continue;
+            return;
           }
           const status =
             message.subtype === "success"
@@ -378,19 +372,19 @@ export class AnthropicAdapter implements ProviderAdapter {
             yield { ...error, ...raw };
           } else if (!seenText && message.result)
             yield { type: "text", text: message.result, ...raw };
+          return;
         } else if (message.type === "stream_event")
           throw new ProviderProtocolError(
             "Unexpected partial Claude frames with includePartialMessages disabled",
           );
       }
-      if (!terminal)
-        throw new ProviderProtocolError("Claude stream ended without a result");
+      throw new ProviderProtocolError("Claude stream ended without a result");
     } catch (cause) {
       throw nativeError(cause);
     } finally {
+      req.signal?.removeEventListener("abort", onAbort);
       abort.abort();
       query?.close();
-      req.signal?.removeEventListener("abort", onAbort);
     }
   }
 }

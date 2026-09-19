@@ -385,7 +385,7 @@ test("aborted runs finish cancelled, including cancellation during backoff", asy
   assert.equal(result.status, "cancelled");
   assert.equal(result.ended_reason, "cancelled");
 });
-test("cancellation also works when the native iterator returns without throwing", async () => {
+test("a native failure after the caller's abort is cancelled once", async () => {
   const controller = new AbortController();
   const agent = new Agent(
     { provider: "openai", signal: controller.signal },
@@ -393,6 +393,7 @@ test("cancellation also works when the native iterator returns without throwing"
       openai: fake(async function* () {
         yield { type: "session_info", id: "cancelled-session" };
         controller.abort();
+        throw new ProviderProtocolError("stream ended without a result");
       }),
     },
   );
@@ -404,6 +405,24 @@ test("cancellation also works when the native iterator returns without throwing"
     result.events.filter((env) => env.event.type === "error").length,
     1,
   );
+});
+test("an abort after the terminal frame leaves a completed run successful", async () => {
+  const controller = new AbortController();
+  const agent = new Agent(
+    { provider: "openai", signal: controller.signal },
+    {
+      openai: fake(async function* () {
+        yield { type: "text", text: "complete answer" };
+        yield { type: "usage", usage: emptyUsage() };
+      }),
+    },
+  );
+  const result = await collectRun(agent.stream("late"), (env) => {
+    if (env.event.type === "usage") controller.abort();
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.final_text, "complete answer");
+  assert.equal(result.error, null);
 });
 test("early iterator closure cleans up and releases the Agent concurrency guard", async () => {
   let closed = 0;

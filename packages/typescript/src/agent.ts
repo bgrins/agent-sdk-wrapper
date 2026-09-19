@@ -181,16 +181,6 @@ export class Agent {
           break;
         }
       }
-      // A native iterator can finish cleanly after observing its abort signal.
-      if (!failure && req.signal?.aborted) {
-        failure = {
-          type: "error",
-          message: "Run cancelled",
-          error_type: "cancelled",
-          retryable: false,
-        };
-        yield frame(failure);
-      }
       const reason: RunEndedReason = !failure
         ? "success"
         : failure.error_type === "cancelled"

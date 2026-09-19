@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { Agent, type AgentDefaults } from "../src/index.js";
+import { Agent, type AgentDefaults, collectRun } from "../src/index.js";
 
 // Runs the real Codex SDK exec path against a fake runtime that prints JSONL.
 type After = "exit" | "exit1" | "hang" | "close-stdout" | "sigkill";
@@ -101,6 +101,22 @@ test("a throwing provider-event callback fails the run and kills the runtime", a
   assert.equal(run.error, "callback boom");
   await exited();
 });
+test("an abort after turn.completed keeps the completed Codex run", async (t) => {
+  const controller = new AbortController();
+  const { agent, exited } = await fakeCodex(
+    t,
+    [...started, answer, completed],
+    "hang",
+    { signal: controller.signal },
+  );
+  const run = await collectRun(agent.stream("late abort"), (env) => {
+    if (env.event.type === "usage") controller.abort();
+  });
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "answer");
+  await exited();
+});
+
 test("Codex reconnect notices are warnings and the recovered turn succeeds", async (t) => {
   const { agent } = await fakeCodex(
     t,

@@ -30,6 +30,8 @@ const usage: SDKResultSuccess["usage"] = {
 };
 function assistant(
   content: SDKAssistantMessage["message"]["content"],
+  overrides: Partial<SDKAssistantMessage> = {},
+  message: Partial<SDKAssistantMessage["message"]> = {},
 ): SDKAssistantMessage {
   return {
     type: "assistant",
@@ -49,9 +51,13 @@ function assistant(
       context_management: null,
       diagnostics: null,
       stop_details: null,
+      ...message,
     },
+    ...overrides,
   };
 }
+const textBlock = (value: string) =>
+  ({ type: "text", text: value, citations: null }) as const;
 function result(overrides: Partial<SDKResultSuccess> = {}): SDKResultSuccess {
   return {
     type: "result",
@@ -359,7 +365,7 @@ test("Claude retractions fail explicitly through either native notification", as
   };
   for (const messages of [
     [original, { ...replacement, supersedes: [original.uuid] }, result()],
-    [original, replacement, result(), notice],
+    [original, notice, replacement, result()],
   ]) {
     const raw: unknown[] = [];
     const { agent, captured, closed } = harness(messages, {
@@ -501,4 +507,16 @@ test("Claude checkRuntime verifies a missing override without a model request", 
     },
   });
   await assert.rejects(agent.checkRuntime(), RuntimeUnavailableError);
+});
+test("Claude stops at its first result, ignoring background-task turns", async () => {
+  const { agent, closed } = harness([
+    assistant([textBlock("launched")]),
+    result({ result: "launched" }),
+    assistant([textBlock("background answer")], {}, { id: "second" }),
+    result({ result: "background answer" }),
+  ]);
+  const run = await agent.run("subagent");
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "launched");
+  assert.equal(closed(), 1);
 });
