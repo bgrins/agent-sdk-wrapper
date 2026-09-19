@@ -436,10 +436,10 @@ async def _stream_turn(
             continue
 
         if method == "error":
-            error = getattr(payload, "error", None)
+            error = _field(payload, "error", "error")
             # Keep SDK retries as warnings; the terminal state determines success.
-            if getattr(payload, "will_retry", False):
-                yield WarningEvent(message=_error_message(error) or "Codex reported an error")
+            if _field(payload, "will_retry", "willRetry"):
+                yield WarningEvent(message=_turn_error_text(error))
             else:
                 reported_error = _error_event(error, _raw(event) if req.include_raw else None)
             continue
@@ -453,10 +453,21 @@ async def _stream_turn(
             usage_event = usage.event(req.include_raw)
             if usage_event is not None:
                 yield usage_event
-            turn_info = getattr(payload, "turn", None)
-            status = _status_value(getattr(turn_info, "status", None))
+            turn_info = _field(payload, "turn", "turn")
+            status = _status_value(_field(turn_info, "status", "status"))
+            # A turn that finished before the interrupt landed stays a success.
+            if interrupted_for_max_turns and status != "completed":
+                yield Error(
+                    message=(
+                        f"Codex max_turns={req.max_turns} reached after "
+                        f"{completed_action_items} completed action item(s); "
+                        "interrupted turn"
+                    ),
+                    error_type="max_turns",
+                )
+                return
             if status == "failed":
-                error = getattr(turn_info, "error", None)
+                error = _field(turn_info, "error", "error")
                 if error is not None:
                     yield _error_event(error, _raw(event) if req.include_raw else None)
                 else:
@@ -465,17 +476,7 @@ async def _stream_turn(
                     )
                 return
             if status == "interrupted":
-                if interrupted_for_max_turns:
-                    yield Error(
-                        message=(
-                            f"Codex max_turns={req.max_turns} reached after "
-                            f"{completed_action_items} completed action item(s); "
-                            "interrupted turn"
-                        ),
-                        error_type="max_turns",
-                    )
-                else:
-                    yield Error(message="Codex turn was interrupted", error_type="cancelled")
+                yield Error(message="Codex turn was interrupted", error_type="cancelled")
                 return
             if reported_error is not None:
                 yield WarningEvent(message=reported_error.message)
@@ -573,6 +574,12 @@ def _validate_supported(req: RunRequest) -> None:
         _tool_entry(fn)
     if req.output_schema is not None:
         _codex_output_schema(req.output_schema)
+    _mcp_config_overrides(
+        req.mcp_servers, allowed_tools=req.allowed_tools, disallowed_tools=req.disallowed_tools
+    )
+    for name, subagent in req.subagents.items():
+        _validate_config_key_part(name)
+        _toml_literal([subagent.description, subagent.prompt, subagent.model or ""])
     unsupported: list[str] = []
     if req.max_turns is not None and req.max_turns < 1:
         unsupported.append("max_turns < 1")
@@ -2039,15 +2046,33 @@ _ERROR_PATTERNS = tuple(
 
 
 def _error_event(error: Any, raw: dict[str, Any] | None = None) -> Error:
-    message = _error_message(error) or "Codex reported an error"
-    details = getattr(error, "additional_details", None)
-    if details and details not in message:
-        message = f"{message}: {details}"
-    info = getattr(error, "codex_error_info", None)
+    message = _turn_error_text(error)
+    info = _field(error, "codex_error_info", "codexErrorInfo")
     error_type = _classify_codex_error(info, message)
     return Error(
         message=message, error_type=error_type, retryable=error_type == _TRANSIENT, raw=raw
     )
+
+
+def _turn_error_text(error: Any) -> str:
+    """Keep the runtime's own text; an empty message can leave it only in the details."""
+
+    message = str(_field(error, "message", "message") or "")
+    details = str(_field(error, "additional_details", "additionalDetails") or "")
+    if message and details and details not in message:
+        return f"{message}: {details}"
+    return message or details or "Codex reported an error"
+
+
+def _field(value: Any, attr: str, key: str) -> Any:
+    """Read a field from an SDK model, or from the raw dict of an unparsed payload."""
+
+    if isinstance(value, dict):
+        return value.get(key, value.get(attr))
+    params = getattr(value, "params", None)
+    if isinstance(params, dict) and not hasattr(value, attr):
+        return params.get(key, params.get(attr))
+    return getattr(value, attr, None)
 
 
 def _classify_codex_error(info: Any, message: str) -> str:

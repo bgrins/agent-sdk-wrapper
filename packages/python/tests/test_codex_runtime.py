@@ -91,6 +91,10 @@ class MockResponses:
                 if "hang" in step:
                     mock.release.wait(step["hang"])
                     return
+                if "status" in step and "text" in step:
+                    body = step["text"].encode()
+                    self._send(step["status"], body, "text/plain; charset=utf-8")
+                    return
                 if "status" in step:
                     body = json.dumps(step["body"]).encode()
                     self._send(step["status"], body, "application/json")
@@ -458,6 +462,15 @@ async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home
     errors = [e.event for e in result.events if e.event.type == "error"]
     assert [(e.error_type, e.retryable) for e in errors] == [("authentication_failed", False)]
     assert "401 Unauthorized" in errors[0].message
+
+
+async def test_non_ascii_error_body_keeps_its_text(mock_api, codex_home, tmp_path):
+    mock_api.plan = [{"status": 400, "text": "Offline gateway probe ✓"}]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+
+    errors = [e.event for e in result.events if e.event.type == "error"]
+    assert [e.message for e in errors] == ["Offline gateway probe ✓"]
 
 
 async def test_max_turns_interrupt_keeps_the_turn_usage(mock_api, codex_home, tmp_path):

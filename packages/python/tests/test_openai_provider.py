@@ -1177,6 +1177,21 @@ def test_codex_config_values_are_valid_toml():
         _toml_literal("\ud83d")
 
 
+@pytest.mark.parametrize(
+    ("options", "match"),
+    [
+        ({"subagents": {"two words": SubagentDef(description="d", prompt="p")}}, "key part"),
+        ({"subagents": {"fox": SubagentDef(description="\ud83d", prompt="p")}}, "surrogate"),
+        ({"mcp_servers": [McpStdioServer(name="repo", command="\ud83d")]}, "surrogate"),
+    ],
+)
+def test_codex_rejects_unencodable_config_before_running(options, match):
+    req = RunRequest(provider="openai", prompt="ignored", **options)
+
+    with pytest.raises(ConfigError, match=match):
+        OpenAIProvider().validate_request(req)
+
+
 def test_codex_subagent_config_file_is_valid_toml(tmp_path):
     import tomllib
 
@@ -1616,6 +1631,29 @@ async def test_codex_failed_turn_yields_one_classified_error():
     assert out[1].message == "Selected model is at capacity."
     assert out[1].error_type == "transient_api_error"
     assert out[1].retryable is True
+
+
+@pytest.mark.asyncio
+async def test_codex_error_text_survives_empty_messages_and_unparsed_payloads():
+    from openai_codex.models import Notification, UnknownNotification
+
+    req = RunRequest(provider="openai", prompt="ignored")
+    probe = "Offline gateway probe ✓"
+    unparsed = Notification(
+        method="error",
+        payload=UnknownNotification(
+            params={"error": {"message": probe, "codexErrorInfo": "newKind"}, "willRetry": False}
+        ),
+    )
+    only_details = failed_turn(
+        {"codexErrorInfo": "other", "message": "", "additionalDetails": probe}
+    )
+
+    first = [e async for e in _stream_turn(FakeTurn([unparsed, turn_completed("failed")]), req)]
+    second = [e async for e in _stream_turn(FakeTurn([only_details]), req)]
+
+    assert [(type(e), e.message) for e in first] == [(Error, probe)]
+    assert [(type(e), e.message) for e in second] == [(Error, probe)]
 
 
 @pytest.mark.parametrize(
