@@ -133,15 +133,24 @@ test("gateway replaces credentials, restricts routes and streams responses", asy
       (await call(socket, path, auth, "POST", Buffer.alloc(17000000))).status,
       413,
     );
+    const count = received.length;
+    // A path matcher cleans most of these to allowed routes; the proxy would forward them raw.
     for (const bad of [
       "//evil.test/v1/messages",
       "/v1/../admin",
       "/v1/%2e%2e/admin",
       "/v1/files",
+      `/v1/files/..${path.slice(3)}`,
+      `/v1/files%2F..%2F${path.slice(4)}`,
+      path.toUpperCase(),
+      path.replace("/v1/", "/v1//"),
+      `${path}/`,
+      `${path}/.`,
+      path.replace(/s$/, "%73"),
     ])
-      assert.equal((await call(socket, bad, auth)).status, 403);
+      assert.equal((await call(socket, bad, auth)).status, 403, bad);
+    assert.equal(received.length, count);
     // Absolute-form targets must be rejected or reach this same fixed upstream.
-    const count = received.length;
     const absolute = await call(socket, `http://evil.test${path}`, auth);
     if (absolute.status === 200) {
       assert.equal(received.length, count + 1);
@@ -156,6 +165,45 @@ test("gateway replaces credentials, restricts routes and streams responses", asy
     assert.ok([400, 403].includes(connect.status));
     assert.equal(received.length, beforeConnect);
   }
+});
+
+test("gateway allows only the betas the pinned SDKs send", async (t) => {
+  const received = [];
+  const target = await upstream(t, (req, res) => {
+    received.push(req.headers["anthropic-beta"]);
+    req.resume();
+    req.on("end", () => res.end("ok"));
+  });
+  const socket = await gateway(t, "anthropic", target.url);
+  const auth = { "x-api-key": "job-token" };
+  const sdk =
+    "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27";
+  const allowed = [
+    ["/v1/messages?beta=true", sdk],
+    ["/v1/messages/count_tokens?beta=true", "token-counting-2024-11-01"],
+  ];
+  for (const [path, beta] of allowed)
+    assert.equal(
+      (await call(socket, path, { ...auth, "anthropic-beta": beta })).status,
+      200,
+    );
+  for (const beta of [
+    "mcp-client-2025-11-20",
+    `${sdk},mcp-client-2025-11-20`,
+    `${sdk}, mcp-client-2025-11-20`,
+    [sdk, "mcp-client-2025-11-20"],
+    "Claude-code-20250219",
+  ])
+    assert.equal(
+      (await call(socket, "/v1/messages", { ...auth, "anthropic-beta": beta }))
+        .status,
+      403,
+      String(beta),
+    );
+  assert.deepEqual(
+    received,
+    allowed.map(([, beta]) => beta),
+  );
 });
 
 test("gateway blocks upstream redirects", async (t) => {
