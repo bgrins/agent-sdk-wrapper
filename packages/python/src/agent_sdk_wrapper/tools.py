@@ -5,13 +5,15 @@ Claude uses an in-process server; Codex uses a temporary stdio server.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import re
-import types
 import typing
 from collections.abc import Callable
 from typing import Any
+
+from pydantic import BaseModel, Field, ValidationError, create_model
 
 from .errors import ConfigError
 from .events import _jsonable
@@ -51,57 +53,94 @@ def tool_description(fn: Callable[..., Any]) -> str:
     return first or tool_name(fn)
 
 
-def _py_type_to_schema(annotation: Any) -> dict[str, Any]:
-    origin = typing.get_origin(annotation)
-    if origin is typing.Union or origin is types.UnionType:  # Optional[X] / X | None
-        args = [a for a in typing.get_args(annotation) if a is not type(None)]
-        if len(args) == 1:
-            return _py_type_to_schema(args[0])
-        return {}
-    if origin in (list, tuple, set):
-        return {"type": "array"}
-    if origin is dict:
-        return {"type": "object"}
-    mapping = {
-        str: {"type": "string"},
-        int: {"type": "integer"},
-        float: {"type": "number"},
-        bool: {"type": "boolean"},
-        list: {"type": "array"},
-        dict: {"type": "object"},
-    }
-    return mapping.get(annotation, {"type": "string"})
+def _parameters(fn: Callable[..., Any]) -> list[inspect.Parameter]:
+    return [
+        param
+        for name, param in inspect.signature(fn).parameters.items()
+        if name not in ("self", "cls")
+        and param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
+    ]
+
+
+def _annotations(fn: Callable[..., Any], params: list[inspect.Parameter]) -> dict[str, Any]:
+    try:
+        return typing.get_type_hints(fn, include_extras=True)
+    except Exception:
+        pass
+    # Resolve each hint on its own so one unresolvable name only loses that parameter.
+    namespace = getattr(fn, "__globals__", {})
+    hints: dict[str, Any] = {}
+    for param in params:
+        annotation = param.annotation
+        if isinstance(annotation, str):
+            try:
+                annotation = eval(annotation, namespace)  # noqa: S307
+            except Exception:
+                annotation = Any
+        hints[param.name] = annotation
+    return hints
+
+
+def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
+    params = _parameters(fn)
+    hints = _annotations(fn, params)
+    # Positional field names with aliases accept any parameter name, including "_x".
+    fields: dict[str, Any] = {}
+    for index, param in enumerate(params):
+        annotation = hints.get(param.name, param.annotation)
+        if annotation is inspect.Parameter.empty:
+            annotation = Any
+        default = ... if param.default is inspect.Parameter.empty else param.default
+        fields[f"p{index}"] = (annotation, Field(default, alias=param.name))
+    return create_model(f"{tool_name(fn)}_arguments", **fields)
+
+
+def _strip_titles(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_titles(item)
+            for key, item in value.items()
+            if not (key == "title" and isinstance(item, str))
+        }
+    if isinstance(value, list):
+        return [_strip_titles(item) for item in value]
+    return value
 
 
 def json_schema_for(fn: Callable[..., Any]) -> dict[str, Any]:
     """Build a JSON Schema object for a callable's parameters."""
-    sig = inspect.signature(fn)
+
     try:
-        hints = typing.get_type_hints(fn)
-    except Exception:
-        hints = {}
-    props: dict[str, Any] = {}
-    required: list[str] = []
-    for name, param in sig.parameters.items():
-        if name in ("self", "cls"):
-            continue
-        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
-            continue
-        props[name] = _py_type_to_schema(hints.get(name, str))
-        if param.default is inspect.Parameter.empty:
-            required.append(name)
-    schema: dict[str, Any] = {"type": "object", "properties": props}
-    if required:
-        schema["required"] = required
+        schema = _arguments_model(fn).model_json_schema()
+    except Exception as exc:
+        raise ConfigError(
+            f"cannot derive an input schema for tool {tool_name(fn)!r}: {exc}", cause=exc
+        ) from exc
+    schema = _strip_titles(schema)
+    schema.setdefault("properties", {})
     return schema
 
 
 def _make_anthropic_handler(fn: Callable[..., Any]):
+    model = _arguments_model(fn)
+    names = [param.name for param in _parameters(fn)]
+
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         try:
-            result = fn(**args)
-            if inspect.isawaitable(result):
-                result = await result
+            validated = model.model_validate(args)
+            kwargs = {name: getattr(validated, f"p{i}") for i, name in enumerate(names)}
+        except ValidationError as exc:
+            return {
+                "content": [{"type": "text", "text": f"Error: invalid arguments: {exc}"}],
+                "is_error": True,
+            }
+        try:
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(**kwargs)
+            else:
+                result = await asyncio.to_thread(fn, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
             text = result if isinstance(result, str) else json.dumps(_jsonable(result))
             return {"content": [{"type": "text", "text": text}]}
         except Exception as exc:  # surface as a tool error, keep the loop alive
