@@ -203,6 +203,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     let interrupted = false;
     let assistantError: SDKAssistantMessageError | undefined;
     let session: string | undefined;
+    let sessionModel: string | undefined;
     const names = new Map<string, string>();
     const seen = new Set<string>();
     try {
@@ -242,11 +243,21 @@ export class AnthropicAdapter implements ProviderAdapter {
         if (
           "session_id" in message &&
           message.session_id &&
-          message.session_id !== session &&
           !("parent_tool_use_id" in message && message.parent_tool_use_id)
         ) {
-          session = message.session_id;
-          yield { type: "session_info", id: session };
+          const model =
+            message.type === "system" && message.subtype === "init"
+              ? message.model
+              : sessionModel;
+          if (message.session_id !== session || model !== sessionModel) {
+            session = message.session_id;
+            sessionModel = model;
+            yield {
+              type: "session_info",
+              id: session,
+              ...(model ? { model } : {}),
+            };
+          }
         }
         if (message.type === "assistant") {
           if (seen.has(message.uuid)) continue;

@@ -678,3 +678,16 @@ test("Claude child env disables background tasks and pins effort without replaci
     ConfigError,
   );
 });
+test("Claude session_info reports the runtime model from init", async () => {
+  const run = await harness(
+    [init("claude-resolved"), assistant([textBlock("ok")]), result()],
+    { model: "claude-test" },
+  ).agent.run("model");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "session_info")
+      .map((env) => env.event),
+    [{ type: "session_info", id: "claude-session", model: "claude-resolved" }],
+  );
+  assert.equal(run.model, "claude-resolved");
+});
