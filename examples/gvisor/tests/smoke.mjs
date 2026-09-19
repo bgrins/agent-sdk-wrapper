@@ -34,10 +34,13 @@ if (mode === "--live") {
       ? "AGENT_SDK_WRAPPER_RUN_INTEGRATION"
       : "AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION";
   assert.equal(env[flag], "1", `Set ${flag}=1 for live tests`);
+}
+if (["--offline", "--live"].includes(mode)) {
   request.prompts = JSON.parse(
     readFileSync(new URL("../workload/shared/prompts.json", import.meta.url)),
   );
-  request.prompts[0] += ` Remember token ${token}.`;
+  // Non-ASCII checks that results survive the launcher's ASCII-only output.
+  request.prompts[0] += ` Remember token ${token} (café).`;
   request.prompts[1] += " Include the token I asked you to remember.";
 }
 env.JOB_REQUEST = JSON.stringify(request);
@@ -103,6 +106,10 @@ if (["--offline", "--live"].includes(mode)) {
       readFileSync(`${output}/fix.patch`, "utf8"),
       /milliseconds \/ 10\)/,
     );
+  for (const text of [stdout, stderr]) {
+    assert.match(text, /forged/);
+    assert.doesNotMatch(text, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+  }
 }
 console.log(
   `${env.LANGUAGE} ${env.PROVIDER ?? "anthropic"} ${mode}: ${output}`,

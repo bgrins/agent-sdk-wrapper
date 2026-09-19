@@ -62,6 +62,9 @@ trap 'echo "Job deadline exceeded" >&2; exit 124' USR1
 "${compose[@]}" up -d --wait --wait-timeout 10 --no-deps gateway >&2 & cli=$!
 wait "$cli"
 cli=
-"${compose[@]}" run --rm -T --no-deps --name "$COMPOSE_PROJECT_NAME-agent" "$@" & cli=$!
+# Sandboxed processes can write to worker output: pass only printable ASCII to the terminal.
+printable() { LC_ALL=C tr -cd '\11\12\40-\176'; }
+"${compose[@]}" --progress plain run --rm -T --no-deps --name "$COMPOSE_PROJECT_NAME-agent" "$@" \
+  > >(printable) 2> >(printable >&2) & cli=$!
 wait "$cli"
 cli=
