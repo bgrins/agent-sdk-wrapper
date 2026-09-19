@@ -7,9 +7,17 @@ import type {
   SDKResultSuccess,
   Options,
 } from "@anthropic-ai/claude-agent-sdk";
-import { Agent, ConfigError, RuntimeUnavailableError } from "../src/index.js";
+import {
+  Agent,
+  ConfigError,
+  ProviderError,
+  RuntimeUnavailableError,
+} from "../src/index.js";
 import type { AgentDefaults, AnthropicNativeOptions } from "../src/index.js";
 import { AnthropicAdapter } from "../src/providers/anthropic.js";
+
+// Adapters refuse to launch without API credentials; these tests fake the runtime.
+process.env.ANTHROPIC_API_KEY ||= "test-key";
 
 const usage: SDKResultSuccess["usage"] = {
   input_tokens: 3,
@@ -653,19 +661,23 @@ test("Claude child env disables background tasks and pins effort without replaci
   });
   const explicit = harness(
     [result()],
-    options({ ONLY: "1", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" }),
+    options({
+      ANTHROPIC_API_KEY: "k",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+    }),
   );
   await explicit.agent.run("explicit");
   assert.deepEqual(explicit.captured[0]?.env, {
-    ONLY: "1",
+    ANTHROPIC_API_KEY: "k",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
   });
   const same = harness([result()], {
     effort: "high",
-    ...options({ CLAUDE_CODE_EFFORT_LEVEL: "high" }),
+    ...options({ ANTHROPIC_API_KEY: "k", CLAUDE_CODE_EFFORT_LEVEL: "high" }),
   });
   await same.agent.run("same");
   assert.deepEqual(same.captured[0]?.env, {
+    ANTHROPIC_API_KEY: "k",
     CLAUDE_CODE_EFFORT_LEVEL: "high",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
   });
@@ -769,4 +781,35 @@ test("Claude joins contiguous text blocks of one assistant message", async () =>
     ["one message continued", "final answer"],
   );
   assert.equal(run.final_text, "final answer");
+});
+test("Claude never uses a stored login: require and login tokens are rejected, a keyless run never starts", async () => {
+  assert.throws(() => harness([], { cliLogin: "require" }), ConfigError);
+  const env = (values: Record<string, string>): AgentDefaults => ({
+    providerOptions: { provider: "anthropic", options: { env: values } },
+  });
+  assert.throws(
+    () => harness([], env({ CLAUDE_CODE_OAUTH_TOKEN: "t" })),
+    ConfigError,
+  );
+  const keyless = harness([result()], env({ ANTHROPIC_API_KEY: "" }));
+  await assert.rejects(
+    keyless.agent.run("keyless"),
+    (error) =>
+      error instanceof ProviderError &&
+      error.errorType === "authentication_failed",
+  );
+  assert.equal(keyless.captured.length, 0);
+  const bedrock = harness([result()], env({ CLAUDE_CODE_USE_BEDROCK: "1" }));
+  assert.equal((await bedrock.agent.run("bedrock")).status, "success");
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "inherited";
+  try {
+    const inherited = harness([result()]);
+    await inherited.agent.run("inherited");
+    assert.equal(
+      inherited.captured[0]?.env?.CLAUDE_CODE_OAUTH_TOKEN,
+      undefined,
+    );
+  } finally {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  }
 });

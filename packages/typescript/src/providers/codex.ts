@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import type {
   CodexOptions,
   ThreadEvent,
@@ -7,6 +8,7 @@ import type {
 } from "@openai/codex-sdk";
 import {
   ConfigError,
+  ProviderError,
   ProviderProtocolError,
   RuntimeUnavailableError,
 } from "../errors.js";
@@ -35,6 +37,8 @@ interface NativeCodex {
   startThread(options: ThreadOptions): NativeThread;
   resumeThread(id: string, options: ThreadOptions): NativeThread;
 }
+const loginTokenEnv = "CODEX_ACCESS_TOKEN";
+const apiKeyEnv = ["CODEX_API_KEY", "OPENAI_API_KEY"];
 type CodexFactory = (options: CodexOptions) => NativeCodex;
 export class CodexAdapter implements ProviderAdapter {
   readonly name = "openai";
@@ -85,38 +89,93 @@ export class CodexAdapter implements ProviderAdapter {
     for (const key of ["apiKey", "baseUrl", "codexPathOverride"] as const)
       stringOption(native?.client?.[key], key);
     envOption(native?.client?.env);
+    if (
+      req.cliLogin === "require" &&
+      (native?.client?.apiKey || native?.client?.baseUrl)
+    )
+      throw new ConfigError(
+        "cliLogin 'require' uses the stored ChatGPT login; remove apiKey and baseUrl",
+      );
   }
-  private async client(req: ResolvedRequest): Promise<NativeCodex> {
+  private options(req: ResolvedRequest): CodexOptions {
     const native =
       req.providerOptions?.provider === "openai"
         ? req.providerOptions.client
         : undefined;
-    const opts: CodexOptions = {
-      apiKey: native?.env
-        ? native.env.OPENAI_API_KEY
-        : process.env.OPENAI_API_KEY,
+    const inherited = native?.env ?? process.env;
+    // deny: never read or write stored logins; require: keep API keys out of the child.
+    const removed = req.cliLogin === "require" ? apiKeyEnv : [loginTokenEnv];
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(inherited))
+      if (value !== undefined && !removed.includes(key)) env[key] = value;
+    return {
       ...native,
-      config: { model_reasoning_summary: "auto" },
+      apiKey:
+        req.cliLogin === "require"
+          ? undefined
+          : native?.apiKey || inherited.OPENAI_API_KEY || undefined,
+      env,
+      config: {
+        model_reasoning_summary: "auto",
+        ...(req.cliLogin !== "require"
+          ? { cli_auth_credentials_store: "ephemeral" }
+          : {}),
+      },
     };
+  }
+  private async client(req: ResolvedRequest): Promise<NativeCodex> {
+    const opts = this.options(req);
     return this.factory
       ? this.factory(opts)
       : new (await import("@openai/codex-sdk")).Codex(opts);
   }
   async ensureAvailable(req: ResolvedRequest): Promise<void> {
+    if (req.cliLogin !== "require" && !this.options(req).apiKey)
+      throw new ProviderError(
+        "No OpenAI API key: set OPENAI_API_KEY or providerOptions.client.apiKey; cliLogin 'deny' never uses a stored Codex login",
+        "authentication_failed",
+      );
     if (this.factory) return;
+    let client: NativeCodex;
     try {
       const override =
         req.providerOptions?.provider === "openai"
           ? req.providerOptions.client?.codexPathOverride
           : undefined;
       if (override) await executable(override);
-      await this.client(req); // The SDK constructor resolves its bundled runtime without spawning it.
+      client = await this.client(req); // The SDK constructor resolves its bundled runtime without spawning it.
     } catch (cause) {
       throw new RuntimeUnavailableError(
         "Codex SDK/runtime unavailable; install its platform optional dependency or supply codexPathOverride",
         { cause },
       );
     }
+    if (req.cliLogin === "require") await this.requireChatgptLogin(req, client);
+  }
+  private async requireChatgptLogin(
+    req: ResolvedRequest,
+    client: NativeCodex,
+  ): Promise<void> {
+    // `codex exec` has no account query; `login status` reports the stored login.
+    const binary = (client as { exec?: { executablePath?: string } }).exec
+      ?.executablePath;
+    if (!binary)
+      throw new RuntimeUnavailableError(
+        "Cannot locate the Codex runtime to check its stored login",
+      );
+    const output = await new Promise<string>((resolve) =>
+      execFile(
+        binary,
+        ["login", "status"],
+        { env: this.options(req).env, timeout: 30_000 },
+        (_error, stdout, stderr) => resolve(`${stdout}${stderr}`),
+      ),
+    );
+    if (!/Logged in using ChatGPT/.test(output))
+      throw new ProviderError(
+        "cliLogin 'require' needs a stored ChatGPT login; run `codex login`",
+        "authentication_failed",
+      );
   }
   async *stream(
     req: ResolvedRequest,

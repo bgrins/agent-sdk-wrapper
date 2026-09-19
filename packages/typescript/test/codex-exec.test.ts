@@ -13,6 +13,9 @@ import {
   ProcessTerminatedError,
 } from "../src/index.js";
 
+// Adapters refuse to launch without API credentials; these tests fake the runtime.
+process.env.OPENAI_API_KEY ||= "test-key";
+
 // Runs the real Codex SDK exec path against a fake runtime that prints JSONL.
 type After = "exit" | "exit1" | "hang" | "close-stdout" | "sigkill";
 const script = `#!${process.execPath}
@@ -46,6 +49,7 @@ async function fakeCodex(
       provider: "openai",
       client: {
         codexPathOverride: executable,
+        apiKey: "test-key",
         env: { FAKE_CODEX_PLAN: plan },
       },
     },

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type {
   CodexOptions,
@@ -10,10 +13,14 @@ import {
   Agent,
   ConfigError,
   ProcessTerminatedError,
+  ProviderError,
   RuntimeUnavailableError,
 } from "../src/index.js";
 import type { AgentDefaults } from "../src/index.js";
 import { CodexAdapter } from "../src/providers/codex.js";
+
+// Adapters refuse to launch without API credentials; these tests fake the runtime.
+process.env.OPENAI_API_KEY ||= "test-key";
 
 const completed: ThreadEvent = {
   type: "turn.completed",
@@ -151,7 +158,10 @@ test("Codex maps final items once, tools and inclusive token totals", async () =
   assert.equal(threads[0]?.options.model, "gpt-test");
   assert.equal(threads[0]?.options.modelReasoningEffort, "high");
   assert.equal(threads[0]?.options.workingDirectory, "/tmp");
-  assert.deepEqual(clients[0]?.config, { model_reasoning_summary: "auto" });
+  assert.deepEqual(clients[0]?.config, {
+    model_reasoning_summary: "auto",
+    cli_auth_credentials_store: "ephemeral",
+  });
 });
 test("Codex completion-only file/MCP/search items get paired calls and results", async () => {
   const { agent } = harness([
@@ -420,7 +430,57 @@ test("explicit Codex env does not inherit the host API key", async () => {
   const { agent, clients } = harness([completed], {
     providerOptions: { provider: "openai", client: { env: {} } },
   });
-  await agent.run("isolated");
+  await assert.rejects(
+    agent.run("isolated"),
+    (error) =>
+      error instanceof ProviderError &&
+      error.errorType === "authentication_failed",
+  );
+  assert.equal(clients.length, 0);
+});
+test("Codex cliLogin require keeps API keys out of the child and skips the ephemeral store", async () => {
+  assert.throws(
+    () =>
+      harness([], {
+        cliLogin: "require",
+        providerOptions: { provider: "openai", client: { apiKey: "k" } },
+      }),
+    ConfigError,
+  );
+  const { agent, clients } = harness([completed], {
+    cliLogin: "require",
+    providerOptions: {
+      provider: "openai",
+      client: { env: { OPENAI_API_KEY: "k", CODEX_API_KEY: "k", HOME: "/h" } },
+    },
+  });
+  await agent.run("login");
   assert.equal(clients[0]?.apiKey, undefined);
-  assert.deepEqual(clients[0]?.env, {});
+  assert.deepEqual(clients[0]?.env, { HOME: "/h" });
+  assert.deepEqual(clients[0]?.config, { model_reasoning_summary: "auto" });
+});
+test("Codex cliLogin require accepts only a stored ChatGPT login", async () => {
+  const script = join(mkdtempSync(join(tmpdir(), "codex-login-")), "codex");
+  writeFileSync(
+    script,
+    '#!/bin/sh\n[ "$1 $2" = "login status" ] && echo "$FAKE_LOGIN" >&2\n',
+    { mode: 0o755 },
+  );
+  const agent = (status: string) =>
+    new Agent({
+      provider: "openai",
+      cliLogin: "require",
+      providerOptions: {
+        provider: "openai",
+        client: { codexPathOverride: script, env: { FAKE_LOGIN: status } },
+      },
+    });
+  await agent("Logged in using ChatGPT").checkRuntime();
+  for (const status of ["Logged in using an API key - sk-***", "Not logged in"])
+    await assert.rejects(
+      agent(status).checkRuntime(),
+      (error) =>
+        error instanceof ProviderError &&
+        error.errorType === "authentication_failed",
+    );
 });

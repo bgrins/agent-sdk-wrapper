@@ -12,6 +12,8 @@ export type Effort =
   | "max"
   | "ultra"
   | "persistent";
+/** Whether the runtime may use its stored login. `require` is Codex-only. */
+export type CliLogin = "deny" | "require";
 export interface AgentDefaults {
   provider?: ProviderInput;
   model?: string;
@@ -26,6 +28,7 @@ export interface AgentDefaults {
   providerOptions?: ProviderOptions;
   onProviderEvent?: (event: unknown) => void;
   traceFile?: string;
+  cliLogin?: CliLogin;
   // Reserved features fail at compile time and at runtime, including empty values.
   tools?: never;
   mcpServers?: never;
@@ -47,6 +50,7 @@ export interface ResolvedRequest extends RunRequest {
   retryDelayMs: number;
   continueSession: boolean;
   includeRaw: boolean;
+  cliLogin: CliLogin;
 }
 const keys = new Set([
   "prompt",
@@ -63,6 +67,7 @@ const keys = new Set([
   "providerOptions",
   "onProviderEvent",
   "traceFile",
+  "cliLogin",
 ]);
 export function checkKeys(
   value: object,
@@ -145,6 +150,12 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
     )
       throw new ConfigError(`${key} must be a non-negative integer`);
   }
+  if (
+    input.cliLogin !== undefined &&
+    input.cliLogin !== "deny" &&
+    input.cliLogin !== "require"
+  )
+    throw new ConfigError("cliLogin must be 'deny' or 'require'");
   if (input.signal !== undefined && !(input.signal instanceof AbortSignal))
     throw new ConfigError("signal must be an AbortSignal");
   if (
@@ -186,5 +197,6 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
     retryDelayMs: input.retryDelayMs ?? 250,
     continueSession: input.continueSession ?? false,
     includeRaw: input.includeRaw ?? false,
+    cliLogin: input.cliLogin ?? "deny",
   };
 }

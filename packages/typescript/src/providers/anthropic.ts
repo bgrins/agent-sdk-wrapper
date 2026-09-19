@@ -10,6 +10,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ConfigError,
+  ProviderError,
   ProviderProtocolError,
   RuntimeUnavailableError,
 } from "../errors.js";
@@ -28,6 +29,21 @@ import {
   stringsOption,
 } from "./common.js";
 
+// The CLI ranks these above every stored login (claude.ai, OAuth token, Console profile).
+const credentialEnv = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+];
+const oauthTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN";
+function withoutLoginToken(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const { [oauthTokenEnv]: _login, ...rest } = env;
+  return rest;
+}
 type NativeQuery = AsyncIterable<SDKMessage> & { close(): void };
 type QueryFn = (params: { prompt: string; options: Options }) => NativeQuery;
 export class AnthropicAdapter implements ProviderAdapter {
@@ -145,8 +161,30 @@ export class AnthropicAdapter implements ProviderAdapter {
       throw new ConfigError(
         "anthropic env CLAUDE_CODE_EFFORT_LEVEL conflicts with effort",
       );
+    if (req.cliLogin === "require")
+      throw new ConfigError(
+        "cliLogin 'require' is not supported for Claude; use an API key, auth token or cloud-provider credentials",
+      );
+    if (opts?.env?.[oauthTokenEnv])
+      throw new ConfigError(
+        `anthropic env ${oauthTokenEnv} is a claude.ai login token; Claude runs use API-key or cloud-provider credentials`,
+      );
   }
   async ensureAvailable(req: ResolvedRequest): Promise<void> {
+    const env =
+      (req.providerOptions?.provider === "anthropic"
+        ? req.providerOptions.options?.env
+        : undefined) ?? process.env;
+    if (
+      !credentialEnv.some(
+        (name) =>
+          !["", "0", "false"].includes((env[name] ?? "").trim().toLowerCase()),
+      )
+    )
+      throw new ProviderError(
+        "No Claude API credentials: set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or a cloud-provider flag (CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY); cliLogin 'deny' never uses a stored claude.ai login",
+        "authentication_failed",
+      );
     if (this.queryFn) return;
     try {
       await import("@anthropic-ai/claude-agent-sdk");
@@ -223,7 +261,10 @@ export class AnthropicAdapter implements ProviderAdapter {
           thinking: { type: "adaptive", display: "summarized" },
           ...native,
           // The native env option replaces process.env.
-          env: { ...(native?.env ?? process.env), ...additions },
+          env: withoutLoginToken({
+            ...(native?.env ?? process.env),
+            ...additions,
+          }),
           model: req.model,
           cwd: req.cwd,
           effort: req.effort as Options["effort"],
