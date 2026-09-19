@@ -225,13 +225,14 @@ def load_trace_replay(path: str | Path) -> TraceReplay:
 def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
     """Return the stable result summary represented by trace envelopes."""
 
-    text_parts: list[str] = []
+    final_text = ""
     usage: TokenUsage | None = None
     cost_usd: float | None = None
     structured_output: Any = None
     session_id: str | None = None
     provider = ""
     model: str | None = None
+    reported_model: str | None = None
     status = RunStatus.SUCCESS
     ended_reason = RunEndedReason.SUCCESS
     error: str | None = None
@@ -244,7 +245,7 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
             provider = event.provider
             model = event.model
         elif isinstance(event, Text):
-            text_parts.append(event.text)
+            final_text = event.text
         elif isinstance(event, Usage):
             usage = event.usage if usage is None else usage + event.usage
             if event.cost_usd is not None:
@@ -253,6 +254,8 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
             structured_output = event.value
         elif isinstance(event, SessionInfo):
             session_id = event.id
+            if event.model:
+                reported_model = event.model
         elif isinstance(event, Error) and error is None:
             error = event.message
         elif isinstance(event, RunFinished):
@@ -261,10 +264,10 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
 
     return {
         "provider": provider,
-        "model": model,
+        "model": reported_model or model,
         "status": status.value,
         "ended_reason": ended_reason.value,
-        "final_text": "".join(text_parts),
+        "final_text": final_text,
         "structured_output": structured_output,
         "usage": _usage_dict(usage),
         "cost_usd": cost_usd,
