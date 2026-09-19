@@ -641,3 +641,40 @@ test("Claude retries transient failures reported through synthetic messages", as
     1,
   );
 });
+test("Claude child env disables background tasks and pins effort without replacing env semantics", async () => {
+  const inherited = harness([result()], { effort: "low" });
+  await inherited.agent.run("inherit");
+  const env = inherited.captured[0]?.env;
+  assert.equal(env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+  assert.equal(env?.CLAUDE_CODE_EFFORT_LEVEL, "low");
+  assert.equal(env?.PATH, process.env.PATH);
+  const options = (env: Record<string, string>): AgentDefaults => ({
+    providerOptions: { provider: "anthropic", options: { env } },
+  });
+  const explicit = harness(
+    [result()],
+    options({ ONLY: "1", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" }),
+  );
+  await explicit.agent.run("explicit");
+  assert.deepEqual(explicit.captured[0]?.env, {
+    ONLY: "1",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+  });
+  const same = harness([result()], {
+    effort: "high",
+    ...options({ CLAUDE_CODE_EFFORT_LEVEL: "high" }),
+  });
+  await same.agent.run("same");
+  assert.deepEqual(same.captured[0]?.env, {
+    CLAUDE_CODE_EFFORT_LEVEL: "high",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+  });
+  assert.throws(
+    () =>
+      harness([], {
+        effort: "high",
+        ...options({ CLAUDE_CODE_EFFORT_LEVEL: "low" }),
+      }),
+    ConfigError,
+  );
+});

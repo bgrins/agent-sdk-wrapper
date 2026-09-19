@@ -139,6 +139,12 @@ export class AnthropicAdapter implements ProviderAdapter {
         );
     }
     envOption(opts?.env);
+    // The CLI ranks CLAUDE_CODE_EFFORT_LEVEL above --effort.
+    const effortEnv = opts?.env?.CLAUDE_CODE_EFFORT_LEVEL;
+    if (req.effort && effortEnv !== undefined && effortEnv !== req.effort)
+      throw new ConfigError(
+        "anthropic env CLAUDE_CODE_EFFORT_LEVEL conflicts with effort",
+      );
   }
   async ensureAvailable(req: ResolvedRequest): Promise<void> {
     if (this.queryFn) return;
@@ -182,6 +188,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       req.providerOptions?.provider === "anthropic"
         ? req.providerOptions.options
         : undefined;
+    const additions: Record<string, string> = {};
+    if (req.effort) additions.CLAUDE_CODE_EFFORT_LEVEL = req.effort;
+    // Background subagents make the CLI emit an extra turn and a second result.
+    if (native?.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === undefined)
+      additions.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     req.signal?.addEventListener("abort", onAbort, { once: true });
@@ -203,6 +214,8 @@ export class AnthropicAdapter implements ProviderAdapter {
           settingSources: [],
           thinking: { type: "adaptive", display: "summarized" },
           ...native,
+          // The native env option replaces process.env.
+          env: { ...(native?.env ?? process.env), ...additions },
           model: req.model,
           cwd: req.cwd,
           effort: req.effort as Options["effort"],
