@@ -7,6 +7,7 @@ import asyncio
 import builtins
 import dataclasses
 import dis
+import functools
 import inspect
 import json
 import os
@@ -51,18 +52,6 @@ from ..structured import json_schema_of_type, validate_output
 from ..tools import CODEX_TOOL_SERVER, tool_description, tool_name, validate_tool_names
 from .base import ProviderAdapter
 
-_THREAD_RESUME_OPTION_KEYS = {
-    "approval_mode",
-    "base_instructions",
-    "config",
-    "cwd",
-    "developer_instructions",
-    "model",
-    "model_provider",
-    "personality",
-    "sandbox",
-    "service_tier",
-}
 _CODEX_NATIVE_TOOL_FILTER_NAMES = {
     "agent",
     "command",
@@ -139,10 +128,19 @@ class OpenAIProvider(ProviderAdapter):
 
     def validate_request(self, req: RunRequest) -> None:
         _validate_supported(req)
+        self._validate_native_options(req)
         if self._api_key and not self._launches_codex():
             raise ConfigError(
                 "api_key requires the provider to launch Codex; authenticate the "
                 "pre-built codex client or custom launch command instead"
+            )
+        if not self._launches_codex() and (
+            req.tools or req.subagents or req.mcp_servers or req.web_tools is not None
+        ):
+            raise ConfigError(
+                "Codex tools, subagents, MCP servers and web_tools require the provider "
+                "to launch Codex; a pre-built codex client or launch_args_override "
+                "cannot be reconfigured"
             )
 
     def _launches_codex(self) -> bool:
@@ -165,11 +163,6 @@ class OpenAIProvider(ProviderAdapter):
         try:
             api_key = self._login_api_key()
             with _runtime_config(req) as runtime_config:
-                if self._codex is not None and runtime_config.config_overrides:
-                    raise ConfigError(
-                        "Codex tools, subagents, and web_tools require the provider "
-                        "to launch Codex; a pre-built codex client cannot be reconfigured"
-                    )
                 config_overrides = runtime_config.config_overrides
                 if api_key:
                     # Keep the API key in memory instead of replacing auth.json.
@@ -213,7 +206,6 @@ class OpenAIProvider(ProviderAdapter):
 
         thread_id = req.session_id or self._thread_id
         if thread_id:
-            _validate_thread_resume_options(thread_kwargs)
             thread = await codex.thread_resume(thread_id, **thread_kwargs)
         else:
             thread = await codex.thread_start(**thread_kwargs)
@@ -251,21 +243,46 @@ class OpenAIProvider(ProviderAdapter):
         async with AsyncCodex(config=config) as codex:
             yield codex
 
-    def _build_options(
-        self, req: RunRequest, approval_mode: Any, sandbox: Any
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        req_effort = normalize_effort_for_provider("openai", req.effort)
+    def _native_options(self, req: RunRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         extra = dict(req.extra_options)
-        thread_options = dict(self._thread_options)
-        turn_options = dict(self._turn_options)
-        thread_options.update(extra.pop("thread_options", {}))
-        turn_options.update(extra.pop("turn_options", {}))
+        thread_options = {**self._thread_options, **extra.pop("thread_options", {})}
+        turn_options = {**self._turn_options, **extra.pop("turn_options", {})}
         if extra:
             keys = ", ".join(sorted(extra))
             raise ConfigError(
                 "unsupported Codex SDK extra_options keys: "
                 f"{keys}. Use 'thread_options' or 'turn_options'."
             )
+        return thread_options, turn_options
+
+    def _validate_native_options(self, req: RunRequest) -> None:
+        thread_options, turn_options = self._native_options(req)
+        resuming = bool(req.session_id or self._thread_id)
+        if thread_options.get("ephemeral", self._ephemeral) and (
+            resuming or req.continue_session
+        ):
+            raise ConfigError(
+                "ephemeral Codex threads cannot be resumed: each run starts a new "
+                "app-server, so session_id and continue_session would not find the thread"
+            )
+        names = _sdk_option_names()
+        if names is None:
+            return
+        method = "thread_resume" if resuming else "thread_start"
+        # Resuming drops the start-only ephemeral flag, which is false by now.
+        allowed = names[method] | ({"ephemeral"} if resuming else set())
+        unknown = sorted(set(thread_options) - allowed)
+        if unknown:
+            raise ConfigError(f"unsupported Codex {method} options: {', '.join(unknown)}")
+        unknown = sorted(set(turn_options) - names["turn"])
+        if unknown:
+            raise ConfigError(f"unsupported Codex turn options: {', '.join(unknown)}")
+
+    def _build_options(
+        self, req: RunRequest, approval_mode: Any, sandbox: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        req_effort = normalize_effort_for_provider("openai", req.effort)
+        thread_options, turn_options = self._native_options(req)
 
         thread_options.setdefault("model", req.model)
         thread_options.setdefault("model_provider", self._model_provider)
@@ -275,7 +292,10 @@ class OpenAIProvider(ProviderAdapter):
         thread_options.setdefault("sandbox", sandbox)
         thread_options.setdefault("personality", self._personality)
         thread_options.setdefault("service_tier", self._service_tier)
-        thread_options.setdefault("ephemeral", self._ephemeral)
+        if req.session_id or self._thread_id:
+            thread_options.pop("ephemeral", None)
+        else:
+            thread_options.setdefault("ephemeral", self._ephemeral)
 
         turn_options.setdefault("model", req.model)
         turn_options.setdefault("cwd", _as_str(req.cwd))
@@ -774,13 +794,27 @@ def _unsupported_subagent_controls(subagents: dict[str, Any]) -> list[str]:
     return unsupported
 
 
-def _validate_thread_resume_options(options: dict[str, Any]) -> None:
-    unsupported = sorted(set(options) - _THREAD_RESUME_OPTION_KEYS)
-    if unsupported:
-        raise ConfigError(
-            "unsupported Codex thread_resume options with thread_id: "
-            f"{', '.join(unsupported)}"
+@functools.cache
+def _sdk_option_names() -> dict[str, frozenset[str]] | None:
+    """Keyword options the SDK's thread and turn methods accept."""
+
+    try:
+        from openai_codex import AsyncCodex, AsyncThread
+    except ImportError:
+        return None
+
+    def keywords(method: Any) -> frozenset[str]:
+        return frozenset(
+            name
+            for name, param in inspect.signature(method).parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY
         )
+
+    return {
+        "thread_start": keywords(AsyncCodex.thread_start),
+        "thread_resume": keywords(AsyncCodex.thread_resume),
+        "turn": keywords(AsyncThread.turn),
+    }
 
 
 @dataclasses.dataclass

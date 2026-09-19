@@ -35,7 +35,6 @@ from agent_sdk_wrapper.providers.openai_provider import (
     _stream_turn,
     _tool_entry,
     _validate_supported,
-    _validate_thread_resume_options,
     _write_sdk_debug_log,
 )
 from agent_sdk_wrapper.tools import TOOL_NAME_ATTR
@@ -888,25 +887,49 @@ async def test_codex_stream_maps_image_items():
     assert '"status": "failed"' in (results[1].output or "")
 
 
-def test_thread_resume_rejects_start_only_options():
-    with pytest.raises(ConfigError, match="ephemeral"):
-        _validate_thread_resume_options({"model": "gpt-5.4", "ephemeral": True})
+def _options_request(**kwargs: Any) -> RunRequest:
+    return RunRequest(provider="openai", prompt="ignored", **kwargs)
 
 
-def test_thread_resume_filter_allows_resume_safe_options():
-    _validate_thread_resume_options(
-        {
-            "approval_mode": "never",
-            "model": "gpt-5.4",
-            "sandbox": "workspace-write",
-            "service_tier": "priority",
-        }
+@pytest.mark.parametrize(
+    ("provider_options", "request_options", "match"),
+    [
+        ({"thread_options": {"thread_source": "user"}}, {"session_id": "t"}, "thread_resume"),
+        ({"thread_options": {"include_turns": True}}, {}, "thread_start options: include_turns"),
+        ({"turn_options": {"output_format": "json"}}, {}, "turn options: output_format"),
+        ({}, {"extra_options": {"thread": {}}}, "extra_options keys: thread"),
+        ({"ephemeral": True}, {"session_id": "t"}, "ephemeral"),
+        ({"ephemeral": True}, {"continue_session": True}, "ephemeral"),
+        (
+            {},
+            {"continue_session": True, "extra_options": {"thread_options": {"ephemeral": True}}},
+            "ephemeral",
+        ),
+        ({"ephemeral": True, "thread_id": "t"}, {}, "ephemeral"),
+        ({"codex": object()}, {"web_tools": False}, "launch Codex"),
+        (
+            {"config": {"launch_args_override": ("codex",)}},
+            {"tools": [sample_importable_tool]},
+            "launch Codex",
+        ),
+    ],
+)
+def test_codex_rejects_options_the_sdk_cannot_take(provider_options, request_options, match):
+    with pytest.raises(ConfigError, match=match):
+        OpenAIProvider(**provider_options).validate_request(_options_request(**request_options))
+
+
+def test_codex_accepts_sdk_native_options():
+    provider = OpenAIProvider(
+        ephemeral=False,
+        thread_options={"base_instructions": "Be brief.", "service_tier": "flex"},
+        turn_options={"turn_service_tier": "flex", "summary": "concise"},
     )
 
-
-def test_thread_resume_filter_rejects_turn_and_start_only_options():
-    with pytest.raises(ConfigError, match="ephemeral, turn_options"):
-        _validate_thread_resume_options({"ephemeral": True, "turn_options": {"effort": "high"}})
+    provider.validate_request(_options_request())
+    provider.validate_request(_options_request(session_id="t", continue_session=True))
+    thread_options, _ = provider._build_options(_options_request(session_id="t"), None, None)
+    assert "ephemeral" not in thread_options
 
 
 def test_codex_filters_require_wrapper_managed_tools():
