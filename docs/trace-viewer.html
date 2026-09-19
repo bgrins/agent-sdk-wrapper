@@ -1322,18 +1322,22 @@
 
       try {
         const previous = new Map(discoveredRuns.map((run) => [run.runUrl.href, run]));
-        discoveredRuns = (await findResultRuns()).map((run) => ({
+        const { runs, truncated } = await findResultRuns();
+        discoveredRuns = runs.map((run) => ({
           ...run, manifest: run.manifest || previous.get(run.runUrl.href)?.manifest,
         }));
         renderRuns(discoveredRuns);
         if (selectionVersion !== loadVersion) return;
+        const scanned = truncated
+          ? ` Showing runs from the ${truncated} most recently modified directories.`
+          : "";
         if (discoveredRuns.length) {
-          setResultsStatus(`Found ${discoveredRuns.length} result run(s).`);
+          setResultsStatus(`Found ${discoveredRuns.length} result run(s).${scanned}`);
           const selected = followLatest ? discoveredRuns[0]
             : discoveredRuns.find((run) => run.runUrl.href === activeRunUrl) || discoveredRuns[0];
           await loadRunFromUrl(selected, { refresh: !force && selected.runUrl.href === activeRunUrl });
         } else {
-          setResultsStatus("Waiting for traces.");
+          setResultsStatus(`Waiting for traces.${scanned}`);
         }
       } catch (error) {
         renderRuns([]);
@@ -1346,19 +1350,43 @@
     async function findResultRuns() {
       const index = new URLSearchParams(window.location.search).get("index");
       const url = new URL(index || "/api/runs", window.location.href);
-      const entries = await fetchJson(url, url.pathname);
-      return entries.map((entry) => ({
-        runUrl: new URL(entry.trace || entry.manifest, window.location.href),
-        traceRel: entry.trace,
-        manifestUrl: entry.manifest ? new URL(entry.manifest, window.location.href) : null,
-        label: entry.label,
-        updatedAt: entry.updated_at,
-      })).sort(compareRuns);
+      // A link must not display another origin's trace under this page.
+      if (url.origin !== window.location.origin) {
+        throw new Error("The run index must come from this trace server");
+      }
+      const response = await fetchResponse(url, url.pathname);
+      const entries = parseJson(await response.text(), url.pathname);
+      if (!Array.isArray(entries)) throw new Error(`Could not parse ${url.pathname}: expected a list`);
+      const runs = [];
+      for (const entry of entries) {
+        const traceUrl = sameOriginUrl(entry?.trace);
+        const manifestUrl = sameOriginUrl(entry?.manifest);
+        if ((entry?.trace && !traceUrl) || (entry?.manifest && !manifestUrl)) continue;
+        if (!traceUrl && !manifestUrl) continue;
+        runs.push({
+          runUrl: traceUrl || manifestUrl,
+          traceRel: traceUrl ? entry.trace : null,
+          manifestUrl,
+          label: typeof entry.label === "string" ? entry.label : "",
+          updatedAt: typeof entry.updated_at === "string" ? entry.updated_at : "",
+        });
+      }
+      return { runs: runs.sort(compareRuns), truncated: response.headers.get("x-runs-truncated") };
+    }
+
+    function sameOriginUrl(path) {
+      if (typeof path !== "string" || !path) return null;
+      try {
+        const url = new URL(path, window.location.href);
+        return url.origin === window.location.origin ? url : null;
+      } catch {
+        return null;
+      }
     }
 
     function compareRuns(left, right) {
-      const leftTime = left.updatedAt || left.manifest?.updated_at || left.label;
-      const rightTime = right.updatedAt || right.manifest?.updated_at || right.label;
+      const leftTime = String(left.updatedAt || left.manifest?.updated_at || left.label);
+      const rightTime = String(right.updatedAt || right.manifest?.updated_at || right.label);
       return rightTime.localeCompare(leftTime);
     }
 
@@ -1473,8 +1501,9 @@
 
       try {
         const manifest = run.manifestUrl ? await fetchJson(run.manifestUrl, run.manifestUrl.pathname) : null;
-        const traceRel = manifest?.files?.trace || run.traceRel || "trace.jsonl";
-        const resultRel = manifest?.files?.result || null;
+        const files = artifactFiles(manifest);
+        const traceRel = files.trace || run.traceRel || "trace.jsonl";
+        const resultRel = files.result || null;
         const traceUrl = runFileUrl(traceRel, run.runUrl);
         const resultUrl = resultRel ? runFileUrl(resultRel, run.runUrl) : null;
         const traceText = await fetchText(traceUrl, traceUrl.pathname);
@@ -1518,8 +1547,30 @@
       return url;
     }
 
+    function artifactFiles(manifest) {
+      const files = isObject(manifest?.files) ? manifest.files : {};
+      return Object.fromEntries(
+        Object.entries(files).filter(([, path]) => typeof path === "string" && path)
+      );
+    }
+
+    async function fetchResponse(url, label) {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Could not load ${label}: ${response.status} ${response.statusText}`);
+      }
+      return response;
+    }
+
+    async function fetchText(url, label) {
+      return (await fetchResponse(url, label)).text();
+    }
+
     async function fetchJson(url, label) {
-      const text = await fetchText(url, label);
+      return parseJson(await fetchText(url, label), label);
+    }
+
+    function parseJson(text, label) {
       try {
         return JSON.parse(text);
       } catch (error) {
@@ -1527,12 +1578,8 @@
       }
     }
 
-    async function fetchText(url, label) {
-      const response = await fetch(url, { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`Could not load ${label}: ${response.status} ${response.statusText}`);
-      }
-      return response.text();
+    function isObject(value) {
+      return value !== null && typeof value === "object" && !Array.isArray(value);
     }
 
     async function loadFiles(files) {
@@ -1553,8 +1600,9 @@
         const byPath = new Map(files.map((file) => [relativeName(file), file]));
         const manifestFile = findFile(byPath, "manifest.json");
         const manifest = manifestFile ? await readJson(manifestFile) : null;
-        const traceRel = manifest?.files?.trace || "trace.jsonl";
-        const resultRel = manifest?.files?.result || "result.json";
+        const entries = artifactFiles(manifest);
+        const traceRel = entries.trace || "trace.jsonl";
+        const resultRel = entries.result || "result.json";
         const traceFile = findFile(byPath, traceRel) || findTraceByExtension(byPath);
         const resultFile = findFile(byPath, resultRel);
         const result = resultFile ? await readJson(resultFile) : null;
@@ -2195,12 +2243,13 @@
     function renderFiles(manifest, byPath) {
       const names = new Set();
       for (const path of byPath.keys()) names.add(path);
-      for (const rel of Object.values(manifest?.files || {})) names.add(rel);
+      for (const rel of Object.values(artifactFiles(manifest))) names.add(rel);
       const items = [...names].sort().map((name) => {
         const li = document.createElement("li");
         const file = findFile(byPath, name);
         if (file) {
-          const url = URL.createObjectURL(file);
+          // A plain-text blob cannot run an .html artifact in the viewer's origin.
+          const url = URL.createObjectURL(new Blob([file], { type: "text/plain;charset=utf-8" }));
           objectUrls.push(url);
           const link = document.createElement("a");
           link.href = url;
@@ -2212,25 +2261,32 @@
         }
         return li;
       });
-      filesEl.replaceChildren(...items.length ? items : emptyListItem("No files loaded."));
+      filesEl.replaceChildren(...items.length ? items : [emptyListItem("No files loaded.")]);
     }
 
     function renderServerFiles(manifest, runUrl, traceRel) {
       const names = new Set(manifest ? ["manifest.json"] : []);
       if (traceRel) names.add(traceRel);
-      for (const rel of Object.values(manifest?.files || {})) names.add(rel);
+      for (const rel of Object.values(artifactFiles(manifest))) names.add(rel);
 
       const items = [...names].sort().map((name) => {
         const li = document.createElement("li");
+        let href;
+        try {
+          href = runFileUrl(name, runUrl).href;
+        } catch {
+          li.textContent = `${name} (outside the run directory)`;
+          return li;
+        }
         const link = document.createElement("a");
-        link.href = runFileUrl(name, runUrl).href;
+        link.href = href;
         link.textContent = name;
         link.target = "_blank";
         link.rel = "noreferrer";
         li.append(link);
         return li;
       });
-      filesEl.replaceChildren(...items.length ? items : emptyListItem("No files loaded."));
+      filesEl.replaceChildren(...items.length ? items : [emptyListItem("No files loaded.")]);
     }
 
     function formatDuration(value) {

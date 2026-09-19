@@ -121,19 +121,13 @@ test("server discovers new traces and reads updates without exposing files outsi
     new URL(manifest.files.trace, base + custom.manifest),
   );
   assert.match(await customTrace.text(), /custom trace/);
-  const html = await readFile(
-    new URL("../docs/trace-viewer.html", import.meta.url),
-    "utf8",
-  );
-  const context = viewerContext(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
-  context.window.location = { href: base, search: "", protocol: "http:" };
-  context.URLSearchParams = URLSearchParams;
+  const context = await loadViewer(`${base}/docs/trace-viewer.html`);
   context.fetch = fetch;
-  const runs = await vm.runInContext("findResultRuns()", context);
+  const { runs } = await vm.runInContext("findResultRuns()", context);
   context.run = runs.find((entry) => entry.label === "custom trace");
   await vm.runInContext("loadRunFromUrl(run)", context);
   assert.equal(vm.runInContext("loadErrorEl.textContent", context), "");
-  assert.match(vm.runInContext("rawTraceText", context), /custom trace/);
+  assert.match(visibleTrace(context), /custom trace/);
 
   const canonicalTrace = await fs.realpath(trace);
   for (const [replace, status] of [
@@ -308,39 +302,177 @@ test("a symlinked ancestor swapped in after path checks is not followed", async 
   }
 });
 
-function viewerContext(script) {
-  const element = () => ({
-    addEventListener() {},
-    replaceChildren() {},
-    append() {},
-    setAttribute() {},
-    dataset: {},
-    classList: { toggle() {} },
-    querySelectorAll: () => [],
+// Just enough DOM for the viewer script: nodes, text, keys and listeners.
+class FakeNode {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.parentNode = null;
+    this.text = "";
+    this.dataset = {};
+    this.attributes = {};
+    this.listeners = {};
+    this.classes = new Set();
+    this.classList = {
+      toggle: (name, force = !this.classes.has(name)) => {
+        if (force) this.classes.add(name);
+        else this.classes.delete(name);
+        return force;
+      },
+      contains: (name) => this.classes.has(name),
+    };
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+    this.clientHeight = 0;
+  }
+  get className() {
+    return [...this.classes].join(" ");
+  }
+  set className(value) {
+    this.classes = new Set(String(value).split(/\s+/).filter(Boolean));
+  }
+  get textContent() {
+    return this.text + this.children.map((node) => node.textContent).join("");
+  }
+  set textContent(value) {
+    this.replaceChildren();
+    this.text = String(value ?? "");
+  }
+  get firstElementChild() {
+    return this.children.find((node) => node.tagName !== "#text") ?? null;
+  }
+  get nextElementSibling() {
+    const siblings = this.parentNode?.children ?? [];
+    return (
+      siblings
+        .slice(siblings.indexOf(this) + 1)
+        .find((node) => node.tagName !== "#text") ?? null
+    );
+  }
+  append(...nodes) {
+    for (const node of nodes) this.insertBefore(node, null);
+  }
+  replaceChildren(...nodes) {
+    for (const node of this.children) node.parentNode = null;
+    this.children = [];
+    this.text = "";
+    this.append(...nodes);
+  }
+  insertBefore(node, reference) {
+    if (typeof node === "string") {
+      const text = new FakeNode("#text");
+      text.text = node;
+      node = text;
+    }
+    if (node.tagName === "#fragment") {
+      const moved = node.children;
+      node.replaceChildren();
+      for (const child of moved) this.insertBefore(child, reference);
+      return node;
+    }
+    node.remove();
+    const index = reference ? this.children.indexOf(reference) : -1;
+    this.children.splice(index < 0 ? this.children.length : index, 0, node);
+    node.parentNode = this;
+    return node;
+  }
+  remove() {
+    if (!this.parentNode) return;
+    const siblings = this.parentNode.children;
+    siblings.splice(siblings.indexOf(this), 1);
+    this.parentNode = null;
+  }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+  getAttribute(name) {
+    return this.attributes[name] ?? null;
+  }
+  addEventListener(type, listener) {
+    (this.listeners[type] ||= []).push(listener);
+  }
+  dispatch(type) {
+    for (const listener of this.listeners[type] || []) listener({});
+  }
+  querySelectorAll() {
+    return [];
+  }
+  find(predicate) {
+    for (const node of this.children) {
+      if (predicate(node)) return node;
+      const found = node.find(predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+}
+
+const VIEWS = [
+  "conversation-view",
+  "timeline-view",
+  "events-view",
+  "files-view",
+  "raw-view",
+];
+
+async function loadViewer(href) {
+  const html = await readFile(
+    new URL("../docs/trace-viewer.html", import.meta.url),
+    "utf8",
+  );
+  const elements = new Map();
+  const tabs = VIEWS.map((view) => {
+    const tab = new FakeNode("button");
+    tab.dataset.view = view;
+    return tab;
   });
+  const views = VIEWS.map((id) =>
+    Object.assign(new FakeNode("section"), { id }),
+  );
   const context = vm.createContext({
     document: {
-      querySelector: element,
-      querySelectorAll: () => [],
-      createElement: element,
-      body: element(),
+      querySelector(selector) {
+        if (!elements.has(selector))
+          elements.set(selector, new FakeNode("div"));
+        return elements.get(selector);
+      },
+      querySelectorAll: (selector) =>
+        ({ ".tab-btn": tabs, ".view": views })[selector] ?? [],
+      createElement: (tagName) => new FakeNode(tagName),
+      createDocumentFragment: () => new FakeNode("#fragment"),
+      body: new FakeNode("body"),
     },
     window: { location: { protocol: "file:" } },
     localStorage: { getItem() {} },
     setInterval() {},
     URL,
+    URLSearchParams,
     Blob,
   });
-  vm.runInContext(script, context);
+  vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
+  if (href) {
+    const url = new URL(href);
+    context.window.location = {
+      href,
+      origin: url.origin,
+      search: url.search,
+      protocol: url.protocol,
+    };
+  }
   return context;
 }
 
+const visibleTrace = (context) => vm.runInContext("rawTraceText", context);
+
+const traceText = (rows) =>
+  rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+
+// Copy values out of the page's realm so deepEqual compares plain data.
+const evaluate = (context, code) =>
+  JSON.parse(vm.runInContext(`JSON.stringify(${code})`, context));
+
 test("trace-only metadata follows the latest resumed run and sums usage across turns", async () => {
-  const html = await readFile(
-    new URL("../docs/trace-viewer.html", import.meta.url),
-    "utf8",
-  );
-  const context = viewerContext(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+  const context = await loadViewer();
   context.trace = [
     {
       run_id: "one",
@@ -391,11 +523,7 @@ test("trace-only metadata follows the latest resumed run and sums usage across t
 });
 
 test("polling restores an unchanged trace after a failed manual refresh", async () => {
-  const html = await readFile(
-    new URL("../docs/trace-viewer.html", import.meta.url),
-    "utf8",
-  );
-  const context = viewerContext(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+  const context = await loadViewer();
   const trace = `${JSON.stringify({
     run_id: "one",
     event: { type: "run_started", provider: "openai" },
@@ -409,34 +537,33 @@ test("polling restores an unchanged trace after a failed manual refresh", async 
     runUrl: new URL("http://localhost/results/run/trace.jsonl"),
     traceRel: "trace.jsonl",
   };
-  const visibleTrace = () => vm.runInContext("rawTraceText", context);
   const error = () => vm.runInContext("loadErrorEl.textContent", context);
   const poll = () =>
     vm.runInContext("loadRunFromUrl(run, { refresh: true })", context);
 
   await vm.runInContext("loadRunFromUrl(run)", context);
   assert.equal(error(), "");
-  assert.equal(visibleTrace(), trace);
+  assert.equal(visibleTrace(context), trace);
 
   unavailable = true;
   await vm.runInContext("loadRunFromUrl(run)", context);
   assert.match(error(), /503/);
-  assert.equal(visibleTrace(), "");
+  assert.equal(visibleTrace(context), "");
 
   unavailable = false;
   await poll();
   assert.equal(error(), "");
-  assert.equal(visibleTrace(), trace);
+  assert.equal(visibleTrace(context), trace);
 
   unavailable = true;
   await poll();
   assert.match(error(), /503/);
-  assert.equal(visibleTrace(), trace);
+  assert.equal(visibleTrace(context), trace);
 
   unavailable = false;
   await poll();
   assert.equal(error(), "");
-  assert.equal(visibleTrace(), trace);
+  assert.equal(visibleTrace(context), trace);
 });
 
 test("mounted job traces update directly without reading agent-created directories or links", async (t) => {
@@ -489,11 +616,7 @@ test("mounted job traces update directly without reading agent-created directori
 });
 
 test("an untrusted manifest cannot fetch outside its run directory", async () => {
-  const html = await readFile(
-    new URL("../docs/trace-viewer.html", import.meta.url),
-    "utf8",
-  );
-  const context = viewerContext(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+  const context = await loadViewer();
   const manifest = "http://localhost/results/job/manifest.json";
   context.run = { runUrl: new URL(manifest), manifestUrl: new URL(manifest) };
   for (const trace of [
@@ -513,4 +636,108 @@ test("an untrusted manifest cannot fetch outside its run directory", async () =>
       /inside the run directory/,
     );
   }
+});
+
+test("unsafe manifest file entries render as text without blanking the run", async () => {
+  const context = await loadViewer();
+  const manifest = "http://localhost/results/job/manifest.json";
+  context.run = { runUrl: new URL(manifest), manifestUrl: new URL(manifest) };
+  const files = {
+    trace: "trace.jsonl",
+    parent: "../other/trace.jsonl",
+    script: "javascript:alert(1)",
+    absolute: "/etc/passwd",
+    count: 5,
+  };
+  context.fetch = async (url) =>
+    new Response(
+      url.pathname.endsWith("manifest.json")
+        ? JSON.stringify({ files })
+        : traceText([{ run_id: "r", event: { type: "text", text: "kept" } }]),
+    );
+  await vm.runInContext("loadRunFromUrl(run)", context);
+  vm.runInContext('switchView("files-view")', context);
+  assert.equal(vm.runInContext("loadErrorEl.textContent", context), "");
+  assert.match(vm.runInContext("conversationEl.textContent", context), /kept/);
+  const list = vm.runInContext("filesEl", context);
+  assert.deepEqual(
+    list.children.flatMap((item) => item.children.map((link) => link.href)),
+    [
+      "http://localhost/results/job/manifest.json",
+      "http://localhost/results/job/trace.jsonl",
+    ],
+  );
+  for (const name of [files.parent, files.script, files.absolute])
+    assert.ok(list.textContent.includes(`${name} (outside the run directory)`));
+});
+
+test("the viewer only lists runs from its own origin", async () => {
+  const requested = [];
+  const spoofed = await loadViewer(
+    "http://localhost:8765/docs/trace-viewer.html?index=http://evil.test/runs.json",
+  );
+  spoofed.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response("[]");
+  };
+  await assert.rejects(
+    vm.runInContext("findResultRuns()", spoofed),
+    /this trace server/,
+  );
+  assert.deepEqual(requested, []);
+
+  const context = await loadViewer(
+    "http://localhost:8765/docs/trace-viewer.html?index=/api/runs",
+  );
+  context.fetch = async (url) => {
+    requested.push(String(url));
+    if (url.pathname !== "/api/runs")
+      return new Response(
+        traceText([{ run_id: "r", event: { type: "text", text: "local" } }]),
+      );
+    const runs = [
+      { label: "spoofed", trace: "http://evil.test/trace.jsonl" },
+      { label: "spoofed manifest", manifest: "//evil.test/manifest.json" },
+      { label: "local", trace: "/results/local/trace.jsonl" },
+    ];
+    return new Response(JSON.stringify(runs), {
+      headers: { "x-runs-truncated": "500" },
+    });
+  };
+  await vm.runInContext("discoverResults()", context);
+  assert.deepEqual(
+    evaluate(context, "discoveredRuns.map((run) => run.label)"),
+    ["local"],
+  );
+  assert.ok(requested.every((url) => url.startsWith("http://localhost:8765/")));
+  assert.match(visibleTrace(context), /local/);
+  assert.match(
+    vm.runInContext("resultsStatusEl.textContent", context),
+    /500 most recently modified directories/,
+  );
+});
+
+test("local artifacts open as plain text rather than pages in the viewer origin", async () => {
+  const context = await loadViewer();
+  const types = [];
+  context.URL = class extends URL {
+    static createObjectURL(blob) {
+      types.push(blob.type);
+      return `blob:viewer/${types.length}`;
+    }
+    static revokeObjectURL() {}
+  };
+  context.files = [
+    new File(["<script>document.title = 'owned'</script>"], "evil.html", {
+      type: "text/html",
+    }),
+    new File(
+      [traceText([{ run_id: "r", event: { type: "text", text: "hi" } }])],
+      "trace.jsonl",
+    ),
+  ];
+  await vm.runInContext("loadFiles(files)", context);
+  vm.runInContext('switchView("files-view")', context);
+  assert.equal(types.length, 2);
+  for (const type of types) assert.match(type, /^text\/plain/);
 });
