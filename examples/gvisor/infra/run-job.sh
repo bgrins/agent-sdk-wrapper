@@ -35,8 +35,8 @@ compose=(docker compose)
 cli= timer=
 cleanup() {
   status=$?
-  trap - EXIT
   trap '' INT TERM USR1
+  trap - EXIT
   if [[ -n $timer ]]; then kill "$timer" 2>/dev/null || :; wait "$timer" 2>/dev/null || :; fi
   if [[ -n $cli ]]; then kill -KILL "$cli" 2>/dev/null || :; wait "$cli" 2>/dev/null || :; fi
   # Stopping the attached CLI alone does not stop its container.
