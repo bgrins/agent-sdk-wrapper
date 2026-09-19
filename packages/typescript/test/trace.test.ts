@@ -137,9 +137,20 @@ test("breaking iteration and killed runtimes preserve partial traces and release
   );
   await assert.rejects(agent.run("killed"), ProcessTerminatedError);
   assert.equal(closed, 2);
+  const killed = readTrace(path).map((env) => env.event);
   assert.deepEqual(
-    readTrace(path).map((env) => env.event.type),
-    ["run_started", "text"],
+    killed.map((event) => event.type),
+    ["run_started", "text", "error", "run_finished"],
+  );
+  assert.deepEqual(killed[2], {
+    type: "error",
+    message: "killed",
+    error_type: "process_terminated",
+    retryable: false,
+  });
+  assert.equal(
+    killed[3]?.type === "run_finished" && killed[3].status,
+    "failure",
   );
 });
 

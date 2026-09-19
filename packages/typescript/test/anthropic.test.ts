@@ -30,6 +30,8 @@ const usage: SDKResultSuccess["usage"] = {
 };
 function assistant(
   content: SDKAssistantMessage["message"]["content"],
+  overrides: Partial<SDKAssistantMessage> = {},
+  message: Partial<SDKAssistantMessage["message"]> = {},
 ): SDKAssistantMessage {
   return {
     type: "assistant",
@@ -49,9 +51,32 @@ function assistant(
       context_management: null,
       diagnostics: null,
       stop_details: null,
+      ...message,
     },
+    ...overrides,
   };
 }
+function init(model: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "init",
+    apiKeySource: "ANTHROPIC_API_KEY",
+    claude_code_version: "test",
+    cwd: "/tmp",
+    tools: [],
+    mcp_servers: [],
+    model,
+    permissionMode: "default",
+    slash_commands: [],
+    output_style: "default",
+    skills: [],
+    plugins: [],
+    uuid: randomUUID(),
+    session_id: "claude-session",
+  };
+}
+const textBlock = (value: string) =>
+  ({ type: "text", text: value, citations: null }) as const;
 function result(overrides: Partial<SDKResultSuccess> = {}): SDKResultSuccess {
   return {
     type: "result",
@@ -159,7 +184,7 @@ test("Claude maps completed blocks, hidden reasoning, tool results, final usage 
     cache_read_tokens: 5,
     cache_write_tokens: 2,
     reasoning_output_tokens: 0,
-    requests: 0,
+    requests: 1,
   });
   assert.equal(run.cost_usd, 0.03);
   assert.equal(run.session_id, "claude-session");
@@ -219,7 +244,7 @@ test("Claude sums main and subagent modelUsage without adding main-loop usage or
     cache_read_tokens: 26,
     cache_write_tokens: 6,
     reasoning_output_tokens: 4,
-    requests: 0,
+    requests: 1,
   });
   assert.equal(run.cost_usd, 0.04);
   assert.equal(run.final_text, "answer");
@@ -282,7 +307,7 @@ for (const [overrides, expectedType, retryable] of [
       terminal_reason: "budget_exhausted",
       result: "budget exhausted",
     },
-    "budget_exhausted",
+    "max_budget",
     false,
   ],
   [{ stop_reason: "refusal", result: "declined" }, "refused", false],
@@ -359,7 +384,7 @@ test("Claude retractions fail explicitly through either native notification", as
   };
   for (const messages of [
     [original, { ...replacement, supersedes: [original.uuid] }, result()],
-    [original, replacement, result(), notice],
+    [original, notice, replacement, result()],
   ]) {
     const raw: unknown[] = [];
     const { agent, captured, closed } = harness(messages, {
@@ -501,4 +526,247 @@ test("Claude checkRuntime verifies a missing override without a model request", 
     },
   });
   await assert.rejects(agent.checkRuntime(), RuntimeUnavailableError);
+});
+// Frames captured from the Claude CLI against a local mock API.
+for (const [error, status, reason, message, expected] of [
+  [
+    "authentication_failed",
+    null,
+    "api_error",
+    "Not logged in · Please run /login",
+    "authentication_failed",
+  ],
+  [
+    "authentication_failed",
+    403,
+    "api_error",
+    "Failed to authenticate. API Error: 403 forbidden",
+    "permission_denied",
+  ],
+  [
+    "invalid_request",
+    400,
+    "prompt_too_long",
+    "Prompt is too long",
+    "context_window_exceeded",
+  ],
+  [
+    "billing_error",
+    400,
+    "api_error",
+    "Credit balance is too low",
+    "billing_error",
+  ],
+  [
+    "model_not_found",
+    404,
+    "api_error",
+    "There's an issue with the selected model (claude-test). It may not exist or you may not have access to it.",
+    "model_not_found",
+  ],
+  [
+    "server_error",
+    null,
+    "api_error",
+    "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
+    "transient_api_error",
+  ],
+] as const)
+  test(`Claude synthetic ${error} (${status}) is a ${expected} error, not text`, async () => {
+    const { agent } = harness([
+      assistant(
+        [textBlock(message)],
+        { error },
+        { model: "<synthetic>", stop_reason: "stop_sequence" },
+      ),
+      result({
+        is_error: true,
+        api_error_status: status,
+        terminal_reason: reason,
+        stop_reason: "stop_sequence",
+        result: message,
+      }),
+    ]);
+    const run = await agent.run("fail");
+    assert.equal(run.final_text, "");
+    assert.equal(
+      run.events.some((env) => env.event.type === "text"),
+      false,
+    );
+    assert.deepEqual(
+      run.events
+        .filter((env) => env.event.type === "error")
+        .map((env) => env.event),
+      [
+        {
+          type: "error",
+          message,
+          error_type: expected,
+          retryable: expected === "transient_api_error",
+        },
+      ],
+    );
+  });
+test("Claude retries transient failures reported through synthetic messages", async () => {
+  const message = "API Error: 529 overloaded";
+  const { agent, captured } = harness(
+    [
+      init("claude-test"),
+      assistant(
+        [textBlock(message)],
+        { error: "server_error" },
+        { model: "<synthetic>" },
+      ),
+      result({ is_error: true, api_error_status: 529, result: message }),
+    ],
+    { maxRetries: 1, retryDelayMs: 0 },
+  );
+  const run = await agent.run("retry");
+  assert.equal(captured.length, 2);
+  assert.equal(run.error, message);
+  assert.equal(
+    run.events.filter((env) => env.event.type === "error").length,
+    1,
+  );
+});
+test("Claude stops at its first result, ignoring background-task turns", async () => {
+  const { agent, closed } = harness([
+    assistant([textBlock("launched")]),
+    result({ result: "launched" }),
+    assistant([textBlock("background answer")], {}, { id: "second" }),
+    result({ result: "background answer" }),
+  ]);
+  const run = await agent.run("subagent");
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "launched");
+  assert.equal(closed(), 1);
+});
+test("Claude child env disables background tasks and pins effort without replacing env semantics", async () => {
+  const inherited = harness([result()], { effort: "low" });
+  await inherited.agent.run("inherit");
+  const env = inherited.captured[0]?.env;
+  assert.equal(env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+  assert.equal(env?.CLAUDE_CODE_EFFORT_LEVEL, "low");
+  assert.equal(env?.PATH, process.env.PATH);
+  const options = (env: Record<string, string>): AgentDefaults => ({
+    providerOptions: { provider: "anthropic", options: { env } },
+  });
+  const explicit = harness(
+    [result()],
+    options({ ONLY: "1", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" }),
+  );
+  await explicit.agent.run("explicit");
+  assert.deepEqual(explicit.captured[0]?.env, {
+    ONLY: "1",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+  });
+  const same = harness([result()], {
+    effort: "high",
+    ...options({ CLAUDE_CODE_EFFORT_LEVEL: "high" }),
+  });
+  await same.agent.run("same");
+  assert.deepEqual(same.captured[0]?.env, {
+    CLAUDE_CODE_EFFORT_LEVEL: "high",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+  });
+  assert.throws(
+    () =>
+      harness([], {
+        effort: "high",
+        ...options({ CLAUDE_CODE_EFFORT_LEVEL: "low" }),
+      }),
+    ConfigError,
+  );
+});
+test("Claude session_info reports the runtime model from init", async () => {
+  const run = await harness(
+    [init("claude-resolved"), assistant([textBlock("ok")]), result()],
+    { model: "claude-test" },
+  ).agent.run("model");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "session_info")
+      .map((env) => env.event),
+    [{ type: "session_info", id: "claude-session", model: "claude-resolved" }],
+  );
+  assert.equal(run.model, "claude-resolved");
+});
+test("Claude rate limit events become warnings", async () => {
+  const run = await harness([
+    {
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "five_hour",
+        utilization: 0.9,
+        resetsAt: 1700000000,
+      },
+      uuid: randomUUID(),
+      session_id: "claude-session",
+    },
+    result(),
+  ]).agent.run("limits");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "warning")
+      .map((env) => env.event),
+    [
+      {
+        type: "warning",
+        message:
+          "Claude rate limit status: allowed_warning, type=five_hour, utilization=0.9, resets_at=1700000000",
+      },
+    ],
+  );
+});
+test("Claude list tool results join their text blocks", async () => {
+  const run = await harness([
+    assistant([{ type: "tool_use", id: "call", name: "Agent", input: {} }]),
+    {
+      type: "user",
+      session_id: "claude-session",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call",
+            content: [
+              { type: "text", text: "RESULT_42" },
+              { type: "text", text: "\nagentId: a1" },
+            ],
+          },
+        ],
+      },
+    },
+    result(),
+  ]).agent.run("tool");
+  const output = run.events.find(
+    (env) => env.event.type === "tool_result",
+  )?.event;
+  assert.equal(
+    output?.type === "tool_result" && output.output,
+    "RESULT_42\nagentId: a1",
+  );
+});
+test("Claude joins contiguous text blocks of one assistant message", async () => {
+  const run = await harness([
+    assistant([textBlock("one "), textBlock("message")], {}, { id: "a" }),
+    assistant([textBlock(" continued")], {}, { id: "a" }),
+    assistant(
+      [{ type: "tool_use", id: "call", name: "Read", input: {} }],
+      {},
+      { id: "a" },
+    ),
+    assistant([textBlock("final "), textBlock("answer")], {}, { id: "b" }),
+    result({ result: "final answer" }),
+  ]).agent.run("join");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "text")
+      .map((env) => env.event.type === "text" && env.event.text),
+    ["one message continued", "final answer"],
+  );
+  assert.equal(run.final_text, "final answer");
 });

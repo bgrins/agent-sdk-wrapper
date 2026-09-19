@@ -4,6 +4,7 @@ import { findPackageJSON } from "node:module";
 import { dirname, join } from "node:path";
 import type {
   Options,
+  SDKAssistantMessageError,
   SDKMessage,
   SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -12,7 +13,7 @@ import {
   ProviderProtocolError,
   RuntimeUnavailableError,
 } from "../errors.js";
-import { emptyUsage, type ProviderEvent } from "../events.js";
+import { type ErrorEvent, emptyUsage, type ProviderEvent } from "../events.js";
 import type { ResolvedRequest } from "../request.js";
 import type { ProviderAdapter, ProviderContext } from "./base.js";
 import {
@@ -138,6 +139,12 @@ export class AnthropicAdapter implements ProviderAdapter {
         );
     }
     envOption(opts?.env);
+    // The CLI ranks CLAUDE_CODE_EFFORT_LEVEL above --effort.
+    const effortEnv = opts?.env?.CLAUDE_CODE_EFFORT_LEVEL;
+    if (req.effort && effortEnv !== undefined && effortEnv !== req.effort)
+      throw new ConfigError(
+        "anthropic env CLAUDE_CODE_EFFORT_LEVEL conflicts with effort",
+      );
   }
   async ensureAvailable(req: ResolvedRequest): Promise<void> {
     if (this.queryFn) return;
@@ -181,16 +188,29 @@ export class AnthropicAdapter implements ProviderAdapter {
       req.providerOptions?.provider === "anthropic"
         ? req.providerOptions.options
         : undefined;
+    const additions: Record<string, string> = {};
+    if (req.effort) additions.CLAUDE_CODE_EFFORT_LEVEL = req.effort;
+    // Background subagents make the CLI emit an extra turn and a second result.
+    if (native?.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === undefined)
+      additions.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     req.signal?.addEventListener("abort", onAbort, { once: true });
     if (req.signal?.aborted) abort.abort();
     let query: NativeQuery | undefined;
-    let terminal = false;
     let seenText = false;
     let seenThinking = false;
     let interrupted = false;
+    let assistantError: SDKAssistantMessageError | undefined;
     let session: string | undefined;
+    let sessionModel: string | undefined;
+    // Claude sends one frame per content block; join a message's contiguous text.
+    let pending: { id: string; text: string; raw: Raw } | undefined;
+    const flush = (): ProviderEvent[] => {
+      const text = pending;
+      pending = undefined;
+      return text ? [{ type: "text", text: text.text, ...text.raw }] : [];
+    };
     const names = new Map<string, string>();
     const seen = new Set<string>();
     try {
@@ -202,6 +222,8 @@ export class AnthropicAdapter implements ProviderAdapter {
           settingSources: [],
           thinking: { type: "adaptive", display: "summarized" },
           ...native,
+          // The native env option replaces process.env.
+          env: { ...(native?.env ?? process.env), ...additions },
           model: req.model,
           cwd: req.cwd,
           effort: req.effort as Options["effort"],
@@ -226,13 +248,30 @@ export class AnthropicAdapter implements ProviderAdapter {
             "Claude message retractions are not implemented in the v1 event contract; partial output must not be treated as a completed answer",
           );
         if (
+          pending &&
+          (message.type !== "assistant" ||
+            message.parent_tool_use_id ||
+            message.message.id !== pending.id)
+        )
+          yield* flush();
+        if (
           "session_id" in message &&
           message.session_id &&
-          message.session_id !== session &&
           !("parent_tool_use_id" in message && message.parent_tool_use_id)
         ) {
-          session = message.session_id;
-          yield { type: "session_info", id: session };
+          const model =
+            message.type === "system" && message.subtype === "init"
+              ? message.model
+              : sessionModel;
+          if (message.session_id !== session || model !== sessionModel) {
+            session = message.session_id;
+            sessionModel = model;
+            yield {
+              type: "session_info",
+              id: session,
+              ...(model ? { model } : {}),
+            };
+          }
         }
         if (message.type === "assistant") {
           if (seen.has(message.uuid)) continue;
@@ -248,13 +287,25 @@ export class AnthropicAdapter implements ProviderAdapter {
           }
           if (message.aborted) {
             interrupted = true;
+            yield* flush();
             continue; // Truncated content is not a completed text/thinking item.
           }
+          // The CLI reports API failures as synthetic assistant text.
+          if (message.error || message.message.model === "<synthetic>") {
+            assistantError = message.error;
+            yield* flush();
+            continue;
+          }
+          assistantError = undefined;
           for (const block of message.message.content) {
             if (block.type === "text") {
               seenText = true;
-              yield { type: "text", text: block.text, ...raw };
-            } else if (block.type === "thinking") {
+              const text = (pending?.text ?? "") + block.text;
+              pending = { id: message.message.id, text, raw };
+              continue;
+            }
+            yield* flush();
+            if (block.type === "thinking") {
               seenThinking = true;
               yield { type: "thinking", text: block.thinking, ...raw };
             } else if (block.type === "redacted_thinking") {
@@ -295,108 +346,143 @@ export class AnthropicAdapter implements ProviderAdapter {
                 type: "tool_result",
                 id: block.tool_use_id,
                 name: names.get(block.tool_use_id),
-                output:
-                  typeof block.content === "string"
-                    ? block.content
-                    : JSON.stringify(block.content ?? null),
+                output: toolOutput(block.content),
                 is_error: block.is_error ?? false,
                 ...raw,
               };
           }
         } else if (message.type === "result") {
-          if (terminal)
-            throw new ProviderProtocolError(
-              "Claude emitted more than one terminal result",
-            );
-          terminal = true;
           const usage = usageEvent(message, raw);
           if (usage.usage.reasoning_output_tokens > 0 && !seenThinking)
             yield { type: "thinking", text: "", ...raw };
           yield usage;
-          if (
-            interrupted ||
-            message.terminal_reason === "aborted_streaming" ||
-            message.terminal_reason === "aborted_tools"
-          ) {
-            yield {
-              type: "error",
-              message: "Run cancelled",
-              error_type: "cancelled",
-              retryable: false,
-              ...raw,
-            };
-            continue;
-          }
-          const status =
-            message.subtype === "success"
-              ? message.api_error_status
-              : undefined;
-          if (
-            message.is_error ||
-            message.subtype !== "success" ||
-            message.stop_reason === "refusal" ||
-            (message.terminal_reason && message.terminal_reason !== "completed")
-          ) {
-            const text =
-              message.subtype === "success"
-                ? message.result
-                : message.errors.join("\n");
-            const error = classify(
-              text || message.subtype,
-              message.terminal_reason ??
-                (message.subtype === "success"
-                  ? "result_error"
-                  : message.subtype),
-              status ?? undefined,
-            );
-            // No HTTP response indicates a dropped connection unless a structural error exists.
-            if (
-              message.subtype === "success" &&
-              message.is_error &&
-              status == null &&
-              (!message.terminal_reason ||
-                message.terminal_reason === "api_error" ||
-                message.terminal_reason === "completed") &&
-              (error.error_type === "result_error" ||
-                error.error_type === "api_error" ||
-                error.error_type === "completed")
-            ) {
-              error.error_type = "transient_api_error";
-              error.retryable = true;
-            }
-            if (
-              message.subtype === "error_max_turns" ||
-              message.terminal_reason === "max_turns"
-            ) {
-              error.error_type = "max_turns";
-              error.retryable = false;
-            }
-            if (message.stop_reason === "refusal") {
-              error.error_type = "refused";
-              error.retryable = false;
-            }
-            yield { ...error, ...raw };
-          } else if (!seenText && message.result)
+          const error = interrupted
+            ? cancelled()
+            : resultError(message, assistantError);
+          if (error) yield { ...error, ...raw };
+          else if (!seenText && message.subtype === "success" && message.result)
             yield { type: "text", text: message.result, ...raw };
+          return;
+        } else if (message.type === "rate_limit_event") {
+          const info = message.rate_limit_info;
+          const details = [`Claude rate limit status: ${info.status}`];
+          if (info.rateLimitType) details.push(`type=${info.rateLimitType}`);
+          if (info.utilization !== undefined)
+            details.push(`utilization=${info.utilization}`);
+          if (info.resetsAt !== undefined)
+            details.push(`resets_at=${info.resetsAt}`);
+          yield { type: "warning", message: details.join(", "), ...raw };
         } else if (message.type === "stream_event")
           throw new ProviderProtocolError(
             "Unexpected partial Claude frames with includePartialMessages disabled",
           );
       }
-      if (!terminal)
-        throw new ProviderProtocolError("Claude stream ended without a result");
+      yield* flush();
+      throw new ProviderProtocolError("Claude stream ended without a result");
     } catch (cause) {
       throw nativeError(cause);
     } finally {
+      req.signal?.removeEventListener("abort", onAbort);
       abort.abort();
       query?.close();
-      req.signal?.removeEventListener("abort", onAbort);
     }
   }
 }
+type Raw = { raw?: Record<string, unknown> };
+const cancelled = (): ErrorEvent => ({
+  type: "error",
+  message: "Run cancelled",
+  error_type: "cancelled",
+  retryable: false,
+});
+const assistantErrorTypes: Partial<Record<SDKAssistantMessageError, string>> = {
+  authentication_failed: "authentication_failed",
+  verification_required: "authentication_failed",
+  cloud_credential_error: "authentication_failed",
+  oauth_org_not_allowed: "permission_denied",
+  account_on_hold: "permission_denied",
+  billing_error: "billing_error",
+  rate_limit: "transient_api_error",
+  overloaded: "transient_api_error",
+  server_error: "transient_api_error",
+  invalid_request: "invalid_request",
+  model_not_found: "model_not_found",
+};
+/** Prefer subtype, terminal_reason and the assistant error over HTTP status and text. */
+function resultError(
+  message: SDKResultMessage,
+  assistantError: SDKAssistantMessageError | undefined,
+): ErrorEvent | undefined {
+  const reason = message.terminal_reason;
+  const text =
+    (message.subtype === "success"
+      ? message.result
+      : message.errors.join("\n")) || message.subtype;
+  const error = (error_type: string): ErrorEvent => ({
+    type: "error",
+    message: text,
+    error_type,
+    retryable: error_type === "transient_api_error",
+  });
+  if (reason === "aborted_streaming" || reason === "aborted_tools")
+    return cancelled();
+  if (message.subtype === "error_max_turns" || reason === "max_turns")
+    return error("max_turns");
+  if (
+    message.subtype === "error_max_budget_usd" ||
+    reason === "budget_exhausted"
+  )
+    return error("max_budget");
+  if (
+    message.subtype === "error_max_structured_output_retries" ||
+    reason === "structured_output_retry_exhausted"
+  )
+    return error("structured_output_failed");
+  if (message.stop_reason === "refusal") return error("refused");
+  if (message.subtype === "error_during_execution")
+    return error("execution_error");
+  if (!message.is_error && (!reason || reason === "completed")) return;
+  // The CLI groups these as context limits.
+  if (
+    reason === "prompt_too_long" ||
+    reason === "blocking_limit" ||
+    reason === "rapid_refill_breaker"
+  )
+    return error("context_window_exceeded");
+  const status =
+    message.subtype === "success"
+      ? (message.api_error_status ?? undefined)
+      : undefined;
+  const structured = assistantError && assistantErrorTypes[assistantError];
+  if (structured)
+    return error(
+      structured === "authentication_failed" && status === 403
+        ? "permission_denied"
+        : structured,
+    );
+  if (!message.is_error) return error("execution_error");
+  const classified = classify(text, "execution_error", status);
+  // An API error without an HTTP status or a recognizable message is a dropped connection.
+  return status === undefined &&
+    classified.error_type === "execution_error" &&
+    (!reason || reason === "api_error" || reason === "completed")
+    ? error("transient_api_error")
+    : classified;
+}
+function toolOutput(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content
+      .map((item) => {
+        const text = object(item)?.text;
+        return typeof text === "string" && text ? text : JSON.stringify(item);
+      })
+      .join("");
+  return JSON.stringify(content ?? null);
+}
 function usageEvent(
   message: SDKResultMessage,
-  raw: { raw?: Record<string, unknown> },
+  raw: Raw,
 ): Extract<ProviderEvent, { type: "usage" }> {
   const usage = emptyUsage();
   const models = Object.values(message.modelUsage);
@@ -423,5 +509,6 @@ function usageEvent(
       message.usage.output_tokens_details?.thinking_tokens ?? 0;
   }
   usage.total_tokens = usage.input_tokens + usage.output_tokens;
+  usage.requests = message.num_turns;
   return { type: "usage", usage, cost_usd: message.total_cost_usd, ...raw };
 }

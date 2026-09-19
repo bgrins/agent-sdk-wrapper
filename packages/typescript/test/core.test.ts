@@ -21,6 +21,7 @@ import type {
   RunResult,
 } from "../src/index.js";
 import { emptyUsage } from "../src/events.js";
+import { classify } from "../src/providers/common.js";
 
 function fake(
   events: (
@@ -60,6 +61,66 @@ test("provider aliases, inference, model prefixes and conflicting selections", (
     ["openai", "codex:"],
   ])
     assert.throws(() => resolveProvider(provider, model), ConfigError);
+});
+test("message classification uses the canonical vocabulary", () => {
+  for (const [message, expected] of [
+    [
+      "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
+      "transient_api_error",
+    ],
+    ["connection reset by peer", "transient_api_error"],
+    ["Request timed out.", "transient_api_error"],
+    [
+      "stream disconnected before completion: stream closed before response.completed",
+      "transient_api_error",
+    ],
+    [
+      "Selected model is at capacity. Please try a different model.",
+      "transient_api_error",
+    ],
+    ["server busy, try later", "transient_api_error"],
+    ['{"type":"rate_limit_error"}', "transient_api_error"],
+    ["exceeded retry limit, last status: 529", "transient_api_error"],
+    ["unexpected status 503 Service Unavailable", "transient_api_error"],
+    ["unexpected status 401 Unauthorized: bad key", "authentication_failed"],
+    ["Not logged in · Please run /login", "authentication_failed"],
+    ["unexpected status 403 Forbidden: denied", "permission_denied"],
+    [
+      "unexpected status 404 Not Found: The model 'gpt-nope' does not exist or you do not have access to it.",
+      "model_not_found",
+    ],
+    ["unexpected status 400 Bad Request: malformed", "invalid_request"],
+    ["unexpected status 418 I'm a teapot", "api_error_418"],
+    [
+      "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+      "context_window_exceeded",
+    ],
+    [
+      '{"error":{"message":"Your input exceeds the context window of this model.","type":"invalid_request_error","code":"context_length_exceeded"}}',
+      "context_window_exceeded",
+    ],
+    [
+      "Quota exceeded. Check your plan and billing details.",
+      "usage_limit_exceeded",
+    ],
+    [
+      "You've hit your usage limit. Upgrade to Plus to continue.",
+      "usage_limit_exceeded",
+    ],
+    ["Your credit balance is too low", "billing_error"],
+    // Refusals need a structured signal and bare numbers are not statuses.
+    ["The model refused the request", "fallback"],
+    ["Processed 503 files before failing", "fallback"],
+  ]) {
+    const error = classify(message ?? "", "fallback");
+    assert.equal(error.error_type, expected, message);
+    assert.equal(error.retryable, expected === "transient_api_error", message);
+  }
+  assert.equal(
+    classify("overloaded", "fallback", 529).error_type,
+    "transient_api_error",
+  );
+  assert.equal(classify("gone", "fallback", 410).error_type, "api_error_410");
 });
 test("unknown, reserved, malformed and cross-provider options fail before availability", async () => {
   let checked = 0;
@@ -261,18 +322,16 @@ test("retry exhaustion emits a typed retryable failure", async () => {
     retryable: true,
   });
 });
-for (const progress of ["normalized", "native", "terminal"] as const)
+for (const progress of ["normalized", "terminal"] as const)
   test(`does not retry after ${progress} progress`, async () => {
     let calls = 0;
     const agent = new Agent(
       { provider: "openai", maxRetries: 5, retryDelayMs: 0 },
       {
-        openai: fake(async function* (_req, context) {
+        openai: fake(async function* () {
           calls++;
           if (progress === "normalized")
             yield { type: "text", text: "partial" };
-          if (progress === "native")
-            context.onNativeEvent({ type: "turn.started" });
           if (progress === "terminal")
             yield {
               type: "error",
@@ -292,7 +351,90 @@ for (const progress of ["normalized", "native", "terminal"] as const)
       assert.equal(result.ended_reason, "max_turns");
     }
   });
-test("signal-killed runtimes throw and never retry", async () => {
+test("retryable error events retry after non-progress frames from the original session", async () => {
+  const seen: (string | undefined)[] = [];
+  const agent = new Agent(
+    { provider: "openai", maxRetries: 1, retryDelayMs: 0, sessionId: "orig" },
+    {
+      openai: fake(async function* (req, context) {
+        seen.push(req.sessionId);
+        context.onNativeEvent({ type: "thread.started" });
+        if (seen.length === 1) {
+          yield { type: "session_info", id: "failed-attempt" };
+          yield { type: "warning", message: "reconnecting" };
+          yield {
+            type: "usage",
+            usage: { ...emptyUsage(), input_tokens: 5, total_tokens: 5 },
+          };
+          yield {
+            type: "error",
+            message: "overloaded",
+            error_type: "transient_api_error",
+            retryable: true,
+          };
+          return;
+        }
+        yield { type: "text", text: "ok" };
+      }),
+    },
+  );
+  const result = await agent.run("retry");
+  assert.deepEqual(seen, ["orig", "orig"]);
+  assert.equal(result.status, "success");
+  assert.equal(result.usage?.input_tokens, 5);
+  assert.deepEqual(
+    result.events.map((env) => env.event.type),
+    [
+      "run_started",
+      "session_info",
+      "warning",
+      "usage",
+      "warning",
+      "text",
+      "run_finished",
+    ],
+  );
+  assert.match(
+    result.events[4]?.event.type === "warning"
+      ? result.events[4].event.message
+      : "",
+    /retry 1\/1 .*overloaded/,
+  );
+});
+test("retryable error events are emitted when retries are exhausted or progress occurred", async () => {
+  for (const progress of [false, true]) {
+    let calls = 0;
+    const agent = new Agent(
+      { provider: "openai", maxRetries: progress ? 3 : 1, retryDelayMs: 0 },
+      {
+        openai: fake(async function* () {
+          calls++;
+          if (progress) yield { type: "thinking", text: "plan" };
+          yield {
+            type: "error",
+            message: "overloaded",
+            error_type: "transient_api_error",
+            retryable: true,
+          };
+        }),
+      },
+    );
+    const result = await agent.run("retry");
+    assert.equal(calls, progress ? 1 : 2);
+    assert.equal(result.status, "failure");
+    assert.deepEqual(result.events.at(-2)?.event, {
+      type: "error",
+      message: "overloaded",
+      error_type: "transient_api_error",
+      retryable: true,
+    });
+    assert.equal(
+      result.events.filter((env) => env.event.type === "error").length,
+      1,
+    );
+  }
+});
+test("signal-killed runtimes record the failure, then throw without retrying", async () => {
   let calls = 0;
   const agent = new Agent(
     { provider: "openai", maxRetries: 5 },
@@ -304,8 +446,43 @@ test("signal-killed runtimes throw and never retry", async () => {
       }),
     },
   );
-  await assert.rejects(agent.run("stop"), ProcessTerminatedError);
+  const seen: EventEnvelope[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("stop"), (env) => {
+      seen.push(env);
+    }),
+    ProcessTerminatedError,
+  );
   assert.equal(calls, 1);
+  assert.deepEqual(
+    seen.map((env) => env.event.type),
+    ["run_started", "error", "run_finished"],
+  );
+  assert.deepEqual(seen[1]?.event, {
+    type: "error",
+    message: "SIGTERM",
+    error_type: "process_terminated",
+    retryable: false,
+  });
+  const finished = seen[2]?.event;
+  assert.equal(finished?.type === "run_finished" && finished.status, "failure");
+});
+test("a runtime killed after the caller's abort is cancelled", async () => {
+  const controller = new AbortController();
+  const agent = new Agent(
+    { provider: "openai", signal: controller.signal },
+    {
+      // biome-ignore lint/correctness/useYield: model a kill racing the caller's abort
+      openai: fake(async function* () {
+        controller.abort();
+        throw new ProcessTerminatedError(
+          "Codex Exec exited with signal SIGTERM",
+        );
+      }),
+    },
+  );
+  const result = await agent.run("abort");
+  assert.equal(result.status, "cancelled");
 });
 test("aborted runs finish cancelled, including cancellation during backoff", async () => {
   const controller = new AbortController();
@@ -324,7 +501,7 @@ test("aborted runs finish cancelled, including cancellation during backoff", asy
   assert.equal(result.status, "cancelled");
   assert.equal(result.ended_reason, "cancelled");
 });
-test("cancellation also works when the native iterator returns without throwing", async () => {
+test("a native failure after the caller's abort is cancelled once", async () => {
   const controller = new AbortController();
   const agent = new Agent(
     { provider: "openai", signal: controller.signal },
@@ -332,6 +509,7 @@ test("cancellation also works when the native iterator returns without throwing"
       openai: fake(async function* () {
         yield { type: "session_info", id: "cancelled-session" };
         controller.abort();
+        throw new ProviderProtocolError("stream ended without a result");
       }),
     },
   );
@@ -343,6 +521,24 @@ test("cancellation also works when the native iterator returns without throwing"
     result.events.filter((env) => env.event.type === "error").length,
     1,
   );
+});
+test("an abort after the terminal frame leaves a completed run successful", async () => {
+  const controller = new AbortController();
+  const agent = new Agent(
+    { provider: "openai", signal: controller.signal },
+    {
+      openai: fake(async function* () {
+        yield { type: "text", text: "complete answer" };
+        yield { type: "usage", usage: emptyUsage() };
+      }),
+    },
+  );
+  const result = await collectRun(agent.stream("late"), (env) => {
+    if (env.event.type === "usage") controller.abort();
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.final_text, "complete answer");
+  assert.equal(result.error, null);
 });
 test("early iterator closure cleans up and releases the Agent concurrency guard", async () => {
   let closed = 0;

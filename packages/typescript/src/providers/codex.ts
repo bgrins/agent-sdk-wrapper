@@ -122,11 +122,14 @@ export class CodexAdapter implements ProviderAdapter {
     req: ResolvedRequest,
     context: ProviderContext,
   ): AsyncGenerator<ProviderEvent> {
+    // SDK cleanup removes the child's listeners before killing it, so an abort
+    // after cleanup raises an unhandled AbortError. Only the caller's signal
+    // aborts, and `finally` detaches it before closing the native iterator.
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     req.signal?.addEventListener("abort", onAbort, { once: true });
     if (req.signal?.aborted) abort.abort();
-    let terminal = false;
+    let iterator: AsyncIterator<ThreadEvent> | undefined;
     let session = req.sessionId;
     let sawReasoning = false;
     const started = new Set<string>();
@@ -149,7 +152,14 @@ export class CodexAdapter implements ProviderAdapter {
       const { events } = await thread.runStreamed(req.prompt, {
         signal: abort.signal,
       });
-      for await (const event of events) {
+      const source = events[Symbol.asyncIterator]();
+      iterator = source;
+      // No `return`: leaving the loop must not close the SDK iterator before
+      // `finally` detaches the caller's signal.
+      const frames = {
+        [Symbol.asyncIterator]: () => ({ next: () => source.next() }),
+      };
+      for await (const event of frames) {
         context.onNativeEvent(event);
         const raw = req.includeRaw
           ? { raw: event as unknown as Record<string, unknown> }
@@ -158,11 +168,6 @@ export class CodexAdapter implements ProviderAdapter {
           session = event.thread_id;
           yield { type: "session_info", id: session };
         } else if (event.type === "turn.completed") {
-          if (terminal)
-            throw new ProviderProtocolError(
-              "Codex emitted more than one terminal result",
-            );
-          terminal = true;
           const nativeUsage = event.usage;
           const input = nativeUsage.input_tokens;
           // ThreadTokenUsage.total is cumulative; output includes reasoning.
@@ -206,17 +211,17 @@ export class CodexAdapter implements ProviderAdapter {
           if (usage.reasoning_output_tokens > 0 && !sawReasoning)
             yield { type: "thinking", text: "" };
           yield { type: "usage", usage, ...raw };
-        } else if (event.type === "turn.failed" || event.type === "error") {
-          terminal = true;
+          return;
+        } else if (event.type === "turn.failed") {
           yield {
-            ...classify(
-              event.type === "turn.failed"
-                ? event.error.message
-                : event.message,
-              event.type === "turn.failed" ? "turn_failed" : "stream_error",
-            ),
+            ...classify(event.error.message, "provider_exception"),
             ...raw,
           };
+          return;
+        } else if (event.type === "error") {
+          // Top-level errors include recoverable "Reconnecting... N/5" notices;
+          // a fatal failure repeats its message in turn.failed.
+          yield { type: "warning", message: event.message, ...raw };
         } else if (
           event.type === "item.started" ||
           event.type === "item.updated" ||
@@ -236,7 +241,15 @@ export class CodexAdapter implements ProviderAdapter {
           else if (item.type === "reasoning") {
             sawReasoning = true;
             yield { type: "thinking", text: item.text, ...raw };
-          } else if (tool)
+          } else if (item.type === "todo_list")
+            yield {
+              type: "thinking",
+              text: item.items
+                .map((todo) => `- [${todo.completed ? "x" : " "}] ${todo.text}`)
+                .join("\n"),
+              ...raw,
+            };
+          else if (tool)
             yield {
               type: "tool_result",
               id: item.id,
@@ -254,15 +267,14 @@ export class CodexAdapter implements ProviderAdapter {
             };
         }
       }
-      if (!terminal)
-        throw new ProviderProtocolError(
-          "Codex stream ended without turn.completed or a terminal error",
-        );
+      throw new ProviderProtocolError(
+        "Codex stream ended without turn.completed or turn.failed",
+      );
     } catch (cause) {
       throw nativeError(cause);
     } finally {
-      abort.abort();
       req.signal?.removeEventListener("abort", onAbort);
+      await iterator?.return?.(); // The SDK's cleanup terminates a running child.
     }
   }
 }
@@ -271,7 +283,7 @@ function toolInfo(
 ): { name: string; input?: Record<string, unknown> } | undefined {
   switch (item.type) {
     case "command_execution":
-      return { name: "command_execution", input: { command: item.command } };
+      return { name: "command", input: { command: item.command } };
     case "file_change":
       return { name: "file_change", input: { changes: item.changes } };
     case "mcp_tool_call":

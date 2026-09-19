@@ -8,7 +8,11 @@ export interface ProviderAdapter {
   readonly name: Provider;
   validateRequest(request: ResolvedRequest): void;
   ensureAvailable(request: ResolvedRequest): Promise<void>;
-  /** Must throw if the stream ends without a native terminal result. */
+  /**
+   * Return right after the terminal frame: a normal return means the run
+   * completed, and later aborts are ignored. Must throw if the native stream
+   * ends without a terminal result.
+   */
   stream(
     request: ResolvedRequest,
     context: ProviderContext,
