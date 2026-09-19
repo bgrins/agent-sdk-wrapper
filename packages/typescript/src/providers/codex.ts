@@ -241,7 +241,15 @@ export class CodexAdapter implements ProviderAdapter {
           else if (item.type === "reasoning") {
             sawReasoning = true;
             yield { type: "thinking", text: item.text, ...raw };
-          } else if (tool)
+          } else if (item.type === "todo_list")
+            yield {
+              type: "thinking",
+              text: item.items
+                .map((todo) => `- [${todo.completed ? "x" : " "}] ${todo.text}`)
+                .join("\n"),
+              ...raw,
+            };
+          else if (tool)
             yield {
               type: "tool_result",
               id: item.id,

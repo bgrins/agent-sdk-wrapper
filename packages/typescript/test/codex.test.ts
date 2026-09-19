@@ -268,6 +268,30 @@ test("Codex stops reading at its terminal event", async () => {
   );
   assert.equal(closed(), 1);
 });
+test("Codex todo lists map to thinking instead of unmapped warnings", async () => {
+  const run = await harness([
+    {
+      type: "item.completed",
+      item: {
+        type: "todo_list",
+        id: "plan",
+        items: [
+          { text: "inspect", completed: true },
+          { text: "fix", completed: false },
+        ],
+      },
+    },
+    completed,
+  ]).agent.run("plan");
+  assert.equal(
+    run.events.some((env) => env.event.type === "warning"),
+    false,
+  );
+  assert.deepEqual(run.events[1]?.event, {
+    type: "thinking",
+    text: "- [x] inspect\n- [ ] fix",
+  });
+});
 test("Codex transient error events are classified and item errors remain warnings", async () => {
   const failure = await harness([
     { type: "turn.failed", error: { message: "429 rate limit" } },
