@@ -21,6 +21,7 @@ import type {
   RunResult,
 } from "../src/index.js";
 import { emptyUsage } from "../src/events.js";
+import { classify } from "../src/providers/common.js";
 
 function fake(
   events: (
@@ -60,6 +61,66 @@ test("provider aliases, inference, model prefixes and conflicting selections", (
     ["openai", "codex:"],
   ])
     assert.throws(() => resolveProvider(provider, model), ConfigError);
+});
+test("message classification uses the canonical vocabulary", () => {
+  for (const [message, expected] of [
+    [
+      "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
+      "transient_api_error",
+    ],
+    ["connection reset by peer", "transient_api_error"],
+    ["Request timed out.", "transient_api_error"],
+    [
+      "stream disconnected before completion: stream closed before response.completed",
+      "transient_api_error",
+    ],
+    [
+      "Selected model is at capacity. Please try a different model.",
+      "transient_api_error",
+    ],
+    ["server busy, try later", "transient_api_error"],
+    ['{"type":"rate_limit_error"}', "transient_api_error"],
+    ["exceeded retry limit, last status: 529", "transient_api_error"],
+    ["unexpected status 503 Service Unavailable", "transient_api_error"],
+    ["unexpected status 401 Unauthorized: bad key", "authentication_failed"],
+    ["Not logged in · Please run /login", "authentication_failed"],
+    ["unexpected status 403 Forbidden: denied", "permission_denied"],
+    [
+      "unexpected status 404 Not Found: The model 'gpt-nope' does not exist or you do not have access to it.",
+      "model_not_found",
+    ],
+    ["unexpected status 400 Bad Request: malformed", "invalid_request"],
+    ["unexpected status 418 I'm a teapot", "api_error_418"],
+    [
+      "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+      "context_window_exceeded",
+    ],
+    [
+      '{"error":{"message":"Your input exceeds the context window of this model.","type":"invalid_request_error","code":"context_length_exceeded"}}',
+      "context_window_exceeded",
+    ],
+    [
+      "Quota exceeded. Check your plan and billing details.",
+      "usage_limit_exceeded",
+    ],
+    [
+      "You've hit your usage limit. Upgrade to Plus to continue.",
+      "usage_limit_exceeded",
+    ],
+    ["Your credit balance is too low", "billing_error"],
+    // Refusals need a structured signal and bare numbers are not statuses.
+    ["The model refused the request", "fallback"],
+    ["Processed 503 files before failing", "fallback"],
+  ]) {
+    const error = classify(message ?? "", "fallback");
+    assert.equal(error.error_type, expected, message);
+    assert.equal(error.retryable, expected === "transient_api_error", message);
+  }
+  assert.equal(
+    classify("overloaded", "fallback", 529).error_type,
+    "transient_api_error",
+  );
+  assert.equal(classify("gone", "fallback", 410).error_type, "api_error_410");
 });
 test("unknown, reserved, malformed and cross-provider options fail before availability", async () => {
   let checked = 0;
