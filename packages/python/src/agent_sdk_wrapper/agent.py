@@ -253,12 +253,16 @@ class Agent:
         prompt: str = DEFAULT_CONTEXT_DUMP_PROMPT,
         **overrides: Any,
     ) -> RunResult:
-        """Ask the current provider session for a summary and write it to ``path``."""
+        """Ask the current provider session for a summary and write it to ``path``.
+
+        ``path`` is left untouched when the run fails.
+        """
 
         result = await self.run(prompt, **overrides)
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(result.final_text, encoding="utf-8")
+        if result.ok:
+            out = Path(path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(result.final_text, encoding="utf-8")
         return result
 
     def dump_context_sync(

@@ -1124,3 +1124,17 @@ def test_concurrent_runs_without_continue_session_are_allowed(monkeypatch):
 
     results = asyncio.run(scenario())
     assert [result.final_text for result in results] == ["one", "two"]
+
+
+def test_dump_context_keeps_existing_file_when_run_fails(monkeypatch, tmp_path):
+    install_fake_providers(
+        monkeypatch,
+        events=[Text(text="partial"), Error(message="failed", error_type="execution_error")],
+    )
+    path = tmp_path / "context.md"
+    path.write_text("previous summary")
+
+    result = Agent(provider="openai").dump_context_sync(path)
+
+    assert not result.ok
+    assert path.read_text() == "previous summary"
