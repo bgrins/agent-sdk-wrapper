@@ -39,7 +39,6 @@ async def main():
         provider=request["provider"],
         model=request["model"],
         cwd="/job/work",
-        session_id=request.get("session_id"),
         continue_session=True,
         max_retries=0,
         timeout=150,

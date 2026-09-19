@@ -58,7 +58,6 @@ try {
     provider: request.provider,
     model: request.model,
     cwd: "/job/work",
-    sessionId: request.session_id,
     continueSession: true,
     maxRetries: 0,
     signal: AbortSignal.timeout(150000),

@@ -49,9 +49,10 @@ for test runs.
 - `infra/` and `compose.yaml`: lifecycle, images, gateway and isolation.
 - `tests/run.sh` and `tests/compose.yaml`: test endpoint and workers.
 
-Workers take `PROVIDER`, `GVISOR_MODEL` and optional `JOB_REQUEST` JSON for prompts
-or a session ID. They write results to stdout and files to `/job/output`.
-Cleanup removes session state. Cloud deployment is not included.
+Workers take `PROVIDER`, `GVISOR_MODEL` and optional `JOB_REQUEST` JSON with prompts.
+They write results to stdout and files to `/job/output`. A session lasts one job:
+cleanup deletes its state, so a later job cannot resume it. Cloud deployment is
+not included.
 
 ```sh
 bash examples/gvisor/scripts/test.sh  # offline; builds test images; requires Node
