@@ -353,7 +353,7 @@ for (const progress of ["normalized", "native", "terminal"] as const)
       assert.equal(result.ended_reason, "max_turns");
     }
   });
-test("signal-killed runtimes throw and never retry", async () => {
+test("signal-killed runtimes record the failure, then throw without retrying", async () => {
   let calls = 0;
   const agent = new Agent(
     { provider: "openai", maxRetries: 5 },
@@ -365,8 +365,43 @@ test("signal-killed runtimes throw and never retry", async () => {
       }),
     },
   );
-  await assert.rejects(agent.run("stop"), ProcessTerminatedError);
+  const seen: EventEnvelope[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("stop"), (env) => {
+      seen.push(env);
+    }),
+    ProcessTerminatedError,
+  );
   assert.equal(calls, 1);
+  assert.deepEqual(
+    seen.map((env) => env.event.type),
+    ["run_started", "error", "run_finished"],
+  );
+  assert.deepEqual(seen[1]?.event, {
+    type: "error",
+    message: "SIGTERM",
+    error_type: "process_terminated",
+    retryable: false,
+  });
+  const finished = seen[2]?.event;
+  assert.equal(finished?.type === "run_finished" && finished.status, "failure");
+});
+test("a runtime killed after the caller's abort is cancelled", async () => {
+  const controller = new AbortController();
+  const agent = new Agent(
+    { provider: "openai", signal: controller.signal },
+    {
+      // biome-ignore lint/correctness/useYield: model a kill racing the caller's abort
+      openai: fake(async function* () {
+        controller.abort();
+        throw new ProcessTerminatedError(
+          "Codex Exec exited with signal SIGTERM",
+        );
+      }),
+    },
+  );
+  const result = await agent.run("abort");
+  assert.equal(result.status, "cancelled");
 });
 test("aborted runs finish cancelled, including cancellation during backoff", async () => {
   const controller = new AbortController();

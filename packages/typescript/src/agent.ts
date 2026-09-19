@@ -17,7 +17,6 @@ import {
   type Provider,
   type RunEndedReason,
   type RunResult,
-  type RunStatus,
 } from "./events.js";
 import type { ProviderAdapter } from "./providers/base.js";
 import { buildProvider } from "./providers/index.js";
@@ -108,6 +107,28 @@ export class Agent {
           ? { system_prompt: systemPrompt }
           : {}),
       });
+      const finished = (failure: ErrorEvent | undefined) => {
+        const reason: RunEndedReason = !failure
+          ? "success"
+          : failure.error_type === "cancelled"
+            ? "cancelled"
+            : failure.error_type === "max_turns"
+              ? "max_turns"
+              : failure.error_type === "refused"
+                ? "refused"
+                : "error";
+        return frame({
+          type: "run_finished",
+          status:
+            reason === "success"
+              ? "success"
+              : reason === "cancelled"
+                ? "cancelled"
+                : "failure",
+          ended_reason: reason,
+          duration_ms: Math.max(0, Math.round(performance.now() - start)),
+        });
+      };
       let failure: ErrorEvent | undefined;
       for (let attempt = 0; ; attempt++) {
         let progressed = false;
@@ -129,12 +150,20 @@ export class Agent {
           }
           break;
         } catch (cause) {
-          if (
-            cause instanceof ProcessTerminatedError ||
-            cause instanceof TraceWriteError ||
-            cause instanceof ConfigError
-          )
+          if (cause instanceof TraceWriteError || cause instanceof ConfigError)
             throw cause;
+          // A runtime killed by the caller's abort was cancelled, not terminated.
+          if (cause instanceof ProcessTerminatedError && !req.signal?.aborted) {
+            const error: ErrorEvent = {
+              type: "error",
+              message: cause.message,
+              error_type: "process_terminated",
+              retryable: false,
+            };
+            yield frame(error);
+            yield finished(error);
+            throw cause;
+          }
           if (failure) break; // Keep the provider's terminal error over a cleanup error.
           if (
             cause instanceof TransientError &&
@@ -181,27 +210,7 @@ export class Agent {
           break;
         }
       }
-      const reason: RunEndedReason = !failure
-        ? "success"
-        : failure.error_type === "cancelled"
-          ? "cancelled"
-          : failure.error_type === "max_turns"
-            ? "max_turns"
-            : failure.error_type === "refused"
-              ? "refused"
-              : "error";
-      const status: RunStatus =
-        reason === "success"
-          ? "success"
-          : reason === "cancelled"
-            ? "cancelled"
-            : "failure";
-      yield frame({
-        type: "run_finished",
-        status,
-        ended_reason: reason,
-        duration_ms: Math.max(0, Math.round(performance.now() - start)),
-      });
+      yield finished(failure);
     } finally {
       try {
         writer?.close();
