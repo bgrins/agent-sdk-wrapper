@@ -28,6 +28,7 @@ from agent_sdk_wrapper import (
     Text,
     TokenUsage,
     ToolCall,
+    ToolResult,
     TransientError,
     Usage,
     install_fake_providers,
@@ -1138,3 +1139,71 @@ def test_dump_context_keeps_existing_file_when_run_fails(monkeypatch, tmp_path):
 
     assert not result.ok
     assert path.read_text() == "previous summary"
+
+
+def test_artifacts_round_trip_lone_surrogates(monkeypatch, tmp_path):
+    from agent_sdk_wrapper.artifacts import ProviderEventLogger
+
+    odd = "bad \ud800 and \udcff"
+
+    async def surrogate_events(req):
+        ProviderEventLogger("openai", req.artifacts_dir, run_id=req.run_id).write({"text": odd})
+        yield Text(text=odd)
+        yield ToolResult(id="t1", output=odd)
+        yield Error(message=odd, error_type="execution_error")
+
+    install_fake_providers(monkeypatch, events=surrogate_events)
+    artifacts_dir = tmp_path / "artifacts"
+
+    result = Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("hi")
+
+    assert result.error == odd
+    events = _trace_events(artifacts_dir / "trace.jsonl")
+    assert [event["text"] for event in events if event["type"] == "text"] == [odd]
+    assert [event["output"] for event in events if event["type"] == "tool_result"] == [odd]
+    saved = json.loads((artifacts_dir / "result.json").read_text(encoding="utf-8"))
+    assert saved["final_text"] == odd
+    assert json.loads((artifacts_dir / "manifest.json").read_text())["error"] == odd
+    native = json.loads((artifacts_dir / "provider-events.jsonl").read_text())
+    assert native["message"] == {"text": odd}
+
+
+def test_artifact_json_files_are_replaced_atomically(tmp_path):
+    import threading
+
+    from agent_sdk_wrapper.artifacts import manifest_file_for, write_manifest
+
+    def write(index: int) -> None:
+        write_manifest(
+            tmp_path,
+            run_id=f"run-{index}",
+            provider="openai",
+            model=None,
+            status="running",
+            trace_file=None,
+            error="x" * 500_000,
+        )
+
+    write(0)
+    path = manifest_file_for(tmp_path)
+    stop = threading.Event()
+    torn_reads = []
+
+    def read() -> None:
+        while not stop.is_set():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, FileNotFoundError) as exc:
+                torn_reads.append(type(exc).__name__)
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        for index in range(1, 60):
+            write(index)
+    finally:
+        stop.set()
+        reader.join()
+
+    assert torn_reads == []
+    assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]

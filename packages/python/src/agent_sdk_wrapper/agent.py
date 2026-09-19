@@ -262,7 +262,7 @@ class Agent:
         if result.ok:
             out = Path(path)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(result.final_text, encoding="utf-8")
+            out.write_text(result.final_text, encoding="utf-8", errors="backslashreplace")
         return result
 
     def dump_context_sync(
