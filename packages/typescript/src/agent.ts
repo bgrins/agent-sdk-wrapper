@@ -28,6 +28,36 @@ import {
 } from "./request.js";
 import { TraceWriter } from "./trace.js";
 
+const progressEvents = new Set<AgentEvent["type"]>([
+  "text",
+  "thinking",
+  "tool_call",
+  "tool_result",
+]);
+const cancelledError = (): ErrorEvent => ({
+  type: "error",
+  message: "Run cancelled",
+  error_type: "cancelled",
+  retryable: false,
+});
+function errorEvent(cause: unknown): ErrorEvent {
+  return {
+    type: "error",
+    message: cause instanceof Error ? cause.message : String(cause),
+    error_type:
+      cause instanceof TransientError
+        ? "transient_api_error"
+        : cause instanceof ProviderError
+          ? cause.errorType
+          : cause instanceof ProviderProtocolError
+            ? "provider_protocol_error"
+            : cause instanceof RuntimeUnavailableError
+              ? "runtime_unavailable"
+              : "provider_exception",
+    retryable: cause instanceof TransientError,
+  };
+}
+
 export class Agent {
   private readonly defaults: AgentDefaults;
   private readonly adapters: Partial<Record<Provider, ProviderAdapter>>;
@@ -132,23 +162,32 @@ export class Agent {
       let failure: ErrorEvent | undefined;
       for (let attempt = 0; ; attempt++) {
         let progressed = false;
+        let held: ErrorEvent | undefined;
+        let threw = false;
+        let thrown: unknown;
+        failure = undefined;
+        const canRetry = () =>
+          !progressed && attempt < req.maxRetries && !req.signal?.aborted;
         try {
           req.signal?.throwIfAborted();
           for await (const event of adapter.stream(req, {
-            onNativeEvent: (native) => {
-              progressed = true;
-              req.onProviderEvent?.(native);
-            },
+            onNativeEvent: (native) => req.onProviderEvent?.(native),
           })) {
-            progressed = true;
-            if (event.type === "error") failure ??= event;
+            if (progressEvents.has(event.type)) progressed = true;
+            if (event.type === "error") {
+              // Hold a retryable error until the attempt ends; a retry replaces it with a warning.
+              if (!failure && event.retryable && canRetry()) {
+                failure = held = event;
+                continue;
+              }
+              failure ??= event;
+            }
             if (event.type === "session_info") {
               this.sessions.set(req.provider, event.id);
               this.latestSession = event.id;
             }
             yield frame(event);
           }
-          break;
         } catch (cause) {
           if (cause instanceof TraceWriteError || cause instanceof ConfigError)
             throw cause;
@@ -164,51 +203,40 @@ export class Agent {
             yield finished(error);
             throw cause;
           }
-          if (failure) break; // Keep the provider's terminal error over a cleanup error.
-          if (
-            cause instanceof TransientError &&
-            !progressed &&
-            attempt < req.maxRetries &&
-            !req.signal?.aborted
-          ) {
-            const ms = Math.min(
-              req.retryDelayMs * 2 ** Math.min(attempt, 20),
-              30_000,
-            );
-            yield frame({
-              type: "warning",
-              message: `Transient failure; retry ${attempt + 1}/${req.maxRetries} in ${ms}ms: ${cause.message}`,
-            });
-            try {
-              await delay(ms, undefined, { signal: req.signal });
-            } catch {
-              /* cancellation is normalized below */
-            }
-            if (!req.signal?.aborted) continue;
-          }
-          failure = {
-            type: "error",
-            message: req.signal?.aborted
-              ? "Run cancelled"
-              : cause instanceof Error
-                ? cause.message
-                : String(cause),
-            error_type: req.signal?.aborted
-              ? "cancelled"
-              : cause instanceof TransientError
-                ? "transient_api_error"
-                : cause instanceof ProviderError
-                  ? cause.errorType
-                  : cause instanceof ProviderProtocolError
-                    ? "provider_protocol_error"
-                    : cause instanceof RuntimeUnavailableError
-                      ? "runtime_unavailable"
-                      : "provider_exception",
-            retryable: cause instanceof TransientError && !req.signal?.aborted,
-          };
-          yield frame(failure);
-          break;
+          threw = true;
+          thrown = cause;
         }
+        // The provider's terminal error wins over a later cleanup error.
+        const retryReason =
+          held?.message ??
+          (!failure && thrown instanceof TransientError
+            ? thrown.message
+            : undefined);
+        let error: ErrorEvent | undefined;
+        if (retryReason !== undefined && canRetry()) {
+          const ms = Math.min(
+            req.retryDelayMs * 2 ** Math.min(attempt, 20),
+            30_000,
+          );
+          yield frame({
+            type: "warning",
+            message: `Transient failure; retry ${attempt + 1}/${req.maxRetries} in ${ms}ms: ${retryReason}`,
+          });
+          try {
+            await delay(ms, undefined, { signal: req.signal });
+          } catch {
+            /* cancellation is normalized below */
+          }
+          if (!req.signal?.aborted) continue;
+          error = cancelledError();
+        } else if (held) error = held;
+        else if (!failure && threw)
+          error = req.signal?.aborted ? cancelledError() : errorEvent(thrown);
+        if (error) {
+          failure = error;
+          yield frame(error);
+        }
+        break;
       }
       yield finished(failure);
     } finally {

@@ -322,18 +322,16 @@ test("retry exhaustion emits a typed retryable failure", async () => {
     retryable: true,
   });
 });
-for (const progress of ["normalized", "native", "terminal"] as const)
+for (const progress of ["normalized", "terminal"] as const)
   test(`does not retry after ${progress} progress`, async () => {
     let calls = 0;
     const agent = new Agent(
       { provider: "openai", maxRetries: 5, retryDelayMs: 0 },
       {
-        openai: fake(async function* (_req, context) {
+        openai: fake(async function* () {
           calls++;
           if (progress === "normalized")
             yield { type: "text", text: "partial" };
-          if (progress === "native")
-            context.onNativeEvent({ type: "turn.started" });
           if (progress === "terminal")
             yield {
               type: "error",
@@ -353,6 +351,89 @@ for (const progress of ["normalized", "native", "terminal"] as const)
       assert.equal(result.ended_reason, "max_turns");
     }
   });
+test("retryable error events retry after non-progress frames from the original session", async () => {
+  const seen: (string | undefined)[] = [];
+  const agent = new Agent(
+    { provider: "openai", maxRetries: 1, retryDelayMs: 0, sessionId: "orig" },
+    {
+      openai: fake(async function* (req, context) {
+        seen.push(req.sessionId);
+        context.onNativeEvent({ type: "thread.started" });
+        if (seen.length === 1) {
+          yield { type: "session_info", id: "failed-attempt" };
+          yield { type: "warning", message: "reconnecting" };
+          yield {
+            type: "usage",
+            usage: { ...emptyUsage(), input_tokens: 5, total_tokens: 5 },
+          };
+          yield {
+            type: "error",
+            message: "overloaded",
+            error_type: "transient_api_error",
+            retryable: true,
+          };
+          return;
+        }
+        yield { type: "text", text: "ok" };
+      }),
+    },
+  );
+  const result = await agent.run("retry");
+  assert.deepEqual(seen, ["orig", "orig"]);
+  assert.equal(result.status, "success");
+  assert.equal(result.usage?.input_tokens, 5);
+  assert.deepEqual(
+    result.events.map((env) => env.event.type),
+    [
+      "run_started",
+      "session_info",
+      "warning",
+      "usage",
+      "warning",
+      "text",
+      "run_finished",
+    ],
+  );
+  assert.match(
+    result.events[4]?.event.type === "warning"
+      ? result.events[4].event.message
+      : "",
+    /retry 1\/1 .*overloaded/,
+  );
+});
+test("retryable error events are emitted when retries are exhausted or progress occurred", async () => {
+  for (const progress of [false, true]) {
+    let calls = 0;
+    const agent = new Agent(
+      { provider: "openai", maxRetries: progress ? 3 : 1, retryDelayMs: 0 },
+      {
+        openai: fake(async function* () {
+          calls++;
+          if (progress) yield { type: "thinking", text: "plan" };
+          yield {
+            type: "error",
+            message: "overloaded",
+            error_type: "transient_api_error",
+            retryable: true,
+          };
+        }),
+      },
+    );
+    const result = await agent.run("retry");
+    assert.equal(calls, progress ? 1 : 2);
+    assert.equal(result.status, "failure");
+    assert.deepEqual(result.events.at(-2)?.event, {
+      type: "error",
+      message: "overloaded",
+      error_type: "transient_api_error",
+      retryable: true,
+    });
+    assert.equal(
+      result.events.filter((env) => env.event.type === "error").length,
+      1,
+    );
+  }
+});
 test("signal-killed runtimes record the failure, then throw without retrying", async () => {
   let calls = 0;
   const agent = new Agent(
