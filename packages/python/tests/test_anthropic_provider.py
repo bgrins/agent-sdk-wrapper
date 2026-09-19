@@ -911,6 +911,7 @@ def test_anthropic_joins_text_blocks_and_maps_server_tool_results(monkeypatch):
     assert [type(event) for event in events] == [Text, ToolCall, ToolResult, Text]
     assert events[-1].text == "The answer is 42."
     assert events[2].name == "web_search"
+    assert events[2].output == '{"type": "web_search_result"}'
 
 
 def test_anthropic_uses_result_text_when_no_text_block_arrived(monkeypatch):

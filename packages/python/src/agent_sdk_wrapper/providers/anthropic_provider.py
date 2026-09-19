@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import dataclasses
+import json
 import platform
 import re
 import shutil
@@ -691,10 +692,12 @@ def _stringify(content: Any) -> str:
         parts = []
         for item in content:
             if isinstance(item, dict):
-                parts.append(item.get("text", "") or str(item))
+                parts.append(item.get("text", "") or json.dumps(item, ensure_ascii=False))
             else:
                 parts.append(str(item))
         return "".join(parts)
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False)
     return str(content)
 
 
