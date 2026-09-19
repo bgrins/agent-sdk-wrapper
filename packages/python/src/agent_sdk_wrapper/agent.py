@@ -15,9 +15,9 @@ from typing import Any
 
 from .artifacts import (
     ProviderEventCallback,
+    clear_stale_artifacts,
     collect_side_files,
     normalize_artifacts_dir,
-    provider_events_file_for,
     trace_file_for,
     write_manifest,
     write_result_artifact,
@@ -404,7 +404,16 @@ class Agent:
             artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
             trace_path = _resolve_trace_path(trace_path, artifacts_dir)
             if artifacts_dir is not None:
-                provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
+                # Remove the previous result before the new trace replaces the old one.
+                clear_stale_artifacts(artifacts_dir)
+                write_manifest(
+                    artifacts_dir,
+                    run_id=run_id,
+                    provider=req.provider,
+                    model=req.model,
+                    status="running",
+                    trace_file=trace_path,
+                )
             writer = TraceWriter(trace_path)
             yield record(
                 RunStarted(
@@ -415,15 +424,6 @@ class Agent:
                     system_prompt=req.system_prompt,
                 )
             )
-            if artifacts_dir is not None:
-                write_manifest(
-                    artifacts_dir,
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status="running",
-                    trace_file=trace_path,
-                )
 
             try:
                 attempt = 0

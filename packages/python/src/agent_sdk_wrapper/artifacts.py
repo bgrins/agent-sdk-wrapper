@@ -157,6 +157,12 @@ class ProviderEventLogger:
                 )
 
 
+def clear_stale_artifacts(artifacts_dir: Path) -> None:
+    """Remove files from a previous run that the new run would not overwrite first."""
+    result_file_for(artifacts_dir).unlink(missing_ok=True)
+    provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
+
+
 def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
     """Return provider-specific side files for manifest discovery."""
     files: dict[str, Path] = {}

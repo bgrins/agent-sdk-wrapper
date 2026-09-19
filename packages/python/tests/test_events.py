@@ -1168,6 +1168,33 @@ def test_artifacts_round_trip_lone_surrogates(monkeypatch, tmp_path):
     assert native["message"] == {"text": odd}
 
 
+def test_artifacts_run_start_drops_previous_result(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=[Text(text="ok")])
+    artifacts_dir = tmp_path / "artifacts"
+    Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("first")
+    assert (artifacts_dir / "result.json").exists()
+    at_start = {}
+
+    def on_event(env):
+        if env.event.type == "run_started":
+            manifest = json.loads((artifacts_dir / "manifest.json").read_text())
+            at_start.update(
+                result_exists=(artifacts_dir / "result.json").exists(),
+                manifest=(manifest["run_id"], manifest["status"]),
+                trace_run_ids={
+                    json.loads(line)["run_id"]
+                    for line in (artifacts_dir / "trace.jsonl").read_text().splitlines()
+                },
+                run_id=env.run_id,
+            )
+
+    Agent(provider="openai", artifacts_dir=artifacts_dir, on_event=on_event).run_sync("second")
+
+    assert at_start["result_exists"] is False
+    assert at_start["manifest"] == (at_start["run_id"], "running")
+    assert at_start["trace_run_ids"] == {at_start["run_id"]}
+
+
 def test_artifact_json_files_are_replaced_atomically(tmp_path):
     import threading
 
