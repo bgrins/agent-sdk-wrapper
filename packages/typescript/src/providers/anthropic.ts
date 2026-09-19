@@ -487,5 +487,6 @@ function usageEvent(
       message.usage.output_tokens_details?.thinking_tokens ?? 0;
   }
   usage.total_tokens = usage.input_tokens + usage.output_tokens;
+  usage.requests = message.num_turns;
   return { type: "usage", usage, cost_usd: message.total_cost_usd, ...raw };
 }

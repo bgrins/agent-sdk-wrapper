@@ -184,7 +184,7 @@ test("Claude maps completed blocks, hidden reasoning, tool results, final usage 
     cache_read_tokens: 5,
     cache_write_tokens: 2,
     reasoning_output_tokens: 0,
-    requests: 0,
+    requests: 1,
   });
   assert.equal(run.cost_usd, 0.03);
   assert.equal(run.session_id, "claude-session");
@@ -244,7 +244,7 @@ test("Claude sums main and subagent modelUsage without adding main-loop usage or
     cache_read_tokens: 26,
     cache_write_tokens: 6,
     reasoning_output_tokens: 4,
-    requests: 0,
+    requests: 1,
   });
   assert.equal(run.cost_usd, 0.04);
   assert.equal(run.final_text, "answer");
