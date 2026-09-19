@@ -92,6 +92,21 @@ def test_codex_efforts_match_the_sdk_enum():
     assert _OPENAI_EFFORTS == {member.value for member in ReasoningEffort}
 
 
+def test_codex_api_key_requires_a_wrapper_launched_runtime(monkeypatch):
+    req = RunRequest(provider="openai", prompt="ignored")
+    custom_launch = {"launch_args_override": ("codex", "app-server")}
+
+    with pytest.raises(ConfigError, match="api_key"):
+        OpenAIProvider(api_key="sk-test", codex=object()).validate_request(req)
+    with pytest.raises(ConfigError, match="api_key"):
+        OpenAIProvider(api_key="sk-test", config=custom_launch).validate_request(req)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    assert OpenAIProvider(codex=object())._login_api_key() is None
+    assert OpenAIProvider(config=custom_launch)._login_api_key() is None
+    assert OpenAIProvider()._login_api_key() == "sk-env"
+
+
 def test_codex_options_allow_summary_constructor_override():
     req = RunRequest(provider="openai", prompt="ignored")
 

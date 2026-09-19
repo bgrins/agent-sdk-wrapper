@@ -126,6 +126,21 @@ class OpenAIProvider(ProviderAdapter):
 
     def validate_request(self, req: RunRequest) -> None:
         _validate_supported(req)
+        if self._api_key and not self._launches_codex():
+            raise ConfigError(
+                "api_key requires the provider to launch Codex; authenticate the "
+                "pre-built codex client or custom launch command instead"
+            )
+
+    def _launches_codex(self) -> bool:
+        return self._codex is None and _config_value(self._config, "launch_args_override") is None
+
+    def _login_api_key(self) -> str | None:
+        # A pre-built client or custom launch command cannot take the ephemeral
+        # credential store override, so logging in would overwrite auth.json.
+        if not self._launches_codex():
+            return None
+        return self._api_key or os.environ.get("OPENAI_API_KEY") or None
 
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
         self.validate_request(req)
@@ -135,14 +150,20 @@ class OpenAIProvider(ProviderAdapter):
 
         codex: Any = None
         try:
+            api_key = self._login_api_key()
             with _runtime_config(req) as runtime_config:
                 if self._codex is not None and runtime_config.config_overrides:
                     raise ConfigError(
                         "Codex tools, subagents, and web_tools require the provider "
                         "to launch Codex; a pre-built codex client cannot be reconfigured"
                     )
-                async with self._codex_client(req, runtime_config.config_overrides) as codex:
-                    api_key = self._api_key or os.environ.get("OPENAI_API_KEY")
+                config_overrides = runtime_config.config_overrides
+                if api_key:
+                    # Keep the API key in memory instead of replacing auth.json.
+                    config_overrides += (
+                        _config_override("cli_auth_credentials_store", value="ephemeral"),
+                    )
+                async with self._codex_client(req, config_overrides) as codex:
                     if api_key:
                         await codex.login_api_key(api_key)
 
@@ -1081,9 +1102,13 @@ def _disallow_additional_properties(value: Any) -> None:
 
 
 def _config_has_codex_bin(config: Any) -> bool:
+    return bool(_config_value(config, "codex_bin"))
+
+
+def _config_value(config: Any, key: str) -> Any:
     if isinstance(config, dict):
-        return bool(config.get("codex_bin"))
-    return bool(getattr(config, "codex_bin", None))
+        return config.get(key)
+    return getattr(config, key, None)
 
 
 def _codex_cli_bin_available() -> bool:
