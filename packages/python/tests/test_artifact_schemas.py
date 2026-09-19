@@ -94,7 +94,7 @@ def test_each_event_type_validates_against_trace_schema() -> None:
         SessionInfo(id="sess-1"),
         StructuredOutput(value={"ok": True}),
         WarningEvent(message="retrying"),
-        Error(message="missing runtime", error_type="ProviderNotAvailableError"),
+        Error(message="missing runtime", error_type="runtime_unavailable"),
         RunFinished(status=RunStatus.SUCCESS, duration_ms=12),
     ]
 

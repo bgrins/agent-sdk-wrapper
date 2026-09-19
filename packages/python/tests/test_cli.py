@@ -388,3 +388,129 @@ def test_run_rejects_unknown_config_field(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "unknown config field(s): unknown" in captured.err
+
+
+def test_stream_rejects_json_output(monkeypatch, capsys):
+    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
+
+    rc = cli.main(
+        ["run", "--provider", "openai", "--prompt", "x", "--stream", "--output", "json"]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "--stream cannot be combined with --output json" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('timeout = "30"', "config field timeout must be a number"),
+        ('max_turns = "3"', "config field max_turns must be an integer"),
+        ("model = 5", "config field model must be a string"),
+        ("output = 1", "config field output must be a string"),
+    ],
+)
+def test_run_rejects_mistyped_config_values(monkeypatch, tmp_path, capsys, line, message):
+    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_text(f'provider = "openai"\n{line}\n', encoding="utf-8")
+
+    rc = cli.main(["run", "--config", str(config_path), "--prompt", "x"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert message in captured.err
+    assert captured.out == ""
+
+
+def test_run_reports_missing_prompt_file(tmp_path, capsys):
+    missing = tmp_path / "missing.txt"
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt-file", str(missing)])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert f"error: could not read prompt file {missing}" in captured.err
+
+
+def test_run_rejects_empty_prompt_with_prompt_file(tmp_path, capsys):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("real prompt", encoding="utf-8")
+
+    rc = cli.main(
+        ["run", "--provider", "openai", "--prompt", "", "--prompt-file", str(prompt_file)]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "pass only one of --prompt / --prompt-file" in captured.err
+
+
+@pytest.mark.parametrize(("max_retries", "rc"), [("1", 0), ("0", 1)])
+def test_jsonl_output_honors_max_retries(monkeypatch, capsys, max_retries, rc):
+    from agent_sdk_wrapper import TransientError
+    from agent_sdk_wrapper import agent as agent_mod
+
+    calls = []
+
+    class FlakyProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            calls.append(req.attempt)
+            if len(calls) == 1:
+                raise TransientError("rate limit")
+            yield Text(text="recovered")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", FlakyProvider)
+    monkeypatch.setattr(agent_mod, "_backoff", lambda attempt: 0)
+
+    code = cli.main(
+        ["run", "--provider", "openai", "--prompt", "x", "--max-retries", max_retries]
+    )
+
+    lines = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    assert code == rc
+    assert len(calls) == int(max_retries) + 1
+    assert lines[-1]["status"] == ("success" if rc == 0 else "failure")
+
+
+def test_jsonl_output_keeps_lone_surrogates(monkeypatch, capsys):
+    odd = "bad \ud800 text"
+
+    class SurrogateProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            yield Text(text=odd)
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", SurrogateProvider)
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt", "x"])
+
+    events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    assert rc == 0
+    assert [event["text"] for event in events if event["type"] == "text"] == [odd]
+
+
+def test_run_reports_process_termination(monkeypatch, capsys):
+    from agent_sdk_wrapper import ProcessTerminatedError
+
+    class KilledProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            raise ProcessTerminatedError(9)
+            yield Text(text="unreachable")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", KilledProvider)
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt", "x"])
+
+    captured = capsys.readouterr()
+    events = [json.loads(line)["event"] for line in captured.out.splitlines()]
+    assert rc == 128 + 9
+    assert [event["type"] for event in events] == ["run_started", "error", "run_finished"]
+    assert "killed by signal 9" in captured.err

@@ -3,25 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import math
 import random
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .artifacts import (
     ProviderEventCallback,
+    clear_stale_artifacts,
     collect_side_files,
     normalize_artifacts_dir,
-    provider_events_file_for,
     trace_file_for,
     write_manifest,
     write_result_artifact,
 )
-from .errors import ConfigError, ProviderNotAvailableError, RunFailedError, TransientError
+from .errors import (
+    ConfigError,
+    ProcessTerminatedError,
+    ProviderNotAvailableError,
+    RunFailedError,
+    TransientError,
+)
 from .events import (
     AgentEvent,
     AgentUpdated,
+    ContextCompacted,
     Error,
     EventEnvelope,
     RunEndedReason,
@@ -31,6 +42,8 @@ from .events import (
     RunStatus,
     SessionInfo,
     StructuredOutput,
+    SubagentEnded,
+    SubagentStarted,
     Text,
     Thinking,
     TokenUsage,
@@ -90,6 +103,43 @@ _ALLOWED_OVERRIDES = frozenset({
     "trace_file",
     "web_tools",
 })
+
+# Events that show an attempt did work; after one, the attempt is never retried.
+_PROGRESS_EVENTS = (
+    Text,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    StructuredOutput,
+    SubagentStarted,
+    SubagentEnded,
+    ContextCompacted,
+    AgentUpdated,
+)
+
+_ENDED_REASONS = {
+    "max_turns": RunEndedReason.MAX_TURNS,
+    "timeout": RunEndedReason.TIMEOUT,
+    "cancelled": RunEndedReason.CANCELLED,
+    "refused": RunEndedReason.REFUSED,
+}
+
+
+class _DeadlineExceeded(Exception):
+    """The wrapper deadline passed while waiting on the provider."""
+
+
+_END = object()
+
+
+@dataclass
+class _Run:
+    req: RunRequest
+    session_overridden: bool
+    trace_path: str | Path | None
+    on_event: Callable[[EventEnvelope], None] | None
+    raise_on_error: bool
+    result: RunResult | None = None
 
 
 class Agent:
@@ -165,6 +215,8 @@ class Agent:
         self.raise_on_error = raise_on_error
 
         self._provider = build_provider(self.provider, **(provider_options or {}))
+        self._active_runs = 0
+        self._continuing_run_active = False
 
     def check_runtime(self) -> None:
         """Validate the request before checking runtime availability."""
@@ -174,219 +226,21 @@ class Agent:
         self._provider.ensure_available()
 
     def stream(self, prompt: str, **overrides: Any) -> AsyncIterator[EventEnvelope]:
-        _check_overrides(overrides)
-        req = self._build_request(prompt, overrides)
-        trace_path = overrides.get("trace_file", self.trace_file)
-        on_event = overrides.get("on_event", self.on_event)
-        return self._stream(req, trace_path, on_event)
+        """Stream envelopes for one run. Invalid settings raise ``ConfigError`` here."""
+
+        return self._events(self._prepare(prompt, overrides))
 
     async def run(self, prompt: str, **overrides: Any) -> RunResult:
-        _check_overrides(overrides)
-        req = self._build_request(prompt, overrides)
-        artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
-        trace_path = _resolve_trace_path(
-            overrides.get("trace_file", self.trace_file), artifacts_dir
-        )
-        on_event = overrides.get("on_event", self.on_event)
-        raise_on_error = bool(overrides.get("raise_on_error", self.raise_on_error))
+        """Collect :meth:`stream` into a ``RunResult``."""
 
-        run_id = uuid.uuid4().hex
-        req.run_id = run_id
-        _clear_provider_events(artifacts_dir)
-        writer = TraceWriter(trace_path)
-        seq = _SeqGen()
-        loop_start = asyncio.get_event_loop().time()
-        result_events: list[EventEnvelope] = []
-        result_state = _ResultState()
-        result: RunResult | None = None
-        include_events = req.include_events_in_result
-        finished = False
-        duration_ms = 0
-        status = RunStatus.SUCCESS
-        ended_reason = RunEndedReason.SUCCESS
-        error_msg: str | None = None
-        attempt_events: list[EventEnvelope] = []
-
-        def emit(event: AgentEvent) -> EventEnvelope:
-            self._record_session(req, event)
-            env = EventEnvelope(run_id, seq.next(), utcnow_iso(), event)
-            writer.write(env)
-            if on_event is not None:
-                try:
-                    on_event(env)
-                except Exception:
-                    get_logger().exception("on_event callback raised; continuing run")
-            return env
-
-        def record(event: AgentEvent) -> EventEnvelope:
-            env = emit(event)
-            result_state.record(env)
-            if include_events:
-                result_events.append(env)
-            return env
-
-        try:
-            record(
-                RunStarted(
-                    provider=req.provider,
-                    model=req.model,
-                    cwd=_as_str(req.cwd),
-                    prompt=req.prompt or None,
-                    system_prompt=req.system_prompt,
-                )
-            )
-            if artifacts_dir is not None:
-                write_manifest(
-                    artifacts_dir,
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status="running",
-                    trace_file=trace_path,
-                )
-
-            attempt = 0
-            while True:
-                req.attempt = attempt
-                attempt_events = []
-                attempt_had_events = False
-                attempt_error_msg: str | None = None
-                attempt_error_type: str | None = None
-                try:
-                    async for ev in self._iterate_with_timeout(req):
-                        env = emit(ev)
-                        result_state.record(env)
-                        attempt_had_events = True
-                        if include_events:
-                            attempt_events.append(env)
-                        if isinstance(ev, Error) and attempt_error_msg is None:
-                            attempt_error_msg = ev.message or "provider reported an error"
-                            attempt_error_type = ev.error_type
-                    if attempt_error_msg is None:
-                        status = RunStatus.SUCCESS
-                        ended_reason = RunEndedReason.SUCCESS
-                    else:
-                        status = RunStatus.FAILURE
-                        ended_reason = _ended_reason_from_error_type(attempt_error_type)
-                        error_msg = attempt_error_msg
-                    if include_events:
-                        result_events.extend(attempt_events)
-                    break
-                except TransientError as exc:
-                    if attempt_had_events:
-                        if include_events:
-                            result_events.extend(attempt_events)
-                        if attempt_error_msg is None:
-                            record(Error(message=str(exc), error_type=type(exc).__name__))
-                        status = RunStatus.FAILURE
-                        ended_reason = _ended_reason_from_error_type(attempt_error_type)
-                        error_msg = attempt_error_msg or str(exc)
-                        break
-                    if attempt < req.max_retries:
-                        delay = _backoff(attempt)
-                        record(
-                            WarningEvent(
-                                message=(
-                                    f"transient error, retrying in {delay:.1f}s "
-                                    f"(attempt {attempt + 1}/{req.max_retries}): {exc}"
-                                )
-                            )
-                        )
-                        await asyncio.sleep(delay)
-                        attempt += 1
-                        continue
-                    record(Error(message=str(exc), error_type=type(exc).__name__))
-                    status = RunStatus.FAILURE
-                    ended_reason = RunEndedReason.ERROR
-                    error_msg = str(exc)
-                    break
-                except TimeoutError:
-                    if include_events:
-                        result_events.extend(attempt_events)
-                    record(
-                        Error(message=f"run timed out after {req.timeout}s", error_type="timeout")
-                    )
-                    status = RunStatus.TIMEOUT
-                    ended_reason = RunEndedReason.TIMEOUT
-                    error_msg = "timeout"
-                    break
-                except (ProviderNotAvailableError, ConfigError) as exc:
-                    if include_events:
-                        result_events.extend(attempt_events)
-                    record(Error(message=str(exc), error_type=type(exc).__name__))
-                    status = RunStatus.FAILURE
-                    ended_reason = RunEndedReason.ERROR
-                    error_msg = str(exc)
-                    break
-                except Exception as exc:
-                    if attempt_error_msg is not None:
-                        status = RunStatus.FAILURE
-                        ended_reason = _ended_reason_from_error_type(attempt_error_type)
-                        error_msg = attempt_error_msg
-                        if include_events:
-                            result_events.extend(attempt_events)
-                        break
-                    if include_events:
-                        result_events.extend(attempt_events)
-                    record(Error(message=str(exc), error_type=type(exc).__name__))
-                    status = RunStatus.FAILURE
-                    ended_reason = RunEndedReason.ERROR
-                    error_msg = str(exc)
-                    break
-        except asyncio.CancelledError:
-            if include_events:
-                result_events.extend(attempt_events)
-            status = RunStatus.CANCELLED
-            ended_reason = RunEndedReason.CANCELLED
-            error_msg = "cancelled"
-            try:
-                record(Error(message="run cancelled", error_type="cancelled"))
-            except Exception:
+        run = self._prepare(prompt, overrides)
+        async with contextlib.aclosing(self._events(run)) as events:
+            async for _ in events:
                 pass
-            raise
-        finally:
-            duration_ms = int((asyncio.get_event_loop().time() - loop_start) * 1000)
-            try:
-                if not finished:
-                    record(
-                        RunFinished(
-                            status=status,
-                            duration_ms=duration_ms,
-                            ended_reason=ended_reason,
-                        )
-                    )
-                    finished = True
-            finally:
-                writer.close()
-
-            result = result_state.to_result(
-                run_id=run_id,
-                provider=req.provider,
-                model=req.model,
-                status=status,
-                ended_reason=ended_reason,
-                events=result_events,
-                duration_ms=duration_ms,
-                artifacts_dir=_as_str(artifacts_dir),
-                error_msg=error_msg,
-            )
-            if artifacts_dir is not None:
-                result_path = write_result_artifact(artifacts_dir, result)
-                write_manifest(
-                    artifacts_dir,
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status=status.value,
-                    trace_file=trace_path,
-                    result_file=result_path,
-                    duration_ms=duration_ms,
-                    error=error_msg,
-                    extra_files=collect_side_files(artifacts_dir),
-                )
+        result = run.result
         assert result is not None
-        if not result.ok and raise_on_error:
-            raise RunFailedError(error_msg or "run failed", status=status.value)
+        if not result.ok and run.raise_on_error:
+            raise RunFailedError(result.error or "run failed", status=result.status.value)
         return result
 
     def run_sync(self, prompt: str, **overrides: Any) -> RunResult:
@@ -399,12 +253,16 @@ class Agent:
         prompt: str = DEFAULT_CONTEXT_DUMP_PROMPT,
         **overrides: Any,
     ) -> RunResult:
-        """Ask the current provider session for a summary and write it to ``path``."""
+        """Ask the current provider session for a summary and write it to ``path``.
+
+        ``path`` is left untouched when the run fails.
+        """
 
         result = await self.run(prompt, **overrides)
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(result.final_text, encoding="utf-8")
+        if result.ok:
+            out = Path(path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(result.final_text, encoding="utf-8", errors="backslashreplace")
         return result
 
     def dump_context_sync(
@@ -416,9 +274,32 @@ class Agent:
     ) -> RunResult:
         return asyncio.run(self.dump_context(path, prompt=prompt, **overrides))
 
+    def _prepare(self, prompt: str, overrides: dict[str, Any]) -> _Run:
+        _check_overrides(overrides)
+        req = self._build_request(prompt, overrides)
+        self._provider.validate_request(req)
+        return _Run(
+            req=req,
+            session_overridden="session_id" in overrides,
+            trace_path=overrides.get("trace_file", self.trace_file),
+            on_event=overrides.get("on_event", self.on_event),
+            raise_on_error=bool(overrides.get("raise_on_error", self.raise_on_error)),
+        )
+
     def _build_request(self, prompt: str, overrides: dict[str, Any]) -> RunRequest:
         def pick(name: str, default: Any) -> Any:
             return overrides[name] if name in overrides else default
+
+        timeout = pick("timeout", self.timeout)
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int | float)
+            or not (timeout > 0 and math.isfinite(timeout))
+        ):
+            raise ConfigError(f"timeout must be a positive number of seconds, got {timeout!r}")
+        max_retries = pick("max_retries", self.max_retries)
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ConfigError(f"max_retries must be a non-negative integer, got {max_retries!r}")
 
         return RunRequest(
             provider=self.provider,
@@ -437,8 +318,8 @@ class Agent:
             ),
             cwd=pick("cwd", self.cwd),
             env=dict(pick("env", self.env)),
-            timeout=pick("timeout", self.timeout),
-            max_retries=int(pick("max_retries", self.max_retries)),
+            timeout=timeout,
+            max_retries=max_retries,
             include_raw=bool(pick("include_raw", self.include_raw)),
             include_events_in_result=bool(
                 pick("include_events_in_result", self.include_events_in_result)
@@ -458,39 +339,46 @@ class Agent:
             extra_options=dict(pick("extra_options", self.extra_options)),
         )
 
-    async def _iterate_with_timeout(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
-        if req.timeout is None:
-            async for ev in self._provider.stream(req):
-                yield ev
-            return
-        async with asyncio.timeout(req.timeout):
-            async for ev in self._provider.stream(req):
-                yield ev
-
-    async def _stream(
-        self,
-        req: RunRequest,
-        trace_path: str | Path | None,
-        on_event: Callable[[EventEnvelope], None] | None,
-    ) -> AsyncIterator[EventEnvelope]:
+    async def _events(self, run: _Run) -> AsyncIterator[EventEnvelope]:
+        req = run.req
+        self._acquire(req)
         run_id = uuid.uuid4().hex
         req.run_id = run_id
-        artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
-        _clear_provider_events(artifacts_dir)
-        trace_path = _resolve_trace_path(trace_path, artifacts_dir)
-        writer = TraceWriter(trace_path)
-        seq = _SeqGen()
-        loop_start = asyncio.get_event_loop().time()
-        result_events: list[EventEnvelope] = []
-        result_state = _ResultState()
+        if not run.session_overridden:
+            req.session_id = self.session_id
+        original_session_id = req.session_id
+        on_event = run.on_event
         include_events = req.include_events_in_result
-        finished = False
+        seq = _SeqGen()
+        state = _ResultState()
+        result_events: list[EventEnvelope] = []
+        # Retryable errors wait here until the attempt either retries or makes progress.
+        held: list[Error] = []
+        start = time.monotonic()
+        deadline = None if req.timeout is None else start + req.timeout
+        status = RunStatus.SUCCESS
+        ended_reason = RunEndedReason.SUCCESS
+        error_msg: str | None = None
         duration_ms = 0
+        finished = False
+        writer: TraceWriter | None = None
+        artifacts_dir: Path | None = None
+        trace_path = run.trace_path
 
-        def emit(event: AgentEvent) -> EventEnvelope:
-            self._record_session(req, event)
+        def record(event: AgentEvent) -> EventEnvelope:
+            nonlocal status, ended_reason, error_msg
+            assert writer is not None
+            if req.continue_session and isinstance(event, SessionInfo) and event.id:
+                self.session_id = event.id
+            if isinstance(event, Error) and error_msg is None:
+                error_msg = event.message or "provider reported an error"
+                ended_reason = _ended_reason_from_error_type(event.error_type)
+                status = _status_for(ended_reason)
             env = EventEnvelope(run_id, seq.next(), utcnow_iso(), event)
             writer.write(env)
+            state.record(env)
+            if include_events:
+                result_events.append(env)
             if on_event is not None:
                 try:
                     on_event(env)
@@ -498,31 +386,35 @@ class Agent:
                     get_logger().exception("on_event callback raised; continuing run")
             return env
 
-        def record(event: AgentEvent) -> EventEnvelope:
-            env = emit(event)
-            result_state.record(env)
-            if include_events:
-                result_events.append(env)
-            return env
-
-        status = RunStatus.SUCCESS
-        ended_reason = RunEndedReason.SUCCESS
-        error_msg: str | None = None
+        def flush_held() -> list[EventEnvelope]:
+            envs = [record(event) for event in held]
+            held.clear()
+            return envs
 
         def finish() -> EventEnvelope:
             nonlocal duration_ms, finished
-            duration_ms = int((asyncio.get_event_loop().time() - loop_start) * 1000)
+            duration_ms = _elapsed_ms(start)
             env = record(
-                RunFinished(
-                    status=status,
-                    duration_ms=duration_ms,
-                    ended_reason=ended_reason,
-                )
+                RunFinished(status=status, duration_ms=duration_ms, ended_reason=ended_reason)
             )
             finished = True
             return env
 
         try:
+            artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
+            trace_path = _resolve_trace_path(trace_path, artifacts_dir)
+            if artifacts_dir is not None:
+                # Remove the previous result before the new trace replaces the old one.
+                clear_stale_artifacts(artifacts_dir)
+                write_manifest(
+                    artifacts_dir,
+                    run_id=run_id,
+                    provider=req.provider,
+                    model=req.model,
+                    status="running",
+                    trace_file=trace_path,
+                )
+            writer = TraceWriter(trace_path)
             yield record(
                 RunStarted(
                     provider=req.provider,
@@ -532,94 +424,143 @@ class Agent:
                     system_prompt=req.system_prompt,
                 )
             )
-            if artifacts_dir is not None:
-                write_manifest(
-                    artifacts_dir,
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status="running",
-                    trace_file=trace_path,
-                )
 
             try:
-                async for ev in self._iterate_with_timeout(req):
-                    if isinstance(ev, Error):
-                        status = RunStatus.FAILURE
-                        ended_reason = _ended_reason_from_error_type(ev.error_type)
-                        if error_msg is None:
-                            error_msg = ev.message or "provider reported an error"
-                    yield record(ev)
-            except TimeoutError:
-                status = RunStatus.TIMEOUT
-                ended_reason = RunEndedReason.TIMEOUT
-                error_msg = "timeout"
+                attempt = 0
+                while True:
+                    req.attempt = attempt
+                    req.session_id = original_session_id
+                    progressed = failed = False
+                    error: Exception | None = None
+                    async with contextlib.aclosing(self._provider.stream(req)) as native:
+                        while True:
+                            try:
+                                ev = await _next_event(native, deadline)
+                            except (ProcessTerminatedError, ConfigError, _DeadlineExceeded):
+                                raise
+                            except Exception as exc:
+                                error = exc
+                                break
+                            if ev is _END:
+                                break
+                            if isinstance(ev, Error) and ev.retryable and not (
+                                progressed or failed
+                            ):
+                                held.append(ev)
+                                continue
+                            if held and isinstance(ev, (*_PROGRESS_EVENTS, Error)):
+                                failed = True
+                                for env in flush_held():
+                                    yield env
+                            progressed = progressed or isinstance(ev, _PROGRESS_EVENTS)
+                            failed = failed or isinstance(ev, Error)
+                            yield record(ev)
+
+                    retryable = bool(held) or isinstance(error, TransientError)
+                    if retryable and not (progressed or failed) and attempt < req.max_retries:
+                        reason = held[0].message if held else str(error)
+                        held.clear()
+                        delay = _backoff(attempt)
+                        yield record(
+                            WarningEvent(
+                                message=(
+                                    f"transient error, retrying in {delay:.1f}s "
+                                    f"(attempt {attempt + 1}/{req.max_retries}): {reason}"
+                                )
+                            )
+                        )
+                        await _retry_sleep(delay, deadline)
+                        attempt += 1
+                        continue
+
+                    if held:
+                        failed = True
+                        for env in flush_held():
+                            yield env
+                    if error is not None and not failed:
+                        yield record(_error_event(error))
+                    break
+            except _DeadlineExceeded:
+                for env in flush_held():
+                    yield env
                 yield record(
                     Error(message=f"run timed out after {req.timeout}s", error_type="timeout")
                 )
-            except (TransientError, ProviderNotAvailableError, ConfigError) as exc:
-                status = RunStatus.FAILURE
-                ended_reason = RunEndedReason.ERROR
-                if error_msg is None:
-                    error_msg = str(exc)
-                    yield record(Error(message=str(exc), error_type=type(exc).__name__))
-            except Exception as exc:
-                status = RunStatus.FAILURE
-                ended_reason = RunEndedReason.ERROR
-                if error_msg is None:
-                    error_msg = str(exc)
-                    yield record(Error(message=str(exc), error_type=type(exc).__name__))
+                status = RunStatus.TIMEOUT
+                ended_reason = RunEndedReason.TIMEOUT
+                error_msg = "timeout"
+            except (ProcessTerminatedError, ConfigError) as exc:
+                for env in flush_held():
+                    yield env
+                yield record(_error_event(exc))
+                yield finish()
+                raise
 
             yield finish()
         except GeneratorExit:
-            if not finished:
-                if error_msg is None and status == RunStatus.SUCCESS:
-                    status = RunStatus.CANCELLED
-                    ended_reason = RunEndedReason.CANCELLED
-                    error_msg = "stream closed before completion"
-                    record(Error(message=error_msg, error_type="cancelled"))
+            if writer is not None and not finished:
+                flush_held()
+                if error_msg is None:
+                    record(Error(message="stream closed before completion", error_type="cancelled"))
                 finish()
             raise
         except asyncio.CancelledError:
-            if not finished:
+            if writer is not None and not finished:
+                flush_held()
+                record(Error(message="run cancelled", error_type="cancelled"))
                 status = RunStatus.CANCELLED
                 ended_reason = RunEndedReason.CANCELLED
                 error_msg = "cancelled"
-                record(Error(message="stream cancelled", error_type="cancelled"))
                 finish()
             raise
         finally:
-            writer.close()
-            if artifacts_dir is not None:
-                result = result_state.to_result(
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status=status,
-                    ended_reason=ended_reason,
-                    events=result_events,
-                    duration_ms=duration_ms,
-                    artifacts_dir=_as_str(artifacts_dir),
-                    error_msg=error_msg,
-                )
-                result_path = write_result_artifact(artifacts_dir, result)
-                write_manifest(
-                    artifacts_dir,
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status=status.value,
-                    trace_file=trace_path,
-                    result_file=result_path,
-                    duration_ms=duration_ms,
-                    error=error_msg,
-                    extra_files=collect_side_files(artifacts_dir),
-                )
+            try:
+                if writer is not None:
+                    writer.close()
+                    if not finished:
+                        duration_ms = _elapsed_ms(start)
+                    run.result = state.to_result(
+                        run_id=run_id,
+                        provider=req.provider,
+                        model=req.model,
+                        status=status,
+                        ended_reason=ended_reason,
+                        events=result_events,
+                        duration_ms=duration_ms,
+                        artifacts_dir=_as_str(artifacts_dir),
+                        error_msg=error_msg,
+                    )
+                    if artifacts_dir is not None:
+                        result_path = write_result_artifact(artifacts_dir, run.result)
+                        write_manifest(
+                            artifacts_dir,
+                            run_id=run_id,
+                            provider=req.provider,
+                            model=req.model,
+                            status=status.value,
+                            trace_file=trace_path,
+                            result_file=result_path,
+                            duration_ms=duration_ms,
+                            error=error_msg,
+                            extra_files=collect_side_files(artifacts_dir),
+                        )
+            finally:
+                self._release(req)
 
-    def _record_session(self, req: RunRequest, event: AgentEvent) -> None:
-        if req.continue_session and isinstance(event, SessionInfo) and event.id:
-            self.session_id = event.id
-            req.session_id = event.id
+    def _acquire(self, req: RunRequest) -> None:
+        # continue_session runs read and write self.session_id.
+        if self._active_runs and (req.continue_session or self._continuing_run_active):
+            raise ConfigError(
+                "continue_session allows one active run per Agent; "
+                "use separate Agent instances for concurrent runs"
+            )
+        self._active_runs += 1
+        self._continuing_run_active = req.continue_session
+
+    def _release(self, req: RunRequest) -> None:
+        self._active_runs -= 1
+        if req.continue_session:
+            self._continuing_run_active = False
 
 
 class _SeqGen:
@@ -639,6 +580,51 @@ def _backoff(attempt: int, *, base: float = 0.5, cap: float = 8.0) -> float:
     return min(cap, base * (2**attempt)) * (0.5 + random.random() / 2)
 
 
+def _elapsed_ms(start: float) -> int:
+    return int((time.monotonic() - start) * 1000)
+
+
+async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None) -> Any:
+    """Await the next provider event, applying the run deadline to this wait only."""
+
+    try:
+        if deadline is None:
+            return await anext(native)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _DeadlineExceeded
+        scope = asyncio.timeout(remaining)
+        try:
+            async with scope:
+                return await anext(native)
+        except TimeoutError:
+            if scope.expired():
+                raise _DeadlineExceeded from None
+            raise
+    except StopAsyncIteration:
+        return _END
+
+
+async def _retry_sleep(delay: float, deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() + delay >= deadline:
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+        raise _DeadlineExceeded
+    await asyncio.sleep(delay)
+
+
+def _error_event(exc: BaseException) -> Error:
+    message = str(exc) or type(exc).__name__
+    if isinstance(exc, TransientError):
+        return Error(message=message, error_type="transient_api_error", retryable=True)
+    if isinstance(exc, ProcessTerminatedError):
+        return Error(message=message, error_type="process_terminated")
+    if isinstance(exc, ProviderNotAvailableError):
+        return Error(message=message, error_type="runtime_unavailable")
+    if isinstance(exc, ConfigError):
+        return Error(message=message, error_type="invalid_request")
+    return Error(message=message, error_type="provider_exception")
+
+
 def _check_overrides(overrides: dict[str, Any]) -> None:
     unknown = sorted(set(overrides) - _ALLOWED_OVERRIDES)
     if unknown:
@@ -651,11 +637,6 @@ def _as_str(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
-def _clear_provider_events(artifacts_dir: Path | None) -> None:
-    if artifacts_dir is not None:
-        provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
-
-
 def _resolve_trace_path(trace_path: Any, artifacts_dir: Path | None) -> str | Path | None:
     if trace_path is not None:
         return trace_path
@@ -665,16 +646,15 @@ def _resolve_trace_path(trace_path: Any, artifacts_dir: Path | None) -> str | Pa
 
 
 def _ended_reason_from_error_type(error_type: str | None) -> RunEndedReason:
-    normalized = (error_type or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized == "max_turns":
-        return RunEndedReason.MAX_TURNS
-    if normalized == "timeout":
-        return RunEndedReason.TIMEOUT
-    if normalized == "cancelled":
-        return RunEndedReason.CANCELLED
-    if normalized in {"refused", "refusal", "policy_refusal", "safety_refusal"}:
-        return RunEndedReason.REFUSED
-    return RunEndedReason.ERROR
+    return _ENDED_REASONS.get(error_type or "", RunEndedReason.ERROR)
+
+
+def _status_for(reason: RunEndedReason) -> RunStatus:
+    if reason == RunEndedReason.CANCELLED:
+        return RunStatus.CANCELLED
+    if reason == RunEndedReason.TIMEOUT:
+        return RunStatus.TIMEOUT
+    return RunStatus.FAILURE
 
 
 class _ResultState:

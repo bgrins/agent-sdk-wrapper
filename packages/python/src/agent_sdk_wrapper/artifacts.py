@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import uuid
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from .events import RunResult, _jsonable, utcnow_iso
-from .logging import get_logger
+from .logging import JSON_TEXT_ERRORS, get_logger
 
 ARTIFACT_SCHEMA_VERSION = 1
 TRACE_FORMAT = "agent-sdk-wrapper.event-envelope-jsonl.v1"
@@ -144,7 +146,7 @@ class ProviderEventLogger:
         )
         self.sequence += 1
         if self.path is not None:
-            with self.path.open("a", encoding="utf-8") as out:
+            with self.path.open("a", encoding="utf-8", errors=JSON_TEXT_ERRORS) as out:
                 out.write(envelope.to_json() + "\n")
         if self.on_provider_event is not None:
             try:
@@ -153,6 +155,12 @@ class ProviderEventLogger:
                 get_logger().exception(
                     "on_provider_event callback raised; continuing run"
                 )
+
+
+def clear_stale_artifacts(artifacts_dir: Path) -> None:
+    """Remove files from a previous run that the new run would not overwrite first."""
+    result_file_for(artifacts_dir).unlink(missing_ok=True)
+    provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
 
 
 def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
@@ -174,10 +182,7 @@ def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
 
 def write_result_artifact(artifacts_dir: Path, result: RunResult) -> Path:
     path = result_file_for(artifacts_dir)
-    path.write_text(
-        json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomic(path, result.to_dict())
     return path
 
 
@@ -215,11 +220,20 @@ def write_manifest(
         "files": files,
     }
     path = manifest_file_for(artifacts_dir)
-    path.write_text(
-        json.dumps(_jsonable(manifest), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomic(path, _jsonable(manifest))
     return path
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """Replace ``path`` in one step so readers never see a partial file."""
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8", errors=JSON_TEXT_ERRORS) as out:
+            out.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _relpath(path: str | Path, base: Path) -> str:

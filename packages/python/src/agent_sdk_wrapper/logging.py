@@ -24,6 +24,9 @@ from .events import (
 
 LOGGER_NAME = "agent_sdk_wrapper"
 _INFO_EVENTS = (RunStarted, ToolCall, ToolResult, Error, WarningEvent, RunFinished)
+# Lone surrogates can't be encoded as UTF-8. Inside a JSON string, the
+# ``\udXXX`` text this handler writes is the JSON escape for the same code point.
+JSON_TEXT_ERRORS = "backslashreplace"
 
 
 def get_logger() -> logging.Logger:
@@ -78,7 +81,7 @@ class TraceWriter:
         self._path = Path(trace_file) if trace_file else None
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = self._path.open("w", encoding="utf-8")
+            self._fh = self._path.open("w", encoding="utf-8", errors=JSON_TEXT_ERRORS)
 
     def write(self, env: EventEnvelope) -> None:
         if self._fh is not None:

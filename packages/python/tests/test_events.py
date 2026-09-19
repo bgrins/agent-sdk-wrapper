@@ -28,6 +28,7 @@ from agent_sdk_wrapper import (
     Text,
     TokenUsage,
     ToolCall,
+    ToolResult,
     TransientError,
     Usage,
     install_fake_providers,
@@ -800,14 +801,16 @@ def test_run_result_distinguishes_max_turns_from_generic_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "exc",
+    ("exc", "error_type", "retryable"),
     [
-        ProviderNotAvailableError("missing runtime"),
-        ConfigError("bad config"),
-        TransientError("rate limit"),
+        (ProviderNotAvailableError("missing runtime"), "runtime_unavailable", False),
+        (TransientError("rate limit"), "transient_api_error", True),
+        (RuntimeError("sdk bug"), "provider_exception", False),
     ],
 )
-def test_run_records_internal_errors_in_result_and_trace(monkeypatch, tmp_path, exc):
+def test_run_records_internal_errors_in_result_and_trace(
+    monkeypatch, tmp_path, exc, error_type, retryable
+):
     from agent_sdk_wrapper.providers import base
     from agent_sdk_wrapper.providers import openai_provider as op_mod
 
@@ -831,7 +834,8 @@ def test_run_records_internal_errors_in_result_and_trace(monkeypatch, tmp_path, 
     assert result.status == RunStatus.FAILURE
     assert result.ended_reason == RunEndedReason.ERROR
     assert result.error == str(exc)
-    assert any(isinstance(event.event, Error) for event in result.events)
+    [error] = [event.event for event in result.events if isinstance(event.event, Error)]
+    assert (error.error_type, error.retryable) == (error_type, retryable)
     assert len(trace_file.read_text().splitlines()) == len(result.events)
 
 
@@ -897,7 +901,7 @@ def test_run_does_not_retry_transient_after_partial_events(monkeypatch, tmp_path
     assert result.final_text == "partial"
     assert result.error == "lost connection"
     assert any(
-        isinstance(event.event, Error) and event.event.error_type == "TransientError"
+        isinstance(event.event, Error) and event.event.error_type == "transient_api_error"
         for event in result.events
     )
     assert len(trace_file.read_text().splitlines()) == len(result.events)
@@ -962,3 +966,271 @@ def test_stream_marks_provider_error_as_failure_without_duplicate(monkeypatch):
     finished = events[-1].event
     assert isinstance(finished, RunFinished)
     assert finished.status == RunStatus.FAILURE
+
+
+def _trace_events(path) -> list[dict]:
+    return [json.loads(line)["event"] for line in path.read_text().splitlines()]
+
+
+def test_stream_timeout_does_not_cancel_consumer(monkeypatch, tmp_path):
+    import asyncio
+
+    async def slow(req):
+        yield Text(text="first")
+        await asyncio.sleep(0.01)
+        yield Text(text="second")
+
+    install_fake_providers(monkeypatch, events=slow)
+    trace_file = tmp_path / "trace.jsonl"
+    agent = Agent(provider="openai", timeout=0.05, trace_file=trace_file)
+
+    async def consume() -> tuple[list[str], int]:
+        seen = []
+        async for env in agent.stream("hi"):
+            seen.append(env.event.type)
+            if env.event.type == "text":
+                await asyncio.sleep(0.1)
+                seen.append("consumer done")
+        return seen, asyncio.current_task().cancelling()
+
+    seen, cancelling = asyncio.run(consume())
+
+    assert seen == ["run_started", "text", "consumer done", "error", "run_finished"]
+    assert cancelling == 0
+    events = _trace_events(trace_file)
+    assert events[-2]["error_type"] == "timeout"
+    assert (events[-1]["status"], events[-1]["ended_reason"]) == ("timeout", "timeout")
+
+
+def test_provider_timeout_error_is_not_the_run_deadline(monkeypatch):
+    async def raises_timeout(req):
+        yield SessionInfo(id="s1")
+        raise TimeoutError("socket read timed out")
+
+    install_fake_providers(monkeypatch, events=raises_timeout)
+
+    result = Agent(provider="openai", timeout=60, max_retries=0).run_sync("hi")
+
+    assert result.status == RunStatus.FAILURE
+    assert result.error == "socket read timed out"
+
+
+def test_stream_close_closes_provider_iterator(monkeypatch):
+    import asyncio
+
+    closed = []
+
+    async def endless(req):
+        try:
+            while True:
+                yield Text(text="tick")
+        finally:
+            closed.append(True)
+
+    install_fake_providers(monkeypatch, events=endless)
+
+    async def consume() -> list[bool]:
+        stream = Agent(provider="openai").stream("hi")
+        await anext(stream)
+        await anext(stream)
+        await stream.aclose()
+        return list(closed)
+
+    assert asyncio.run(consume()) == [True]
+
+
+def test_stream_raises_config_error_before_iterating(tmp_path):
+    trace_file = tmp_path / "trace.jsonl"
+    agent = Agent(provider="openai", builtin_tools="none", trace_file=trace_file)
+
+    with pytest.raises(ConfigError, match="builtin_tools"):
+        agent.stream("hi")
+    with pytest.raises(ConfigError, match="builtin_tools"):
+        agent.run_sync("hi")
+    assert not trace_file.exists()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"timeout": "30"}, {"timeout": 0}, {"max_retries": -1}, {"max_retries": 1.5}],
+)
+def test_run_rejects_invalid_run_limits(monkeypatch, overrides):
+    install_fake_providers(monkeypatch)
+
+    with pytest.raises(ConfigError, match=next(iter(overrides))):
+        Agent(provider="openai").stream("hi", **overrides)
+
+
+def test_late_config_error_is_recorded_then_raised(monkeypatch, tmp_path):
+    async def late(req):
+        yield SessionInfo(id="s1")
+        raise ConfigError("unsupported option discovered by the runtime")
+
+    install_fake_providers(monkeypatch, events=late)
+    trace_file = tmp_path / "trace.jsonl"
+
+    with pytest.raises(ConfigError, match="discovered by the runtime"):
+        Agent(provider="openai", trace_file=trace_file).run_sync("hi")
+
+    events = _trace_events(trace_file)
+    assert [event["type"] for event in events][-2:] == ["error", "run_finished"]
+    assert events[-2]["error_type"] == "invalid_request"
+
+
+def test_concurrent_continue_session_runs_are_rejected(monkeypatch):
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def waits(req):
+        yield SessionInfo(id="s1")
+        await release.wait()
+        yield Text(text="done")
+
+    install_fake_providers(monkeypatch, events=waits)
+    agent = Agent(provider="openai", continue_session=True)
+
+    async def scenario() -> list[str]:
+        first = asyncio.create_task(agent.run("one"))
+        await asyncio.sleep(0.01)
+        with pytest.raises(ConfigError, match="continue_session"):
+            await asyncio.wait_for(agent.run("two"), 1)
+        with pytest.raises(ConfigError, match="continue_session"):
+            await asyncio.wait_for(agent.run("three", continue_session=False), 1)
+        release.set()
+        results = [await first, await agent.run("four")]
+        return [result.final_text for result in results]
+
+    assert asyncio.run(scenario()) == ["done", "done"]
+
+
+def test_concurrent_runs_without_continue_session_are_allowed(monkeypatch):
+    import asyncio
+
+    started = []
+    both_started = asyncio.Event()
+
+    async def waits(req):
+        started.append(req.prompt)
+        if len(started) == 2:
+            both_started.set()
+        await both_started.wait()
+        yield Text(text=req.prompt)
+
+    install_fake_providers(monkeypatch, events=waits)
+    agent = Agent(provider="openai")
+
+    async def scenario():
+        return await asyncio.gather(agent.run("one"), agent.run("two"))
+
+    results = asyncio.run(scenario())
+    assert [result.final_text for result in results] == ["one", "two"]
+
+
+def test_dump_context_keeps_existing_file_when_run_fails(monkeypatch, tmp_path):
+    install_fake_providers(
+        monkeypatch,
+        events=[Text(text="partial"), Error(message="failed", error_type="execution_error")],
+    )
+    path = tmp_path / "context.md"
+    path.write_text("previous summary")
+
+    result = Agent(provider="openai").dump_context_sync(path)
+
+    assert not result.ok
+    assert path.read_text() == "previous summary"
+
+
+def test_artifacts_round_trip_lone_surrogates(monkeypatch, tmp_path):
+    from agent_sdk_wrapper.artifacts import ProviderEventLogger
+
+    odd = "bad \ud800 and \udcff"
+
+    async def surrogate_events(req):
+        ProviderEventLogger("openai", req.artifacts_dir, run_id=req.run_id).write({"text": odd})
+        yield Text(text=odd)
+        yield ToolResult(id="t1", output=odd)
+        yield Error(message=odd, error_type="execution_error")
+
+    install_fake_providers(monkeypatch, events=surrogate_events)
+    artifacts_dir = tmp_path / "artifacts"
+
+    result = Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("hi")
+
+    assert result.error == odd
+    events = _trace_events(artifacts_dir / "trace.jsonl")
+    assert [event["text"] for event in events if event["type"] == "text"] == [odd]
+    assert [event["output"] for event in events if event["type"] == "tool_result"] == [odd]
+    saved = json.loads((artifacts_dir / "result.json").read_text(encoding="utf-8"))
+    assert saved["final_text"] == odd
+    assert json.loads((artifacts_dir / "manifest.json").read_text())["error"] == odd
+    native = json.loads((artifacts_dir / "provider-events.jsonl").read_text())
+    assert native["message"] == {"text": odd}
+
+
+def test_artifacts_run_start_drops_previous_result(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=[Text(text="ok")])
+    artifacts_dir = tmp_path / "artifacts"
+    Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("first")
+    assert (artifacts_dir / "result.json").exists()
+    at_start = {}
+
+    def on_event(env):
+        if env.event.type == "run_started":
+            manifest = json.loads((artifacts_dir / "manifest.json").read_text())
+            at_start.update(
+                result_exists=(artifacts_dir / "result.json").exists(),
+                manifest=(manifest["run_id"], manifest["status"]),
+                trace_run_ids={
+                    json.loads(line)["run_id"]
+                    for line in (artifacts_dir / "trace.jsonl").read_text().splitlines()
+                },
+                run_id=env.run_id,
+            )
+
+    Agent(provider="openai", artifacts_dir=artifacts_dir, on_event=on_event).run_sync("second")
+
+    assert at_start["result_exists"] is False
+    assert at_start["manifest"] == (at_start["run_id"], "running")
+    assert at_start["trace_run_ids"] == {at_start["run_id"]}
+
+
+def test_artifact_json_files_are_replaced_atomically(tmp_path):
+    import threading
+
+    from agent_sdk_wrapper.artifacts import manifest_file_for, write_manifest
+
+    def write(index: int) -> None:
+        write_manifest(
+            tmp_path,
+            run_id=f"run-{index}",
+            provider="openai",
+            model=None,
+            status="running",
+            trace_file=None,
+            error="x" * 500_000,
+        )
+
+    write(0)
+    path = manifest_file_for(tmp_path)
+    stop = threading.Event()
+    torn_reads = []
+
+    def read() -> None:
+        while not stop.is_set():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, FileNotFoundError) as exc:
+                torn_reads.append(type(exc).__name__)
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        for index in range(1, 60):
+            write(index)
+    finally:
+        stop.set()
+        reader.join()
+
+    assert torn_reads == []
+    assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
