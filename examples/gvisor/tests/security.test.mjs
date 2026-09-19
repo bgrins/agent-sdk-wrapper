@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync, rmSync, statfsSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  statfsSync,
+  statSync,
+} from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -84,7 +90,9 @@ test("worker cannot reach the internet, metadata service or Docker host", async 
   }
 });
 
-test("only the job token reaches the offline inference endpoint", async () => {
+test("only the job token reaches the non-root offline gateway", async () => {
+  // The gateway creates its socket as its own user.
+  assert.notEqual(statSync("/inference/gateway.sock").uid, 0);
   const claude = process.env.PROVIDER === "anthropic";
   const call = (token) =>
     new Promise((resolve, reject) => {

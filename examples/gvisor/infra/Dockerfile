@@ -7,7 +7,9 @@ COPY examples/gvisor/workload/project/package*.json examples/gvisor/workload/pro
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY examples/gvisor/workload/project/ ./
 
-FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS base
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS os
+
+FROM os AS base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
@@ -27,14 +29,26 @@ ENTRYPOINT ["node"]
 CMD ["tests/fixture-worker.mjs"]
 
 FROM caddy:2.11.4@sha256:14a9c00d4e833ebc2b65d36515b37bde3b73f0b323a2663aaafc88953d8c4e3f AS caddy-bin
-FROM base AS gateway
+FROM os AS gateway
+# The gateway holds the provider key: no Node, git or setuid binaries, and a non-root user.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+    && groupadd --system --gid 10001 gateway \
+    && useradd --system --uid 10001 --gid gateway --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin gateway \
+    && mkdir /socket && chown gateway:gateway /socket
 COPY --from=caddy-bin /usr/bin/caddy /usr/local/bin/caddy
 # Clear file capabilities: only a Unix socket is needed, and Compose drops all caps.
 RUN chown 0:0 /usr/local/bin/caddy
+WORKDIR /example
 COPY examples/gvisor/infra/gateway/Caddyfile ./gateway/Caddyfile
+USER 10001:10001
 ENTRYPOINT ["timeout", "--kill-after=3s", "360s", "caddy", "run", "--config", "/example/gateway/Caddyfile", "--adapter", "caddyfile"]
 
 FROM gateway AS gateway-tests
+COPY --from=node-bin /usr/local/bin/node /usr/local/bin/node
 COPY examples/gvisor/tests/gateway.test.mjs examples/gvisor/tests/Caddyfile ./tests/
 ENTRYPOINT ["timeout", "--kill-after=3s", "360s", "caddy", "run", "--config", "/example/tests/Caddyfile", "--adapter", "caddyfile"]
 
