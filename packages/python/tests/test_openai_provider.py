@@ -134,6 +134,19 @@ def test_codex_api_key_requires_a_wrapper_launched_runtime(monkeypatch):
     assert OpenAIProvider()._login_api_key() == "sk-env"
 
 
+def test_codex_sandbox_is_a_thread_mode_not_a_turn_policy():
+    from openai_codex import Sandbox
+
+    req = RunRequest(provider="openai", prompt="ignored")
+
+    thread_options, turn_options = OpenAIProvider()._build_options(
+        req, None, Sandbox.workspace_write
+    )
+
+    assert thread_options["sandbox"] is Sandbox.workspace_write
+    assert "sandbox" not in turn_options
+
+
 def test_codex_options_allow_summary_constructor_override():
     req = RunRequest(provider="openai", prompt="ignored")
 

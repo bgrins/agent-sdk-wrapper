@@ -300,6 +300,22 @@ async def test_web_tools_controls_the_web_search_tool(mock_api, codex_home, tmp_
     assert [t["external_web_access"] for t in _web_search_tools(mock_api)] == [True]
 
 
+async def test_sandbox_keeps_workspace_write_config(mock_api, codex_home, tmp_path):
+    agent = codex_agent(
+        mock_api,
+        codex_home,
+        tmp_path,
+        "sandbox_workspace_write.network_access=true",
+        provider_options={"sandbox": "workspace-write"},
+    )
+
+    result = await agent.run("hi")
+
+    assert result.ok, result.error
+    context = json.dumps(mock_api.posts()[0]["body"]["input"])
+    assert "Network access is enabled" in context
+
+
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):
     mock_api.plan = [
         {

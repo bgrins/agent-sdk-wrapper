@@ -267,7 +267,8 @@ class OpenAIProvider(ProviderAdapter):
         turn_options.setdefault("model", req.model)
         turn_options.setdefault("cwd", _as_str(req.cwd))
         turn_options.setdefault("approval_mode", approval_mode)
-        turn_options.setdefault("sandbox", sandbox)
+        # The SDK sends a turn sandbox as a full policy with default writable roots and
+        # network access, which would override sandbox_workspace_write from config.
         turn_options.setdefault("effort", req_effort or self._effort)
         turn_options.setdefault("summary", self._summary)
         turn_options.setdefault("personality", self._personality)
