@@ -129,6 +129,13 @@ class OpenAIProvider(ProviderAdapter):
     def validate_request(self, req: RunRequest) -> None:
         _validate_supported(req)
         self._validate_native_options(req)
+        try:
+            from openai_codex import ApprovalMode, Sandbox
+        except ImportError:
+            pass
+        else:
+            _enum_value(ApprovalMode, self._approval_mode)
+            _enum_value(Sandbox, self._sandbox)
         if self._api_key and not self._launches_codex():
             raise ConfigError(
                 "api_key requires the provider to launch Codex; authenticate the "
@@ -300,8 +307,8 @@ class OpenAIProvider(ProviderAdapter):
         turn_options.setdefault("model", req.model)
         turn_options.setdefault("cwd", _as_str(req.cwd))
         turn_options.setdefault("approval_mode", approval_mode)
-        # The SDK sends a turn sandbox as a full policy with default writable roots and
-        # network access, which would override sandbox_workspace_write from config.
+        # No turn sandbox: the SDK sends it as a full policy with default writable roots
+        # and network access, overriding sandbox_workspace_write from config.
         turn_options.setdefault("effort", req_effort or self._effort)
         turn_options.setdefault("summary", self._summary)
         turn_options.setdefault("personality", self._personality)

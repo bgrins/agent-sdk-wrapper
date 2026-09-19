@@ -907,6 +907,8 @@ def _options_request(**kwargs: Any) -> RunRequest:
         ),
         ({"ephemeral": True, "thread_id": "t"}, {}, "ephemeral"),
         ({"codex": object()}, {"web_tools": False}, "launch Codex"),
+        ({"sandbox": "workspace"}, {}, "invalid Sandbox value"),
+        ({"approval_mode": "sometimes"}, {}, "invalid ApprovalMode value"),
         (
             {"config": {"launch_args_override": ("codex",)}},
             {"tools": [sample_importable_tool]},
