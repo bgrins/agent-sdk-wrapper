@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..artifacts import ProviderEventLogger, sdk_dir_for
 from ..errors import (
@@ -302,6 +302,7 @@ async def _stream_turn(
     thinking_delta_parts: dict[str | None, list[str]] = {}
     texts: list[str] = []
     usage = _TurnUsage()
+    started_calls: set[str] = set()
     completed_action_items = 0
     interrupted_for_max_turns = False
     # A non-retried error notification precedes the failed turn/completed; emit one Error.
@@ -326,6 +327,16 @@ async def _stream_turn(
             if delta:
                 item_id = _codex_item_id(payload)
                 thinking_delta_parts.setdefault(item_id, []).append(delta)
+            continue
+
+        if method == "item/started":
+            item = getattr(payload, "item", None)
+            tool_events = _tool_events(getattr(item, "root", item), event, req.include_raw)
+            if tool_events is not None:
+                call = tool_events[0]
+                if call.id is not None:
+                    started_calls.add(call.id)
+                yield call
             continue
 
         if method == "item/completed":
@@ -359,8 +370,12 @@ async def _stream_turn(
                 )
                 continue
             tool_events = _tool_events(root, event, req.include_raw)
-            for tool_event in tool_events:
-                yield tool_event
+            if tool_events is not None:
+                call, result = tool_events
+                if call.id is None or call.id not in started_calls:
+                    yield call
+                started_calls.discard(call.id)
+                yield result
             if _counts_toward_max_turns(root_type):
                 completed_action_items += 1
                 if (
@@ -1574,15 +1589,16 @@ def _enum_value(enum_type: Any, value: Any) -> Any:
             ) from exc
 
 
-def _tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:
-    """Map a completed action to a tool call and result, both carrying the tool name."""
+def _tool_events(root: Any, event: Any, include_raw: bool) -> tuple[ToolCall, ToolResult] | None:
+    """Map an action item to a tool call and result, both carrying the tool name."""
 
     events = _build_tool_events(root, event, include_raw)
-    names = {e.id: e.name for e in events if isinstance(e, ToolCall) and e.id}
-    for tool_event in events:
-        if isinstance(tool_event, ToolResult) and tool_event.name is None:
-            tool_event.name = names.get(tool_event.id)
-    return events
+    if not events:
+        return None
+    call, result = cast(tuple[ToolCall, ToolResult], tuple(events))
+    if result.name is None:
+        result.name = call.name
+    return call, result
 
 
 def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:

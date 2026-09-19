@@ -1448,6 +1448,33 @@ def codex_frames(name: str) -> list[Any]:
 
 
 @pytest.mark.asyncio
+async def test_codex_tool_call_is_emitted_when_the_item_starts():
+    req = RunRequest(provider="openai", prompt="ignored")
+    frames = codex_frames("tool-turn.provider-events.jsonl")
+    started, completed = frames[:2]
+    commentary = SimpleNamespace(
+        method="item/completed",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="working"))
+        ),
+    )
+
+    out = [
+        event
+        async for event in _stream_turn(
+            FakeTurn([started, commentary, completed, turn_completed()]), req
+        )
+    ]
+
+    command = "/bin/zsh -lc \"python3 -c 'print((3 + 4) ** 2)'\""
+    assert out == [
+        ToolCall(id="exec-1", name="command", input={"command": command}),
+        Text(text="working"),
+        ToolResult(id="exec-1", name="command", output="49\n"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_replays_a_multi_request_turn():
     req = RunRequest(provider="openai", prompt="ignored")
     turn = FakeTurn(codex_frames("tool-turn.provider-events.jsonl"))
