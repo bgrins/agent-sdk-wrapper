@@ -9,7 +9,8 @@
   do not install Node/npm or standalone CLIs there. TypeScript has its own image
   and build-context ignore file; exclude host node_modules and generated files.
   The gVisor Python example also includes Node/git to run its target Node project;
-  its provider runtimes still come from Python SDKs.
+  its provider runtimes still come from Python SDKs. Its gateway image has
+  neither, and runs as non-root.
 - Keep `.env`, `.claude/`, `results/`, caches and generated artifacts out of git.
 - Shared automation uses Bash or Node. Python tooling stays in `packages/python/`.
 - Prefix language-specific Compose services with `python-` or `typescript-`;
@@ -31,8 +32,14 @@
 - `RunStarted` includes prompt and system prompt. Preserve empty/redacted
   `Thinking` events when reasoning occurred; both providers reason by default.
 - Classify terminal provider failures even when the SDK never raises:
-  specific `error_type` and `retryable`, not a generic error.
-- Signal-killed runtimes raise `ProcessTerminatedError`, never `TransientError`.
+  specific `error_type` and `retryable`, not a generic error. Use the PARITY.md
+  vocabulary and prefer structured native signals over message text.
+- Signal-killed runtimes record a `process_terminated` error, then raise
+  `ProcessTerminatedError`; never retry them.
+- Keep runs isolated from the host: Claude `setting_sources` defaults to `[]`,
+  `effort` is pinned through the child env, `cli_login` defaults to `deny`, and
+  credentials are never persisted.
+- `final_text` is the last `Text`; adapters emit one `Text` per assistant message.
 - Changes to Python `_tool_server_script()` or `mcp` require the real offline
   MCP handshake test. The generated server supports `FastMCP` and `MCPServer`.
 - Fault tests use local mock endpoints: Claude `ANTHROPIC_BASE_URL` via `env`;

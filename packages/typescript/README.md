@@ -28,8 +28,11 @@ if (result.session_id) {
 }
 ```
 
-Set native SDK credentials through environment variables or login. Codex also accepts
-`OPENAI_API_KEY`. The wrapper does not load `.env`.
+Claude needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or a cloud-provider flag;
+Codex needs `OPENAI_API_KEY` or `client.apiKey`. With the default `cliLogin: "deny"`,
+a run never uses a runtime's stored login and throws before starting without
+credentials. Codex accepts `cliLogin: "require"` to use its stored ChatGPT login
+(checked with `codex login status`); Claude rejects it. The wrapper does not load `.env`.
 
 ## Contract
 
@@ -40,8 +43,9 @@ overridden per field, without deep merging. One active run per Agent.
 |---|---|
 | `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings; conflicts fail |
 | `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider |
-| `maxRetries`, `retryDelayMs` | Default 0 retries; transient failures retry only before any events |
-| `signal` | Cancellation or `AbortSignal.timeout(ms)` |
+| `maxRetries`, `retryDelayMs` | Default 0 retries; transient failures retry only before text, thinking or tool events |
+| `signal` | Cancellation or `AbortSignal.timeout(ms)`; ignored after the terminal frame |
+| `cliLogin` | `"deny"` (default) or Codex-only `"require"` for the runtime's stored login |
 | `traceFile` | Write normalized JSONL during `run()` or `stream()` |
 | `providerOptions` | Native options below; unknown keys fail |
 | `onProviderEvent`, `includeRaw` | Original SDK-event callback, or raw data on mapped events |
@@ -49,11 +53,15 @@ overridden per field, without deep merging. One active run per Agent.
 `EventEnvelope` has `run_id`, zero-based `sequence`, `timestamp` and `event`.
 Events cover run boundaries, sessions, completed text/thinking, tool activity,
 usage, warnings and errors. `RunResult` contains status, text, usage/cost,
-session ID and events. `collectRun` rejects incomplete or misordered streams.
+session ID and events. `final_text` is the last assistant message, and
+`session_info.model` reports the model the runtime used. `error_type` uses the
+[shared vocabulary](PARITY.md#error-types). `collectRun` rejects incomplete or
+misordered streams.
 
-`checkRuntime()` validates configuration and runtime availability without a model call.
-Setup throws `ConfigError` or `RuntimeUnavailableError`; runtime failures usually
-produce failed results. Signal-killed processes throw `ProcessTerminatedError`.
+`checkRuntime()` validates configuration, runtime and credentials without a model call.
+Setup throws `ConfigError`, `RuntimeUnavailableError` or `ProviderError`; runtime
+failures usually produce failed results. Signal-killed processes record the failure,
+then throw `ProcessTerminatedError`; a kill after the caller's abort is cancelled.
 Trace I/O or serialization failures throw `TraceWriteError` without retrying inference.
 Implement `ProviderAdapter` for custom validation, runtime checks and streaming.
 
@@ -77,7 +85,11 @@ Native options use `providerOptions.provider: "anthropic"` or `"openai"`:
 | Codex `thread` | `sandboxMode`, `approvalPolicy`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` |
 
 Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
-`allowedTools` grants approval, not a hard filter. Codex `env` replaces inheritance.
+`allowedTools` grants approval, not a hard filter. Native `env` replaces inheritance
+for both providers; without it, the child gets `process.env`. Claude also receives
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `env` sets it, and `effort` sets
+`CLAUDE_CODE_EFFORT_LEVEL`. Codex `error` notices are warnings, the shell tool is
+named `command`, and todo lists appear as thinking.
 Host tool callbacks are unsupported. See [API limits](PARITY.md).
 
 ## Native events and traces

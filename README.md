@@ -10,7 +10,9 @@ validation, normalized events/results and retries. Install either language indep
 | `packages/typescript/` | [TypeScript API](packages/typescript/README.md) |
 
 Both expose `Agent.run()` and `Agent.stream()`. Use provider `anthropic` or `codex`
-(an alias for `openai`). Unsupported settings raise `ConfigError`.
+(an alias for `openai`). Unsupported settings raise `ConfigError`. Runs use API or
+cloud-provider credentials and never a runtime's stored login unless Codex
+`cli_login="require"` asks for it.
 See [API differences](packages/typescript/PARITY.md) and [SDK versions](docs/sdk-versions.md).
 
 ## Develop
@@ -32,6 +34,7 @@ docker compose up --build --abort-on-container-failure python-verify typescript-
 
 ## View traces
 
-Run `npm run trace-viewer -- results` and open the printed URL.
+Run `npm run trace-viewer -- results` and open the printed URL. It lists the 500
+most recently modified run directories, and `?index=` must be same-origin.
 For the [gVisor example](examples/gvisor/README.md), use
 `npm run trace-viewer -- results/gvisor-output --depth 1`.
