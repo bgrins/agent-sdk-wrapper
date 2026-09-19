@@ -1053,6 +1053,43 @@ def test_runtime_config_builds_codex_tool_and_subagent_overrides(tmp_path):
         assert runtime.warnings == ()
 
 
+TRICKY_TEXT = 'fox \U0001f98a "quoted" \\ tab\t line\nDEL\x7f bell\x07 café'
+
+
+def test_codex_config_values_are_valid_toml():
+    import tomllib
+
+    from agent_sdk_wrapper.providers.openai_provider import _toml_literal
+
+    value = {"text": TRICKY_TEXT, "list": [TRICKY_TEXT, 1, 2.5, True], TRICKY_TEXT: "key"}
+
+    assert tomllib.loads(f"x = {_toml_literal(value)}")["x"] == value
+    with pytest.raises(ConfigError, match="surrogate"):
+        _toml_literal("\ud83d")
+
+
+def test_codex_subagent_config_file_is_valid_toml(tmp_path):
+    import tomllib
+
+    req = RunRequest(
+        provider="openai",
+        prompt="ignored",
+        subagents={"fox": SubagentDef(description=TRICKY_TEXT, prompt=TRICKY_TEXT)},
+    )
+
+    with _runtime_config(req) as runtime:
+        [config_file] = [
+            v.split("=", 1)[1] for v in runtime.config_overrides if ".config_file=" in v
+        ]
+        path = tomllib.loads(f"x = {config_file}")["x"]
+        with open(path, "rb") as handle:
+            assert tomllib.load(handle) == {"developer_instructions": TRICKY_TEXT}
+        [description] = [
+            v.split("=", 1)[1] for v in runtime.config_overrides if ".description=" in v
+        ]
+        assert tomllib.loads(f"x = {description}")["x"] == TRICKY_TEXT
+
+
 def test_codex_rejects_builtin_tools():
     req = RunRequest(provider="openai", prompt="ignored", builtin_tools="none")
 

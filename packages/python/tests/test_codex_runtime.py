@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from agent_sdk_wrapper import Agent, RunResult
+from agent_sdk_wrapper import Agent, McpStdioServer, RunResult, SubagentDef
 
 pytest.importorskip("codex_cli_bin")
 
@@ -100,7 +101,7 @@ class MockResponses:
 
 def _sse(index: int, step: dict[str, Any]) -> str:
     response_id = f"resp_{index}"
-    items: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = list(step.get("items", []))
     if "call" in step:
         call = step["call"]
         items.append(
@@ -224,6 +225,16 @@ def event_types(result: RunResult) -> list[str]:
     return [envelope.event.type for envelope in result.events]
 
 
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return [text for item in value for text in _strings(item)]
+    return []
+
+
 async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_home, tmp_path):
     auth = codex_home / "auth.json"
     auth.write_text(
@@ -314,6 +325,71 @@ async def test_sandbox_keeps_workspace_write_config(mock_api, codex_home, tmp_pa
     assert result.ok, result.error
     context = json.dumps(mock_api.posts()[0]["body"]["input"])
     assert "Network access is enabled" in context
+
+
+ECHO_MCP_SERVER = '''
+import os
+import sys
+
+try:
+    from mcp.server.mcpserver import MCPServer as Server
+except ImportError:
+    from mcp.server.fastmcp import FastMCP as Server
+
+
+def echo() -> str:
+    """Return this server's arguments and GREETING."""
+    return "|".join([*sys.argv[1:], os.environ.get("GREETING", "<unset>")])
+
+
+server = Server("echo")
+server.add_tool(echo, name="echo", description="Echo.", structured_output=False)
+server.run("stdio")
+'''
+
+UNICODE_TEXT = "fox \U0001f98a café del\x7f"
+
+
+async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_path):
+    script = tmp_path / "echo_server.py"
+    script.write_text(ECHO_MCP_SERVER, encoding="utf-8")
+    # tool_search returns the deferred spawn_agent tool, which lists subagent descriptions.
+    search = {
+        "type": "tool_search_call",
+        "id": "ts_1",
+        "call_id": "ts_1",
+        "execution": "client",
+        "status": "completed",
+        "arguments": {"query": "spawn agent"},
+    }
+    mock_api.plan = [
+        {"items": [search], "call": {"name": "echo", "namespace": "mcp__echo"}},
+        {"text": "done"},
+    ]
+    agent = codex_agent(
+        mock_api,
+        codex_home,
+        tmp_path,
+        mcp_servers=[
+            McpStdioServer(
+                name="echo",
+                command=sys.executable,
+                args=[str(script), UNICODE_TEXT],
+                env={"GREETING": UNICODE_TEXT},
+                default_tools_approval_mode="approve",
+            )
+        ],
+        subagents={"fox": SubagentDef(description=UNICODE_TEXT, prompt=UNICODE_TEXT)},
+    )
+
+    result = await agent.run("hi")
+
+    assert result.ok, result.error
+    [tool_result] = [e.event for e in result.events if e.event.type == "tool_result"]
+    [content] = json.loads(tool_result.output or "{}")["content"]
+    assert content["text"] == f"{UNICODE_TEXT}|{UNICODE_TEXT}"
+    followup = _strings(mock_api.posts()[-1]["body"]["input"])
+    assert any(f"fox: {{\n{UNICODE_TEXT}\n}}" in text for text in followup)
 
 
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):

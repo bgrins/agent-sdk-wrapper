@@ -1087,20 +1087,52 @@ def _toml_literal(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return json.dumps(value)
+        return _toml_string(value)
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
     if isinstance(value, dict):
         items = [
-            f"{json.dumps(str(key))} = {_toml_literal(item)}"
+            f"{_toml_string(str(key))} = {_toml_literal(item)}"
             for key, item in value.items()
         ]
         return "{ " + ", ".join(items) + " }"
     if value is None:
         raise ConfigError("None is not a valid Codex config override value")
-    return json.dumps(str(value))
+    return _toml_string(str(value))
+
+
+_TOML_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_string(value: str) -> str:
+    """Encode a TOML basic string.
+
+    JSON escapes split non-BMP characters into surrogate pairs, which TOML rejects.
+    """
+
+    out = ['"']
+    for char in value:
+        code = ord(char)
+        if char in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[char])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        elif 0xD800 <= code <= 0xDFFF:
+            raise ConfigError(f"Codex config strings cannot contain lone surrogates: {value!r}")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
 
 
 def _codex_config(
