@@ -56,6 +56,25 @@ function assistant(
     ...overrides,
   };
 }
+function init(model: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "init",
+    apiKeySource: "ANTHROPIC_API_KEY",
+    claude_code_version: "test",
+    cwd: "/tmp",
+    tools: [],
+    mcp_servers: [],
+    model,
+    permissionMode: "default",
+    slash_commands: [],
+    output_style: "default",
+    skills: [],
+    plugins: [],
+    uuid: randomUUID(),
+    session_id: "claude-session",
+  };
+}
 const textBlock = (value: string) =>
   ({ type: "text", text: value, citations: null }) as const;
 function result(overrides: Partial<SDKResultSuccess> = {}): SDKResultSuccess {
@@ -288,7 +307,7 @@ for (const [overrides, expectedType, retryable] of [
       terminal_reason: "budget_exhausted",
       result: "budget exhausted",
     },
-    "budget_exhausted",
+    "max_budget",
     false,
   ],
   [{ stop_reason: "refusal", result: "declined" }, "refused", false],
@@ -519,4 +538,106 @@ test("Claude stops at its first result, ignoring background-task turns", async (
   assert.equal(run.status, "success");
   assert.equal(run.final_text, "launched");
   assert.equal(closed(), 1);
+});
+// Frames captured from the Claude CLI against a local mock API.
+for (const [error, status, reason, message, expected] of [
+  [
+    "authentication_failed",
+    null,
+    "api_error",
+    "Not logged in · Please run /login",
+    "authentication_failed",
+  ],
+  [
+    "authentication_failed",
+    403,
+    "api_error",
+    "Failed to authenticate. API Error: 403 forbidden",
+    "permission_denied",
+  ],
+  [
+    "invalid_request",
+    400,
+    "prompt_too_long",
+    "Prompt is too long",
+    "context_window_exceeded",
+  ],
+  [
+    "billing_error",
+    400,
+    "api_error",
+    "Credit balance is too low",
+    "billing_error",
+  ],
+  [
+    "model_not_found",
+    404,
+    "api_error",
+    "There's an issue with the selected model (claude-test). It may not exist or you may not have access to it.",
+    "model_not_found",
+  ],
+  [
+    "server_error",
+    null,
+    "api_error",
+    "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
+    "transient_api_error",
+  ],
+] as const)
+  test(`Claude synthetic ${error} (${status}) is a ${expected} error, not text`, async () => {
+    const { agent } = harness([
+      assistant(
+        [textBlock(message)],
+        { error },
+        { model: "<synthetic>", stop_reason: "stop_sequence" },
+      ),
+      result({
+        is_error: true,
+        api_error_status: status,
+        terminal_reason: reason,
+        stop_reason: "stop_sequence",
+        result: message,
+      }),
+    ]);
+    const run = await agent.run("fail");
+    assert.equal(run.final_text, "");
+    assert.equal(
+      run.events.some((env) => env.event.type === "text"),
+      false,
+    );
+    assert.deepEqual(
+      run.events
+        .filter((env) => env.event.type === "error")
+        .map((env) => env.event),
+      [
+        {
+          type: "error",
+          message,
+          error_type: expected,
+          retryable: expected === "transient_api_error",
+        },
+      ],
+    );
+  });
+test("Claude retries transient failures reported through synthetic messages", async () => {
+  const message = "API Error: 529 overloaded";
+  const { agent, captured } = harness(
+    [
+      init("claude-test"),
+      assistant(
+        [textBlock(message)],
+        { error: "server_error" },
+        { model: "<synthetic>" },
+      ),
+      result({ is_error: true, api_error_status: 529, result: message }),
+    ],
+    { maxRetries: 1, retryDelayMs: 0 },
+  );
+  const run = await agent.run("retry");
+  assert.equal(captured.length, 2);
+  assert.equal(run.error, message);
+  assert.equal(
+    run.events.filter((env) => env.event.type === "error").length,
+    1,
+  );
 });

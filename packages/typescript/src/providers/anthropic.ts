@@ -4,6 +4,7 @@ import { findPackageJSON } from "node:module";
 import { dirname, join } from "node:path";
 import type {
   Options,
+  SDKAssistantMessageError,
   SDKMessage,
   SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -12,7 +13,7 @@ import {
   ProviderProtocolError,
   RuntimeUnavailableError,
 } from "../errors.js";
-import { emptyUsage, type ProviderEvent } from "../events.js";
+import { type ErrorEvent, emptyUsage, type ProviderEvent } from "../events.js";
 import type { ResolvedRequest } from "../request.js";
 import type { ProviderAdapter, ProviderContext } from "./base.js";
 import {
@@ -189,6 +190,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     let seenText = false;
     let seenThinking = false;
     let interrupted = false;
+    let assistantError: SDKAssistantMessageError | undefined;
     let session: string | undefined;
     const names = new Map<string, string>();
     const seen = new Set<string>();
@@ -249,6 +251,12 @@ export class AnthropicAdapter implements ProviderAdapter {
             interrupted = true;
             continue; // Truncated content is not a completed text/thinking item.
           }
+          // The CLI reports API failures as synthetic assistant text.
+          if (message.error || message.message.model === "<synthetic>") {
+            assistantError = message.error;
+            continue;
+          }
+          assistantError = undefined;
           for (const block of message.message.content) {
             if (block.type === "text") {
               seenText = true;
@@ -307,70 +315,11 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (usage.usage.reasoning_output_tokens > 0 && !seenThinking)
             yield { type: "thinking", text: "", ...raw };
           yield usage;
-          if (
-            interrupted ||
-            message.terminal_reason === "aborted_streaming" ||
-            message.terminal_reason === "aborted_tools"
-          ) {
-            yield {
-              type: "error",
-              message: "Run cancelled",
-              error_type: "cancelled",
-              retryable: false,
-              ...raw,
-            };
-            return;
-          }
-          const status =
-            message.subtype === "success"
-              ? message.api_error_status
-              : undefined;
-          if (
-            message.is_error ||
-            message.subtype !== "success" ||
-            message.stop_reason === "refusal" ||
-            (message.terminal_reason && message.terminal_reason !== "completed")
-          ) {
-            const text =
-              message.subtype === "success"
-                ? message.result
-                : message.errors.join("\n");
-            const error = classify(
-              text || message.subtype,
-              message.terminal_reason ??
-                (message.subtype === "success"
-                  ? "result_error"
-                  : message.subtype),
-              status ?? undefined,
-            );
-            // No HTTP response indicates a dropped connection unless a structural error exists.
-            if (
-              message.subtype === "success" &&
-              message.is_error &&
-              status == null &&
-              (!message.terminal_reason ||
-                message.terminal_reason === "api_error" ||
-                message.terminal_reason === "completed") &&
-              (error.error_type === "result_error" ||
-                error.error_type === "api_error" ||
-                error.error_type === "completed")
-            ) {
-              error.error_type = "transient_api_error";
-              error.retryable = true;
-            }
-            if (
-              message.subtype === "error_max_turns" ||
-              message.terminal_reason === "max_turns"
-            ) {
-              error.error_type = "max_turns";
-              error.retryable = false;
-            }
-            if (message.stop_reason === "refusal") {
-              error.error_type = "refused";
-              error.retryable = false;
-            }
-            yield { ...error, ...raw };
-          } else if (!seenText && message.result)
+          const error = interrupted
+            ? cancelled()
+            : resultError(message, assistantError);
+          if (error) yield { ...error, ...raw };
+          else if (!seenText && message.subtype === "success" && message.result)
             yield { type: "text", text: message.result, ...raw };
           return;
         } else if (message.type === "stream_event")
@@ -387,6 +336,86 @@ export class AnthropicAdapter implements ProviderAdapter {
       query?.close();
     }
   }
+}
+const cancelled = (): ErrorEvent => ({
+  type: "error",
+  message: "Run cancelled",
+  error_type: "cancelled",
+  retryable: false,
+});
+const assistantErrorTypes: Partial<Record<SDKAssistantMessageError, string>> = {
+  authentication_failed: "authentication_failed",
+  verification_required: "authentication_failed",
+  cloud_credential_error: "authentication_failed",
+  oauth_org_not_allowed: "permission_denied",
+  account_on_hold: "permission_denied",
+  billing_error: "billing_error",
+  rate_limit: "transient_api_error",
+  overloaded: "transient_api_error",
+  server_error: "transient_api_error",
+  invalid_request: "invalid_request",
+  model_not_found: "model_not_found",
+};
+/** Prefer subtype, terminal_reason and the assistant error over HTTP status and text. */
+function resultError(
+  message: SDKResultMessage,
+  assistantError: SDKAssistantMessageError | undefined,
+): ErrorEvent | undefined {
+  const reason = message.terminal_reason;
+  const text =
+    (message.subtype === "success"
+      ? message.result
+      : message.errors.join("\n")) || message.subtype;
+  const error = (error_type: string): ErrorEvent => ({
+    type: "error",
+    message: text,
+    error_type,
+    retryable: error_type === "transient_api_error",
+  });
+  if (reason === "aborted_streaming" || reason === "aborted_tools")
+    return cancelled();
+  if (message.subtype === "error_max_turns" || reason === "max_turns")
+    return error("max_turns");
+  if (
+    message.subtype === "error_max_budget_usd" ||
+    reason === "budget_exhausted"
+  )
+    return error("max_budget");
+  if (
+    message.subtype === "error_max_structured_output_retries" ||
+    reason === "structured_output_retry_exhausted"
+  )
+    return error("structured_output_failed");
+  if (message.stop_reason === "refusal") return error("refused");
+  if (message.subtype === "error_during_execution")
+    return error("execution_error");
+  if (!message.is_error && (!reason || reason === "completed")) return;
+  // The CLI groups these as context limits.
+  if (
+    reason === "prompt_too_long" ||
+    reason === "blocking_limit" ||
+    reason === "rapid_refill_breaker"
+  )
+    return error("context_window_exceeded");
+  const status =
+    message.subtype === "success"
+      ? (message.api_error_status ?? undefined)
+      : undefined;
+  const structured = assistantError && assistantErrorTypes[assistantError];
+  if (structured)
+    return error(
+      structured === "authentication_failed" && status === 403
+        ? "permission_denied"
+        : structured,
+    );
+  if (!message.is_error) return error("execution_error");
+  const classified = classify(text, "execution_error", status);
+  // An API error without an HTTP status or a recognizable message is a dropped connection.
+  return status === undefined &&
+    classified.error_type === "execution_error" &&
+    (!reason || reason === "api_error" || reason === "completed")
+    ? error("transient_api_error")
+    : classified;
 }
 function usageEvent(
   message: SDKResultMessage,
