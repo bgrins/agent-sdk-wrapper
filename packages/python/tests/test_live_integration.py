@@ -182,7 +182,10 @@ async def test_live_callable_tools(live_provider: LiveProvider) -> None:
         provider=live_provider.provider,
         model=live_provider.model,
         tools=[live_add, live_double],
-        system_prompt="Use the provided tools when arithmetic is requested.",
+        system_prompt=(
+            "Use the provided add and double tools for arithmetic; find them with tool "
+            "search if they are not listed. Never use the shell."
+        ),
         max_retries=0,
     )
 
@@ -272,7 +275,10 @@ async def test_live_external_mcp(live_provider: LiveProvider) -> None:
         model=live_provider.model,
         mcp_servers=[server],
         allowed_tools=["mcp__brief_tools__read_brief"],
-        system_prompt="Use available MCP tools when asked to inspect a brief.",
+        system_prompt=(
+            "Use the read_brief MCP tool when asked to inspect a brief; find it with tool "
+            "search if it is not listed. Never use the shell."
+        ),
         max_retries=0,
     )
 

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+try:
+    # mcp >= 2 renamed FastMCP to MCPServer.
+    from mcp.server.mcpserver import MCPServer as _Server
+except ImportError:  # mcp < 2
+    from mcp.server.fastmcp import FastMCP as _Server
 
-server = FastMCP("brief_tools")
+server = _Server("brief_tools")
 
 
 @server.tool(structured_output=False)
