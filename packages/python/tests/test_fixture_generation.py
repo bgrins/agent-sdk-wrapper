@@ -153,6 +153,8 @@ def test_live_fixture_promotion_selection_ignores_generic_provider_env(monkeypat
 
 
 def test_live_fixture_promotion_models_ignore_generic_model_env(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.setenv("PROVIDER", "codex")
     monkeypatch.setenv("MODEL", "claude-haiku-4-5")
 
