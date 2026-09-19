@@ -265,7 +265,7 @@ test("Codex truncated streams fail; signal exits throw without retrying", async 
   await assert.rejects(killed.agent.run("killed"), ProcessTerminatedError);
   assert.equal(killed.clients.length, 1);
 });
-test("closing a Codex stream aborts its native signal and closes its iterator", async () => {
+test("closing a Codex stream closes its iterator without aborting the native signal", async () => {
   const { agent, turns, closed } = harness([
     {
       type: "item.completed",
@@ -276,7 +276,8 @@ test("closing a Codex stream aborts its native signal and closes its iterator", 
   for await (const env of agent.stream("close"))
     if (env.event.type === "text") break;
   assert.equal(closed(), 1);
-  assert.equal(turns[0]?.signal?.aborted, true);
+  // The SDK's cleanup kills the child; a later abort would raise an uncaught AbortError.
+  assert.equal(turns[0]?.signal?.aborted, false);
 });
 test("Codex rejects native config that could bypass wrapper guarantees", () => {
   for (const native of [

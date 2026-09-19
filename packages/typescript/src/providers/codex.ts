@@ -122,10 +122,14 @@ export class CodexAdapter implements ProviderAdapter {
     req: ResolvedRequest,
     context: ProviderContext,
   ): AsyncGenerator<ProviderEvent> {
+    // SDK cleanup removes the child's listeners before killing it, so an abort
+    // after cleanup raises an unhandled AbortError. Only the caller's signal
+    // aborts, and `finally` detaches it before closing the native iterator.
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     req.signal?.addEventListener("abort", onAbort, { once: true });
     if (req.signal?.aborted) abort.abort();
+    let iterator: AsyncIterator<ThreadEvent> | undefined;
     let terminal = false;
     let session = req.sessionId;
     let sawReasoning = false;
@@ -149,7 +153,14 @@ export class CodexAdapter implements ProviderAdapter {
       const { events } = await thread.runStreamed(req.prompt, {
         signal: abort.signal,
       });
-      for await (const event of events) {
+      const source = events[Symbol.asyncIterator]();
+      iterator = source;
+      // No `return`: leaving the loop must not close the SDK iterator before
+      // `finally` detaches the caller's signal.
+      const frames = {
+        [Symbol.asyncIterator]: () => ({ next: () => source.next() }),
+      };
+      for await (const event of frames) {
         context.onNativeEvent(event);
         const raw = req.includeRaw
           ? { raw: event as unknown as Record<string, unknown> }
@@ -261,8 +272,8 @@ export class CodexAdapter implements ProviderAdapter {
     } catch (cause) {
       throw nativeError(cause);
     } finally {
-      abort.abort();
       req.signal?.removeEventListener("abort", onAbort);
+      await iterator?.return?.(); // The SDK's cleanup terminates a running child.
     }
   }
 }
