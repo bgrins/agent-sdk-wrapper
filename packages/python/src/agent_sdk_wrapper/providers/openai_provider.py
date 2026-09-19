@@ -36,7 +36,7 @@ from ..events import (
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
 from ..request import RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
-from ..tools import CODEX_TOOL_SERVER, tool_description, tool_name
+from ..tools import CODEX_TOOL_SERVER, tool_description, tool_name, validate_tool_names
 from .base import ProviderAdapter
 
 _THREAD_RESUME_OPTION_KEYS = {
@@ -247,7 +247,11 @@ async def _stream_turn(
 
     baseline = _UsageBaseline() if baseline is None else baseline
     provider_log = ProviderEventLogger(
-        "openai", req.artifacts_dir, req.on_provider_event
+        "openai",
+        req.artifacts_dir,
+        req.on_provider_event,
+        run_id=req.run_id,
+        attempt=req.attempt,
     )
     text_delta_parts: dict[str | None, list[str]] = {}
     thinking_delta_parts: dict[str | None, list[str]] = {}
@@ -373,6 +377,7 @@ async def _stream_turn(
 
 def _validate_supported(req: RunRequest) -> None:
     normalize_effort_for_provider("openai", req.effort)
+    validate_tool_names(req.tools)
     unsupported: list[str] = []
     if req.max_turns is not None and req.max_turns < 1:
         unsupported.append("max_turns < 1")

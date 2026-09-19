@@ -2,7 +2,7 @@
   {
     "run_id": "contract-success",
     "provider": "openai",
-    "model": "gpt-test",
+    "model": "gpt-test-2026",
     "status": "success",
     "ended_reason": "success",
     "final_text": "Hello world",
@@ -39,7 +39,8 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "session_info",
-          "id": "session-contract"
+          "id": "session-contract",
+          "model": "gpt-test-2026"
         }
       },
       {
@@ -83,7 +84,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "Hello "
+          "text": "Checking the result."
         }
       },
       {
@@ -92,7 +93,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "world"
+          "text": "Hello world"
         }
       },
       {
@@ -218,7 +219,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "Hello "
+          "text": "Checking the result."
         }
       },
       {
@@ -227,7 +228,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "world"
+          "text": "Hello world"
         }
       },
       {

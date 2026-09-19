@@ -7,21 +7,39 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import types
 import typing
 from collections.abc import Callable
 from typing import Any
 
+from .errors import ConfigError
 from .events import _jsonable
 
 ANTHROPIC_TOOL_SERVER = "agent_sdk_wrapper_tools"
 CODEX_TOOL_SERVER = "agent_sdk_wrapper_tools"
 TOOL_DESCRIPTION_ATTR = "__agent_sdk_wrapper_tool_description__"
 TOOL_NAME_ATTR = "__agent_sdk_wrapper_tool_name__"
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def tool_name(fn: Callable[..., Any]) -> str:
     return getattr(fn, TOOL_NAME_ATTR, None) or getattr(fn, "__name__", "tool")
+
+
+def validate_tool_names(callables: list[Callable[..., Any]]) -> None:
+    """Reject names the provider APIs refuse and duplicates they would shadow."""
+
+    seen: set[str] = set()
+    for fn in callables:
+        name = tool_name(fn)
+        if not _TOOL_NAME_RE.fullmatch(name):
+            raise ConfigError(
+                f"tool name {name!r} must be 1-64 letters, digits, '_' or '-'"
+            )
+        if name in seen:
+            raise ConfigError(f"duplicate tool name {name!r}")
+        seen.add(name)
 
 
 def tool_description(fn: Callable[..., Any]) -> str:

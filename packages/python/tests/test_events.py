@@ -296,8 +296,8 @@ def test_aggregate_via_fake_provider(monkeypatch, tmp_path):
         name = "openai"
 
         async def stream(self, req):  # type: ignore[override]
-            yield Text(text="Hello ")
-            yield Text(text="world")
+            yield Text(text="Checking.")
+            yield Text(text="Hello world")
             yield ToolCall(id="t1", name="echo", input={"x": 1})
             yield SessionInfo(id="sess-1")
             yield Usage(

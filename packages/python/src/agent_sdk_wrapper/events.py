@@ -194,10 +194,14 @@ class Usage(_EventBase):
 
 @dataclass
 class SessionInfo(_EventBase):
-    """An underlying provider session/thread identifier."""
+    """An underlying provider session/thread identifier.
+
+    ``model`` is the model the runtime reports, which can differ from the request.
+    """
 
     type: ClassVar[str] = "session_info"
     id: str = ""
+    model: str | None = None
 
 
 @dataclass
@@ -283,7 +287,11 @@ class EventEnvelope:
 
 @dataclass
 class RunResult:
-    """The collected run result."""
+    """The collected run result.
+
+    ``final_text`` is the last assistant message. ``model`` is the model the
+    runtime reported, falling back to the requested model.
+    """
 
     run_id: str
     provider: str

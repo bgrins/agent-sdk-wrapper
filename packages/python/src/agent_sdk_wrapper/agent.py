@@ -13,6 +13,7 @@ from .artifacts import (
     ProviderEventCallback,
     collect_side_files,
     normalize_artifacts_dir,
+    provider_events_file_for,
     trace_file_for,
     write_manifest,
     write_result_artifact,
@@ -190,6 +191,8 @@ class Agent:
         raise_on_error = bool(overrides.get("raise_on_error", self.raise_on_error))
 
         run_id = uuid.uuid4().hex
+        req.run_id = run_id
+        _clear_provider_events(artifacts_dir)
         writer = TraceWriter(trace_path)
         seq = _SeqGen()
         loop_start = asyncio.get_event_loop().time()
@@ -244,6 +247,7 @@ class Agent:
 
             attempt = 0
             while True:
+                req.attempt = attempt
                 attempt_events = []
                 attempt_had_events = False
                 attempt_error_msg: str | None = None
@@ -470,7 +474,9 @@ class Agent:
         on_event: Callable[[EventEnvelope], None] | None,
     ) -> AsyncIterator[EventEnvelope]:
         run_id = uuid.uuid4().hex
+        req.run_id = run_id
         artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
+        _clear_provider_events(artifacts_dir)
         trace_path = _resolve_trace_path(trace_path, artifacts_dir)
         writer = TraceWriter(trace_path)
         seq = _SeqGen()
@@ -645,6 +651,11 @@ def _as_str(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
+def _clear_provider_events(artifacts_dir: Path | None) -> None:
+    if artifacts_dir is not None:
+        provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
+
+
 def _resolve_trace_path(trace_path: Any, artifacts_dir: Path | None) -> str | Path | None:
     if trace_path is not None:
         return trace_path
@@ -668,16 +679,17 @@ def _ended_reason_from_error_type(error_type: str | None) -> RunEndedReason:
 
 class _ResultState:
     def __init__(self) -> None:
-        self.text_parts: list[str] = []
+        self.final_text = ""
         self.structured: Any = None
         self.usage: TokenUsage | None = None
         self.cost: float | None = None
         self.session_id: str | None = None
+        self.model: str | None = None
 
     def record(self, env: EventEnvelope) -> None:
         ev = env.event
         if isinstance(ev, Text):
-            self.text_parts.append(ev.text)
+            self.final_text = ev.text
         elif isinstance(ev, Usage):
             self.usage = ev.usage if self.usage is None else self.usage + ev.usage
             if ev.cost_usd is not None:
@@ -686,6 +698,8 @@ class _ResultState:
             self.structured = ev.value
         elif isinstance(ev, SessionInfo):
             self.session_id = ev.id
+            if ev.model:
+                self.model = ev.model
 
     def to_result(
         self,
@@ -703,10 +717,10 @@ class _ResultState:
         return RunResult(
             run_id=run_id,
             provider=provider,
-            model=model,
+            model=self.model or model,
             status=status,
             ended_reason=ended_reason,
-            final_text="".join(self.text_parts),
+            final_text=self.final_text,
             structured_output=self.structured,
             usage=self.usage,
             cost_usd=self.cost,

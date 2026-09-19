@@ -50,7 +50,8 @@ export type ProviderEvent =
       is_error: boolean;
     })
   | (Raw & { type: "usage"; usage: TokenUsage; cost_usd?: number })
-  | { type: "session_info"; id: string }
+  /** `model` is the model the runtime reports, which can differ from the request. */
+  | { type: "session_info"; id: string; model?: string }
   | (Raw & { type: "warning"; message: string })
   | ErrorEvent;
 export type AgentEvent =

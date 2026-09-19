@@ -254,7 +254,10 @@ class RunRequest:
     continue_session: bool = False
     # anthropic: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
     permission_mode: str | None = None
-    # anthropic: which on-disk settings to load. Default [] = none (isolated).
+    # anthropic: which on-disk settings to load. None loads none (isolated).
     setting_sources: list[str] | None = None
     # Escape hatch merged into the backend's native options object.
     extra_options: dict[str, Any] = field(default_factory=dict)
+    # Set by Agent for provider-event logs.
+    run_id: str | None = None
+    attempt: int = 0

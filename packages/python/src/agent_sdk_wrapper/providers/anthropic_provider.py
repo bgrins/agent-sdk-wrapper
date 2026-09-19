@@ -36,7 +36,7 @@ from ..events import (
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
 from ..request import RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
-from ..tools import to_anthropic_tools
+from ..tools import to_anthropic_tools, validate_tool_names
 from .base import ProviderAdapter
 
 _DEFAULT_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
@@ -89,6 +89,7 @@ class AnthropicProvider(ProviderAdapter):
 
     def validate_request(self, req: RunRequest) -> None:
         normalize_effort_for_provider("anthropic", req.effort)
+        validate_tool_names(req.tools)
         active_mcp_servers = [
             server for server in req.mcp_servers if server.enabled is not False
         ]
@@ -214,7 +215,11 @@ class AnthropicProvider(ProviderAdapter):
         # Map tool_use_id to the tool name for result events.
         tool_names: dict[str, str] = {}
         provider_log = ProviderEventLogger(
-            "anthropic", req.artifacts_dir, req.on_provider_event
+            "anthropic",
+            req.artifacts_dir,
+            req.on_provider_event,
+            run_id=req.run_id,
+            attempt=req.attempt,
         )
 
         try:

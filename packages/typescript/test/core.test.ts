@@ -111,8 +111,8 @@ test("constructor defaults, envelopes, streaming collection and usage aggregatio
       openai: fake(async function* (req) {
         seen.push(req);
         yield { type: "session_info", id: "session-1" };
-        yield { type: "text", text: "one " };
-        yield { type: "text", text: "two" };
+        yield { type: "text", text: "draft" };
+        yield { type: "text", text: "one two" };
         yield {
           type: "usage",
           usage: {
@@ -407,7 +407,7 @@ test("shared v1 fixtures produce the same result in Python and TypeScript", asyn
         yield env.event as ProviderEvent;
     });
     const actual = await new Agent(
-      { provider: expected.provider, model: expected.model ?? undefined },
+      { provider: expected.provider, model: started.model },
       { openai: adapter },
     ).run(started.prompt);
     const stable = ({

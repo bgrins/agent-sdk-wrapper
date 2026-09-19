@@ -29,10 +29,18 @@ class ProviderEventEnvelope:
     class_name: str
     message: Any
     raw: Any = dataclasses.field(default=None, repr=False, compare=False)
+    run_id: str | None = None
+    attempt: int = 0
 
     @classmethod
     def from_message(
-        cls, provider: str, sequence: int, message: Any
+        cls,
+        provider: str,
+        sequence: int,
+        message: Any,
+        *,
+        run_id: str | None = None,
+        attempt: int = 0,
     ) -> ProviderEventEnvelope:
         typ = type(message)
         return cls(
@@ -42,10 +50,14 @@ class ProviderEventEnvelope:
             class_name=f"{typ.__module__}.{typ.__qualname__}",
             message=_provider_jsonable(message),
             raw=message,
+            run_id=run_id,
+            attempt=attempt,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "run_id": self.run_id,
+            "attempt": self.attempt,
             "sequence": self.sequence,
             "timestamp": self.timestamp,
             "provider": self.provider,
@@ -95,13 +107,19 @@ def provider_events_file_for(artifacts_dir: str | Path) -> Path:
 
 
 class ProviderEventLogger:
-    """Write provider-native SDK messages before normalized adapter mapping."""
+    """Append provider-native SDK messages before normalized adapter mapping.
+
+    The runner clears the file at run start; each attempt restarts ``sequence``.
+    """
 
     def __init__(
         self,
         provider: str,
         artifacts_dir: str | Path | None,
         on_provider_event: ProviderEventCallback | None = None,
+        *,
+        run_id: str | None = None,
+        attempt: int = 0,
     ) -> None:
         self.provider = provider
         self.path = (
@@ -110,13 +128,19 @@ class ProviderEventLogger:
             else None
         )
         self.on_provider_event = on_provider_event
+        self.run_id = run_id
+        self.attempt = attempt
         self.sequence = 0
 
     def write(self, message: Any) -> None:
         if self.path is None and self.on_provider_event is None:
             return
         envelope = ProviderEventEnvelope.from_message(
-            self.provider, self.sequence, message
+            self.provider,
+            self.sequence,
+            message,
+            run_id=self.run_id,
+            attempt=self.attempt,
         )
         self.sequence += 1
         if self.path is not None:

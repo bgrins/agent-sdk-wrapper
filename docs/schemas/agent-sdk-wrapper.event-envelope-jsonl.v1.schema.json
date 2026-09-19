@@ -173,7 +173,8 @@
       "required": ["type", "id"],
       "properties": {
         "type": { "const": "session_info" },
-        "id": { "type": "string" }
+        "id": { "type": "string" },
+        "model": { "type": "string" }
       }
     },
     "structured_output": {

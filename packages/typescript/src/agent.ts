@@ -260,8 +260,12 @@ export async function collectRun(
     } else if (event.type === "run_started")
       throw new ProviderProtocolError("Duplicate run_started");
     result.events.push(envelope);
-    if (event.type === "text") result.final_text += event.text;
-    if (event.type === "session_info") result.session_id = event.id;
+    // Native SDKs report the last assistant message as the final response.
+    if (event.type === "text") result.final_text = event.text;
+    if (event.type === "session_info") {
+      result.session_id = event.id;
+      if (event.model) result.model = event.model;
+    }
     if (event.type === "error") result.error ??= event.message;
     if (event.type === "usage") {
       result.usage ??= emptyUsage();

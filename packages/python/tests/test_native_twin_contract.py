@@ -30,8 +30,9 @@ async def test_native_twin_shared_result(expected, monkeypatch):
     )
     events = [event_from_dict(env["event"]) for env in expected["events"][1:-1]]
     install_fake_providers(monkeypatch, events=events)
-    result = await Agent(provider=expected["provider"], model=expected["model"]).run(
-        expected["events"][0]["event"]["prompt"]
+    started = expected["events"][0]["event"]
+    result = await Agent(provider=expected["provider"], model=started.get("model")).run(
+        started["prompt"]
     )
     actual = result.to_dict()
     for key in expected.keys() - {"run_id", "duration_ms", "events"}:
