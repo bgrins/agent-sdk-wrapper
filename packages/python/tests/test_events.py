@@ -1038,6 +1038,28 @@ def test_stream_close_closes_provider_iterator(monkeypatch):
     assert asyncio.run(consume()) == [True]
 
 
+def test_stream_raises_config_error_before_iterating(tmp_path):
+    trace_file = tmp_path / "trace.jsonl"
+    agent = Agent(provider="openai", builtin_tools="none", trace_file=trace_file)
+
+    with pytest.raises(ConfigError, match="builtin_tools"):
+        agent.stream("hi")
+    with pytest.raises(ConfigError, match="builtin_tools"):
+        agent.run_sync("hi")
+    assert not trace_file.exists()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"timeout": "30"}, {"timeout": 0}, {"max_retries": -1}, {"max_retries": 1.5}],
+)
+def test_run_rejects_invalid_run_limits(monkeypatch, overrides):
+    install_fake_providers(monkeypatch)
+
+    with pytest.raises(ConfigError, match=next(iter(overrides))):
+        Agent(provider="openai").stream("hi", **overrides)
+
+
 def test_late_config_error_is_recorded_then_raised(monkeypatch, tmp_path):
     async def late(req):
         yield SessionInfo(id="s1")

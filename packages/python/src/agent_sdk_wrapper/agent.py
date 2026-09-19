@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import random
 import time
 import uuid
@@ -270,6 +271,7 @@ class Agent:
     def _prepare(self, prompt: str, overrides: dict[str, Any]) -> _Run:
         _check_overrides(overrides)
         req = self._build_request(prompt, overrides)
+        self._provider.validate_request(req)
         return _Run(
             req=req,
             session_overridden="session_id" in overrides,
@@ -281,6 +283,17 @@ class Agent:
     def _build_request(self, prompt: str, overrides: dict[str, Any]) -> RunRequest:
         def pick(name: str, default: Any) -> Any:
             return overrides[name] if name in overrides else default
+
+        timeout = pick("timeout", self.timeout)
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int | float)
+            or not (timeout > 0 and math.isfinite(timeout))
+        ):
+            raise ConfigError(f"timeout must be a positive number of seconds, got {timeout!r}")
+        max_retries = pick("max_retries", self.max_retries)
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ConfigError(f"max_retries must be a non-negative integer, got {max_retries!r}")
 
         return RunRequest(
             provider=self.provider,
@@ -299,8 +312,8 @@ class Agent:
             ),
             cwd=pick("cwd", self.cwd),
             env=dict(pick("env", self.env)),
-            timeout=pick("timeout", self.timeout),
-            max_retries=int(pick("max_retries", self.max_retries)),
+            timeout=timeout,
+            max_retries=max_retries,
             include_raw=bool(pick("include_raw", self.include_raw)),
             include_events_in_result=bool(
                 pick("include_events_in_result", self.include_events_in_result)
