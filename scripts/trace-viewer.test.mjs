@@ -389,13 +389,10 @@ class FakeNode {
     return this.attributes[name] ?? null;
   }
   addEventListener(type, listener) {
-    (this.listeners[type] ||= []).push(listener);
+    this.listeners[type] = [...(this.listeners[type] || []), listener];
   }
   dispatch(type) {
     for (const listener of this.listeners[type] || []) listener({});
-  }
-  querySelectorAll() {
-    return [];
   }
   find(predicate) {
     for (const node of this.children) {
@@ -462,7 +459,8 @@ async function loadViewer(href) {
   return context;
 }
 
-const visibleTrace = (context) => vm.runInContext("rawTraceText", context);
+const visibleTrace = (context) =>
+  vm.runInContext("shown?.traceText ?? ''", context);
 
 const traceText = (rows) =>
   rows.map((row) => `${JSON.stringify(row)}\n`).join("");
@@ -520,6 +518,11 @@ test("trace-only metadata follows the latest resumed run and sums usage across t
   assert.equal(stats.costLabel, "$0.0300");
   context.trace.at(-1).event.status = "failure";
   assert.equal(metadata().status, "failure");
+  context.trace.push({
+    run_id: "two",
+    event: { type: "session_info", id: "session", model: "resolved-model" },
+  });
+  assert.equal(metadata().model, "resolved-model");
 });
 
 test("polling restores an unchanged trace after a failed manual refresh", async () => {
@@ -740,4 +743,187 @@ test("local artifacts open as plain text rather than pages in the viewer origin"
   vm.runInContext('switchView("files-view")', context);
   assert.equal(types.length, 2);
   for (const type of types) assert.match(type, /^text\/plain/);
+});
+
+test("invalid trace lines are skipped with a visible warning", async () => {
+  const context = await loadViewer();
+  const text =
+    traceText([{ run_id: "n", event: { type: "run_started", prompt: "n" } }]) +
+    'null\n[1]\n"text"\n{"event":5}\nnot json\n' +
+    traceText([
+      { run_id: "n", event: { type: "thinking", text: { summary: "object" } } },
+      { run_id: "n", event: { type: "text", text: "after null" } },
+    ]) +
+    '{"run_id":"n","event":{"type":"te';
+  context.files = [new File([text], "trace.jsonl")];
+  await vm.runInContext("loadFiles(files)", context);
+  assert.equal(vm.runInContext("loadErrorEl.textContent", context), "");
+  assert.equal(vm.runInContext("shown.trace.length", context), 3);
+  const warning = vm.runInContext("loadWarningEl.textContent", context);
+  assert.match(warning, /^Skipped 6 invalid trace lines: /);
+  assert.match(warning, /trace\.jsonl line 2 is not a trace event/);
+  assert.match(
+    evaluate(context, "shown.warnings.at(-1)"),
+    /line 9 is incomplete/,
+  );
+  const conversation = vm.runInContext("conversationEl.textContent", context);
+  assert.match(conversation, /after null/);
+  assert.match(conversation, /"summary":"object"/);
+});
+
+test("the conversation shows every prompt, the session model, run ends and unmatched results", async () => {
+  const context = await loadViewer();
+  const row = (run_id, event) => ({ run_id, event });
+  const rows = [
+    row("a", { type: "run_started", prompt: "first", system_prompt: "sys" }),
+    row("a", { type: "session_info", id: "session-1", model: "resolved" }),
+    row("a", { type: "tool_call", id: "item_0", input: { command: "ls A" } }),
+    row("a", { type: "tool_result", id: "item_0", output: "RESULT-A" }),
+    row("a", { type: "tool_call", id: "item_1", input: { command: "sleep" } }),
+    row("a", { type: "run_finished", status: "cancelled", duration_ms: 1500 }),
+    row("b", { type: "run_started", prompt: "second", system_prompt: "sys" }),
+    row("b", { type: "tool_call", id: "item_1", input: { command: "ls B" } }),
+    row("b", { type: "tool_result", id: "item_1", output: "RESULT-B" }),
+    row("b", { type: "tool_result", id: "missing", output: "ORPHAN" }),
+    row("b", { type: "run_finished", status: "success", duration_ms: 20 }),
+  ];
+  context.files = [new File([traceText(rows)], "trace.jsonl")];
+  await vm.runInContext("loadFiles(files)", context);
+  const items = evaluate(context, "buildConversation(shown.trace)");
+  assert.deepEqual(
+    items.filter((item) => item.role === "user").map((item) => item.text),
+    ["first", "second"],
+  );
+  assert.equal(items.filter((item) => item.kind === "system").length, 1);
+  assert.deepEqual(
+    items
+      .filter((item) => item.kind === "tool")
+      .map((item) => [item.call?.input.command, item.result?.output]),
+    [
+      ["ls A", "RESULT-A"],
+      ["sleep", undefined],
+      ["ls B", "RESULT-B"],
+      [undefined, "ORPHAN"],
+    ],
+  );
+  assert.deepEqual(
+    items
+      .filter((item) => item.kind === "banner")
+      .map((item) => `${item.title} | ${item.body}`),
+    [
+      "Session | id: session-1 · model: resolved",
+      "Run finished: cancelled | 1.5 s",
+      "Run finished: success | 20 ms",
+    ],
+  );
+  const conversation = vm.runInContext("conversationEl.textContent", context);
+  for (const text of ["model: resolved", "ORPHAN", "second", "RESULT-B"])
+    assert.ok(conversation.includes(text), text);
+});
+
+test("polling renders only the active view and appends new lines to it", async () => {
+  const context = await loadViewer();
+  const limit = vm.runInContext("OUTPUT_LIMIT", context);
+  const rawLimit = vm.runInContext("RAW_LIMIT", context);
+  let text = traceText([
+    { run_id: "r", event: { type: "run_started", prompt: "go" } },
+    { run_id: "r", event: { type: "tool_call", id: "t", name: "shell" } },
+  ]);
+  context.fetch = async () => new Response(text);
+  context.run = {
+    runUrl: new URL("http://localhost/results/r/trace.jsonl"),
+    traceRel: "trace.jsonl",
+  };
+  const poll = () =>
+    vm.runInContext("loadRunFromUrl(run, { refresh: true })", context);
+  const conversation = vm.runInContext("conversationEl", context);
+  const timeline = vm.runInContext("timelineEl", context);
+  const raw = vm.runInContext("rawEl", context);
+  const toolState = () =>
+    conversation.children[1].find((node) => node.classes.has("tool-state"))
+      .textContent;
+
+  await vm.runInContext("loadRunFromUrl(run)", context);
+  const prompt = conversation.firstElementChild;
+  assert.equal(toolState(), "pending");
+  assert.equal(timeline.children.length, 0, "Inactive views wait to render");
+
+  const output = "x".repeat(limit * 2);
+  text += traceText([
+    { run_id: "r", event: { type: "tool_result", id: "t", output } },
+    { run_id: "r", event: { type: "text", text: "finished" } },
+  ]);
+  await poll();
+  assert.equal(conversation.firstElementChild, prompt, "Keep existing items");
+  assert.equal(conversation.children.length, 3);
+  assert.equal(toolState(), "done");
+  const pre = conversation.children[1].find(
+    (node) => node.tagName === "pre" && node.textContent.startsWith("x"),
+  );
+  assert.equal(pre.textContent.length, limit);
+  conversation.children[1]
+    .find((node) => node.classes.has("show-all"))
+    .dispatch("click");
+  assert.equal(pre.textContent, output);
+  assert.equal(timeline.children.length, 0);
+
+  vm.runInContext('switchView("timeline-view")', context);
+  assert.equal(timeline.children.length, 4);
+  const firstRow = timeline.firstElementChild;
+  text += traceText([
+    { run_id: "r", event: { type: "text", text: "y".repeat(rawLimit) } },
+  ]);
+  await poll();
+  assert.equal(timeline.firstElementChild, firstRow, "Append timeline rows");
+  assert.equal(timeline.children.length, 5);
+
+  vm.runInContext('switchView("raw-view")', context);
+  assert.equal(raw.textContent, text.slice(0, rawLimit));
+  vm.runInContext("rawMoreButton", context).dispatch("click");
+  assert.equal(raw.textContent, text);
+  text += traceText([{ run_id: "r", event: { type: "run_finished" } }]);
+  await poll();
+  assert.equal(raw.textContent, text);
+  assert.equal(vm.runInContext("rawMoreButton.hidden", context), true);
+});
+
+test("a click during a poll never shows the previous run as the selection", async () => {
+  const context = await loadViewer(
+    "http://localhost/docs/trace-viewer.html?index=/api/runs",
+  );
+  let release;
+  let requestsForB = 0;
+  context.fetch = async (url) => {
+    if (url.pathname === "/api/runs")
+      return new Response(
+        JSON.stringify([
+          { label: "a", trace: "/results/a/trace.jsonl", updated_at: "2" },
+          { label: "b", trace: "/results/b/trace.jsonl", updated_at: "1" },
+        ]),
+      );
+    const run = url.pathname.split("/")[2];
+    if (run === "a")
+      return new Response(
+        traceText([{ run_id: "a", event: { type: "text", text: "RUN A" } }]),
+      );
+    requestsForB += 1;
+    if (requestsForB > 1) return new Response("Unavailable", { status: 503 });
+    await new Promise((resolve) => {
+      release = resolve;
+    });
+    return new Response(
+      traceText([{ run_id: "b", event: { type: "text", text: "RUN B" } }]),
+    );
+  };
+  await vm.runInContext("discoverResults()", context);
+  assert.match(visibleTrace(context), /RUN A/);
+  const click = vm.runInContext(
+    "followLatest = false; loadRunFromUrl(discoveredRuns[1])",
+    context,
+  );
+  await vm.runInContext("discoverResults()", context);
+  release();
+  await click;
+  assert.doesNotMatch(visibleTrace(context), /RUN A/);
+  assert.match(vm.runInContext("loadErrorEl.textContent", context), /503/);
 });

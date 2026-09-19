@@ -284,6 +284,21 @@
       display: block;
     }
 
+    .warning-banner {
+      border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+      background: color-mix(in srgb, var(--warn) 10%, white);
+      color: #8a4b00;
+    }
+
+    .show-all {
+      margin: 6px 0 0;
+    }
+
+    .msg .show-all,
+    .banner .show-all {
+      margin: 0 14px 10px;
+    }
+
     .result-text {
       margin: 0;
       max-height: 260px;
@@ -1194,6 +1209,7 @@
             <div class="empty">No trace loaded.</div>
           </div>
           <div id="load-error" class="error-banner" aria-hidden="true"></div>
+          <div id="load-warning" class="error-banner warning-banner" aria-hidden="true"></div>
           <div id="result"></div>
         </section>
 
@@ -1236,6 +1252,7 @@
             </div>
           </div>
           <pre id="raw" class="raw"><span class="empty">No trace loaded.</span></pre>
+          <button id="rawMore" class="button show-all" type="button" hidden></button>
         </section>
       </div>
     </div>
@@ -1260,21 +1277,41 @@
     const workspaceEl = document.querySelector(".trace-workspace");
     const rawEl = document.querySelector("#raw");
     const rawMetaEl = document.querySelector("#rawMeta");
+    const rawMoreButton = document.querySelector("#rawMore");
     const copyRawButton = document.querySelector("#copyRaw");
     const runBadgesEl = document.querySelector("#runBadges");
     const runIdentEl = document.querySelector("#runIdent");
     const runFilterEl = document.querySelector("#runFilter");
     const loadErrorEl = document.querySelector("#load-error");
+    const loadWarningEl = document.querySelector("#load-warning");
     const tabButtons = [...document.querySelectorAll(".tab-btn")];
     const RESULTS_SIDEBAR_STORAGE_KEY = "agent-sdk-wrapper.trace-viewer.resultsCollapsed";
+    // Longer values render truncated behind a "Show all" button.
+    const OUTPUT_LIMIT = 2000;
+    const MESSAGE_LIMIT = 50000;
+    const RAW_LIMIT = 256 * 1024;
+    const viewRenderers = {
+      "conversation-view": renderConversation,
+      "timeline-view": renderTimeline,
+      "events-view": renderEvents,
+      "files-view": renderFilesView,
+      "raw-view": renderRaw,
+    };
     let objectUrls = [];
     let discoveredRuns = [];
     let activeRunUrl = "";
     let followLatest = true;
     let discovering = false;
     let loadVersion = 0;
-    let loadedContent = "";
     let renderedRuns = "";
+    // The trace on screen. Views render it lazily when their tab is active.
+    let shown = null;
+    let traceGeneration = 0;
+    let activeView = "conversation-view";
+    const staleViews = new Set();
+    const renderedRows = new Map();
+    let rawState = null;
+    let rawExpanded = false;
 
     applyResultsSidebarState(loadResultsSidebarCollapsed());
     artifactInput.addEventListener("change", () => loadFiles([...artifactInput.files]));
@@ -1294,6 +1331,10 @@
       if (autoRefresh.checked) discoverResults();
     });
     copyRawButton.addEventListener("click", copyRawTrace);
+    rawMoreButton.addEventListener("click", () => {
+      rawExpanded = true;
+      renderRaw();
+    });
     runFilterEl.addEventListener("input", () => renderRuns(discoveredRuns));
     tabButtons.forEach((button) => {
       button.addEventListener("click", () => switchView(button.dataset.view));
@@ -1335,7 +1376,7 @@
           setResultsStatus(`Found ${discoveredRuns.length} result run(s).${scanned}`);
           const selected = followLatest ? discoveredRuns[0]
             : discoveredRuns.find((run) => run.runUrl.href === activeRunUrl) || discoveredRuns[0];
-          await loadRunFromUrl(selected, { refresh: !force && selected.runUrl.href === activeRunUrl });
+          await loadRunFromUrl(selected, { refresh: !force });
         } else {
           setResultsStatus(`Waiting for traces.${scanned}`);
         }
@@ -1494,44 +1535,47 @@
 
     async function loadRunFromUrl(run, { refresh = false } = {}) {
       const version = ++loadVersion;
-      clearObjectUrls();
-      setLoadError("");
+      // A poll can race a click; only the run on screen refreshes in place.
+      refresh = refresh && shown?.runUrl === run.runUrl.href;
+      if (!refresh) {
+        clearObjectUrls();
+        setLoadError("");
+      }
       activeRunUrl = run.runUrl.href;
       renderRuns(discoveredRuns);
 
       try {
-        const manifest = run.manifestUrl ? await fetchJson(run.manifestUrl, run.manifestUrl.pathname) : null;
+        const manifest = run.manifestUrl
+          ? objectJson(await fetchJson(run.manifestUrl, run.manifestUrl.pathname), run.manifestUrl.pathname)
+          : null;
         const files = artifactFiles(manifest);
         const traceRel = files.trace || run.traceRel || "trace.jsonl";
-        const resultRel = files.result || null;
         const traceUrl = runFileUrl(traceRel, run.runUrl);
-        const resultUrl = resultRel ? runFileUrl(resultRel, run.runUrl) : null;
+        const resultUrl = files.result ? runFileUrl(files.result, run.runUrl) : null;
         const traceText = await fetchText(traceUrl, traceUrl.pathname);
-        const trace = parseTrace(traceText, traceRel);
-        const result = resultUrl ? await fetchJson(resultUrl, resultUrl.pathname) : null;
+        const result = resultUrl
+          ? objectJson(await fetchJson(resultUrl, resultUrl.pathname), resultUrl.pathname)
+          : null;
         if (version !== loadVersion) return;
-        const content = JSON.stringify([traceText, manifest, result]);
-        if (refresh && content === loadedContent) return;
-        loadedContent = content;
+        setLoadError("");
+        const sidecars = JSON.stringify([manifest, result, traceRel]);
+        if (refresh && traceText === shown.traceText && sidecars === shown.sidecars) return;
         const scroll = workspaceEl.scrollTop;
         const atBottom = workspaceEl.scrollHeight - workspaceEl.clientHeight - scroll < 40;
-        const openDetails = [...workspaceEl.querySelectorAll("details")].map((node) => node.open);
 
-        run.manifest = { ...traceMetadata(trace), ...manifest };
+        showTrace({
+          runUrl: run.runUrl.href,
+          traceText,
+          path: traceRel,
+          manifest,
+          result,
+          sidecars,
+          source: { runUrl: run.runUrl, traceRel },
+        }, refresh ? shown : null);
+        run.manifest = { ...traceMetadata(shown.trace), ...manifest };
         renderRuns(discoveredRuns);
-        renderSummary(manifest, result, trace);
-        renderResult(result, trace);
-        renderConversation(trace);
-        renderTimeline(trace);
-        renderEvents(trace);
-        renderServerFiles(manifest, run.runUrl, traceRel);
-        renderRaw(traceText);
-        if (refresh) {
-          [...workspaceEl.querySelectorAll("details")].forEach((node, index) => {
-            if (openDetails[index] !== undefined) node.open = openDetails[index];
-          });
-          workspaceEl.scrollTop = atBottom ? workspaceEl.scrollHeight : scroll;
-        } else resetWorkspaceScroll();
+        if (refresh) workspaceEl.scrollTop = atBottom ? workspaceEl.scrollHeight : scroll;
+        else resetWorkspaceScroll();
       } catch (error) {
         if (version !== loadVersion) return;
         if (!refresh) renderEmpty();
@@ -1578,6 +1622,11 @@
       }
     }
 
+    function objectJson(value, label) {
+      if (value === null || isObject(value)) return value;
+      throw new Error(`Could not parse ${label}: expected a JSON object`);
+    }
+
     function isObject(value) {
       return value !== null && typeof value === "object" && !Array.isArray(value);
     }
@@ -1585,7 +1634,6 @@
     async function loadFiles(files) {
       const version = ++loadVersion;
       autoRefresh.checked = false;
-      loadedContent = "";
       clearObjectUrls();
       setLoadError("");
       activeRunUrl = "";
@@ -1601,22 +1649,21 @@
         const manifestFile = findFile(byPath, "manifest.json");
         const manifest = manifestFile ? await readJson(manifestFile) : null;
         const entries = artifactFiles(manifest);
-        const traceRel = entries.trace || "trace.jsonl";
-        const resultRel = entries.result || "result.json";
-        const traceFile = findFile(byPath, traceRel) || findTraceByExtension(byPath);
-        const resultFile = findFile(byPath, resultRel);
+        const traceFile = findFile(byPath, entries.trace || "trace.jsonl") || findTraceByExtension(byPath);
+        const resultFile = findFile(byPath, entries.result || "result.json");
         const result = resultFile ? await readJson(resultFile) : null;
         const traceText = traceFile ? await traceFile.text() : "";
-        const trace = traceFile ? parseTrace(traceText, relativeName(traceFile)) : [];
         if (version !== loadVersion) return;
 
-        renderSummary(manifest, result, trace);
-        renderResult(result, trace);
-        renderConversation(trace);
-        renderTimeline(trace);
-        renderEvents(trace);
-        renderFiles(manifest, byPath);
-        renderRaw(traceText);
+        showTrace({
+          runUrl: "",
+          traceText,
+          path: traceFile ? relativeName(traceFile) : "trace",
+          manifest,
+          result,
+          sidecars: "",
+          source: { byPath },
+        }, null);
         resetWorkspaceScroll();
       } catch (error) {
         if (version !== loadVersion) return;
@@ -1659,24 +1706,82 @@
     }
 
     async function readJson(file) {
-      try {
-        return JSON.parse(await file.text());
-      } catch (error) {
-        throw new Error(`Could not parse ${relativeName(file)}: ${error.message}`);
-      }
+      return objectJson(parseJson(await file.text(), relativeName(file)), relativeName(file));
     }
 
-    function parseTrace(text, path) {
-      return text
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((line, index) => {
-          try {
-            return JSON.parse(line);
-          } catch (error) {
-            throw new Error(`Could not parse ${path} line ${index + 1}: ${error.message}`);
-          }
-        });
+    // Parse JSONL, skipping lines that are not trace events. `line` continues
+    // numbering when parsing text appended to an earlier parse.
+    function parseTrace(text, path, line = 0) {
+      const rows = [];
+      const warnings = [];
+      let lines = 0;
+      for (let start = 0; start < text.length;) {
+        const newline = text.indexOf("\n", start);
+        const end = newline === -1 ? text.length : newline;
+        const source = text.slice(start, end).trim();
+        start = end + 1;
+        line += 1;
+        if (!source) continue;
+        lines += 1;
+        let row;
+        try {
+          row = JSON.parse(source);
+        } catch (error) {
+          // A copy of a live trace can end mid-line.
+          warnings.push(newline === -1
+            ? `${path} line ${line} is incomplete`
+            : `${path} line ${line}: ${error.message}`);
+          continue;
+        }
+        if (isObject(row) && isObject(row.event)) rows.push(row);
+        else warnings.push(`${path} line ${line} is not a trace event`);
+      }
+      return { rows, warnings, lines, line };
+    }
+
+    function showTrace(next, previous) {
+      // A growing trace only parses and renders its new lines.
+      const grown = previous?.path === next.path &&
+        previous.traceText.endsWith("\n") &&
+        next.traceText.startsWith(previous.traceText);
+      if (grown) {
+        const added = next.traceText.slice(previous.traceText.length);
+        const parsed = parseTrace(added, next.path, previous.line);
+        for (const row of parsed.rows) previous.trace.push(row);
+        shown = {
+          ...previous,
+          ...next,
+          warnings: previous.warnings.concat(parsed.warnings),
+          lines: previous.lines + parsed.lines,
+          line: parsed.line,
+          bytes: previous.bytes + byteLength(added),
+        };
+      } else {
+        const parsed = parseTrace(next.traceText, next.path);
+        rawExpanded = false;
+        shown = {
+          ...next,
+          generation: ++traceGeneration,
+          trace: parsed.rows,
+          warnings: parsed.warnings,
+          lines: parsed.lines,
+          line: parsed.line,
+          bytes: byteLength(next.traceText),
+        };
+      }
+      renderSummary(shown.manifest, shown.result, shown.trace);
+      renderResult(shown.result, shown.trace);
+      setLoadWarning(shown.warnings);
+      for (const view of Object.keys(viewRenderers)) staleViews.add(view);
+      renderActiveView();
+    }
+
+    function renderActiveView() {
+      if (shown && staleViews.delete(activeView)) viewRenderers[activeView]();
+    }
+
+    function byteLength(text) {
+      return new Blob([text]).size;
     }
 
     function traceMetadata(trace) {
@@ -1684,8 +1789,11 @@
       const current = started ? trace.filter((row) => row.run_id === started.run_id) : trace;
       const finished = current.findLast((row) => row.event?.type === "run_finished")?.event;
       const durations = trace.filter((row) => row.event?.type === "run_finished" && Number.isFinite(row.event.duration_ms));
+      const reported = current.findLast((row) => row.event?.type === "session_info" && row.event.model);
       return {
         ...started?.event,
+        // Prefer the model the runtime reported over the requested one.
+        model: reported?.event.model || started?.event.model,
         run_id: started?.run_id,
         status: finished?.status || (started ? "running" : "unknown"),
         ended_reason: finished?.ended_reason,
@@ -1720,7 +1828,7 @@
       runBadgesEl.replaceChildren(...badges);
 
       const identParts = [];
-      const runId = metadata.run_id || "";
+      const runId = textOf(metadata.run_id);
       if (runId) identParts.push(["run", runId.slice(0, 8), runId]);
       if (metadata.session_id) {
         identParts.push(["session", metadata.session_id, metadata.session_id]);
@@ -1775,8 +1883,8 @@
         if (event.type === "tool_call") toolCalls += 1;
         if (event.type !== "usage") continue;
         sawUsageEvent = true;
-        for (const [key, value] of Object.entries(event.usage || {})) {
-          totals[key] = (totals[key] || 0) + value;
+        for (const [key, value] of Object.entries(isObject(event.usage) ? event.usage : {})) {
+          if (typeof value === "number") totals[key] = (totals[key] || 0) + value;
         }
         if (typeof event.cost_usd === "number") eventCost = (eventCost || 0) + event.cost_usd;
       }
@@ -1851,20 +1959,14 @@
 
       const nodes = [];
       if (result.final_text) {
-        const text = document.createElement("pre");
-        text.className = "result-text";
-        text.textContent = result.final_text;
-        nodes.push(text);
+        nodes.push(capped("pre", "result-text", textOf(result.final_text), MESSAGE_LIMIT));
       } else if (result.error) {
         const error = document.createElement("div");
         error.className = "status-failure";
-        error.textContent = result.error;
+        error.textContent = textOf(result.error);
         nodes.push(error);
       } else {
-        const empty = document.createElement("div");
-        empty.className = "empty";
-        empty.textContent = "Result has no final text.";
-        nodes.push(empty);
+        nodes.push(emptyNode("Result has no final text."));
       }
 
       if (result.structured_output !== null && result.structured_output !== undefined) {
@@ -1874,154 +1976,198 @@
       resultEl.replaceChildren(...nodes);
     }
 
-    function renderConversation(trace) {
-      const items = buildConversation(trace);
+    function renderConversation() {
+      const items = buildConversation(shown.trace, shown.generation);
       if (!items.length) {
-        conversationEl.innerHTML = '<div class="empty">No trace loaded.</div>';
+        conversationEl.replaceChildren(emptyNode("No trace loaded."));
         return;
       }
-      conversationEl.replaceChildren(...items.map(renderConversationItem));
+      reconcile(conversationEl, items, renderConversationItem);
     }
 
-    function buildConversation(trace) {
-      const results = new Map();
-      for (const envelope of trace) {
-        const event = envelope.event || {};
-        if (event.type === "tool_result" && event.id) {
-          results.set(event.id, event);
+    // Keep nodes whose key is unchanged so polling appends instead of rebuilding.
+    function reconcile(container, items, render) {
+      const existing = new Map();
+      for (let node = container.firstElementChild; node; node = node.nextElementSibling) {
+        if (node.dataset.key) existing.set(node.dataset.key, node);
+      }
+      let cursor = container.firstElementChild;
+      for (const item of items) {
+        let node = existing.get(item.key);
+        if (node) {
+          existing.delete(item.key);
+        } else {
+          node = render(item);
+          node.dataset.key = item.key;
         }
+        if (node === cursor) cursor = cursor.nextElementSibling;
+        else container.insertBefore(node, cursor);
       }
+      while (cursor) {
+        const next = cursor.nextElementSibling;
+        cursor.remove();
+        cursor = next;
+      }
+    }
 
+    // Item keys change whenever an item's content changes.
+    function buildConversation(trace, generation = 0) {
       const items = [];
+      // Tool ids are only unique within a run.
+      const pendingCalls = new Map();
+      const callKey = (envelope, id) => JSON.stringify([envelope.run_id ?? null, id]);
       let currentMessage = null;
-
-      const started = trace.find((env) => (env.event || {}).type === "run_started");
-      if (started?.event?.system_prompt) {
-        items.push({ kind: "system", text: started.event.system_prompt });
-      }
-      if (started?.event?.prompt) {
-        items.push({ kind: "message", role: "user", text: started.event.prompt });
-      }
+      let systemPrompt = null;
 
       function flushMessage() {
         if (currentMessage && currentMessage.text.trim()) {
+          currentMessage.key = `${generation}:${currentMessage.first}-${currentMessage.last}`;
           items.push(currentMessage);
         }
         currentMessage = null;
       }
 
-      for (const envelope of trace) {
+      trace.forEach((envelope, index) => {
         const event = envelope.event || {};
-        if (event.type === "thinking" && !(event.text || "").trim()) {
+        const key = `${generation}:${index}`;
+        const text = textOf(event.text);
+        if (event.type === "thinking" && !text.trim()) {
           flushMessage();
           items.push({
             kind: "note",
+            key,
             label: "Thinking",
             text: event.redacted_bytes
-              ? `not exposed — ${event.redacted_bytes} bytes redacted`
+              ? `not exposed — ${textOf(event.redacted_bytes)} bytes redacted`
               : "not exposed by the provider",
-            sequence: envelope.sequence,
           });
-          continue;
+          return;
         }
         if (event.type === "text" || event.type === "thinking") {
           const role = event.type === "thinking" ? "thinking" : "assistant";
           if (!currentMessage || currentMessage.role !== role) {
             flushMessage();
-            currentMessage = {
-              kind: "message",
-              role,
-              text: "",
-              sequence: envelope.sequence,
-              timestamp: envelope.timestamp,
-            };
+            currentMessage = { kind: "message", role, text: "", first: index };
           }
-          currentMessage.text += event.text || "";
-          continue;
+          currentMessage.text += text;
+          currentMessage.last = index;
+          return;
         }
 
         flushMessage();
-        if (event.type === "tool_call") {
-          items.push({
-            kind: "tool",
-            call: event,
-            result: event.id ? results.get(event.id) : null,
-            sequence: envelope.sequence,
-            timestamp: envelope.timestamp,
-          });
-        } else if (event.type === "tool_result" && !event.id) {
+        if (event.type === "run_started") {
+          const system = textOf(event.system_prompt);
+          if (system && system !== systemPrompt) {
+            items.push({ kind: "system", key: `${key}:system`, text: system });
+          }
+          systemPrompt = system || systemPrompt;
+          const prompt = textOf(event.prompt);
+          if (prompt) items.push({ kind: "message", key: `${key}:prompt`, role: "user", text: prompt });
+        } else if (event.type === "tool_call") {
+          const item = { kind: "tool", key, call: event, result: null };
+          items.push(item);
+          if (event.id != null) {
+            const calls = pendingCalls.get(callKey(envelope, event.id)) || [];
+            calls.push(item);
+            pendingCalls.set(callKey(envelope, event.id), calls);
+          }
+        } else if (event.type === "tool_result") {
+          const call = event.id != null ? pendingCalls.get(callKey(envelope, event.id))?.shift() : null;
+          if (call) {
+            call.result = event;
+            call.key += `:${index}`;
+          } else {
+            items.push({ kind: "tool", key, call: null, result: event });
+          }
+        } else if (event.type === "session_info") {
           items.push({
             kind: "banner",
-            type: "tool_result",
-            title: "Tool Result",
-            body: stringifyBody(event.output ?? event),
-            sequence: envelope.sequence,
+            key,
+            type: event.type,
+            title: "Session",
+            body: [
+              event.id ? `id: ${textOf(event.id)}` : null,
+              event.model ? `model: ${textOf(event.model)}` : null,
+            ].filter(Boolean).join(" · "),
+          });
+        } else if (event.type === "run_finished") {
+          items.push({
+            kind: "banner",
+            key,
+            type: event.type,
+            title: `Run finished: ${textOf(event.status) || "unknown"}`,
+            body: [
+              event.ended_reason && event.ended_reason !== event.status
+                ? `reason: ${textOf(event.ended_reason)}`
+                : null,
+              formatDuration(event.duration_ms),
+            ].filter(Boolean).join(" · "),
           });
         } else if (event.type === "warning" || event.type === "error") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
             title: event.type,
-            body: event.message || "",
-            sequence: envelope.sequence,
+            body: textOf(event.message),
           });
         } else if (event.type === "agent_updated") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
             title: "Agent",
-            body: event.name || "",
-            sequence: envelope.sequence,
+            body: textOf(event.name),
           });
         } else if (event.type === "subagent_started") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
-            title: `Subagent started${event.name ? ` (${event.name})` : ""}`,
-            body: event.description || event.task_id || "",
-            sequence: envelope.sequence,
+            title: `Subagent started${event.name ? ` (${textOf(event.name)})` : ""}`,
+            body: textOf(event.description || event.task_id),
           });
         } else if (event.type === "subagent_ended") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
-            title: `Subagent ${event.status || "ended"}`,
-            body: event.summary || event.task_id || "",
-            sequence: envelope.sequence,
+            title: `Subagent ${textOf(event.status) || "ended"}`,
+            body: textOf(event.summary || event.task_id),
           });
         } else if (event.type === "context_compacted") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
             title: "Context compacted",
             body: [
-              `trigger: ${event.trigger || "unknown"}`,
+              `trigger: ${textOf(event.trigger) || "unknown"}`,
               event.pre_tokens == null
                 ? null
                 : `pre-compaction tokens: ${event.pre_tokens.toLocaleString()}`,
             ]
               .filter(Boolean)
               .join(", "),
-            sequence: envelope.sequence,
           });
         } else if (event.type === "structured_output") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
             title: "Structured Output",
             body: stringifyBody(event.value),
-            sequence: envelope.sequence,
           });
         } else if (event.type === "usage") {
           items.push({
             kind: "banner",
+            key,
             type: event.type,
             title: "Usage",
             body: stringifyPretty(event.usage || event),
-            sequence: envelope.sequence,
           });
         }
-      }
+      });
       flushMessage();
       return items;
     }
@@ -2043,10 +2189,7 @@
         node.className = "system-prompt";
         const summary = document.createElement("summary");
         summary.textContent = "System prompt";
-        const body = document.createElement("div");
-        body.className = "msg-body";
-        body.textContent = item.text;
-        node.append(summary, body);
+        node.append(summary, capped("div", "msg-body", item.text, MESSAGE_LIMIT));
         return node;
       }
       if (item.kind === "message") {
@@ -2055,10 +2198,7 @@
         const role = document.createElement("div");
         role.className = `msg-role ${item.role}`;
         role.textContent = item.role;
-        const body = document.createElement("div");
-        body.className = "msg-body";
-        body.textContent = item.text;
-        node.append(role, body);
+        node.append(role, capped("div", "msg-body", item.text, MESSAGE_LIMIT));
         return node;
       }
 
@@ -2072,16 +2212,12 @@
       const head = document.createElement("div");
       head.className = "banner-head";
       head.textContent = item.title || "Event";
-      const body = document.createElement("div");
-      body.className = "banner-body";
-      body.textContent = item.body || "";
-      node.append(head, body);
+      node.append(head, capped("div", "banner-body", item.body || "", OUTPUT_LIMIT));
       return node;
     }
 
     function renderToolPanel(item) {
-      const call = item.call || {};
-      const result = item.result || null;
+      const { call, result } = item;
       const node = document.createElement("article");
       node.className = "tool-panel";
       node.dataset.error = String(Boolean(result?.is_error));
@@ -2090,10 +2226,10 @@
       head.className = "tool-header";
       const name = document.createElement("span");
       name.className = "tool-name";
-      name.textContent = call.name || "tool";
+      name.textContent = textOf(call?.name ?? result?.name) || "tool";
       const summary = document.createElement("span");
       summary.className = "tool-summary";
-      summary.textContent = toolSummary(call);
+      summary.textContent = call ? toolSummary(call) : "no matching tool call";
       const state = document.createElement("span");
       state.className = "tool-state";
       state.textContent = result ? (result.is_error ? "error" : "done") : "pending";
@@ -2101,7 +2237,7 @@
 
       const body = document.createElement("div");
       body.className = "tool-body";
-      body.append(toolSection("Input", call.input));
+      if (call) body.append(toolSection("Input", call.input));
       if (result) {
         body.append(toolSection(result.is_error ? "Error" : "Output", result.output));
       }
@@ -2116,9 +2252,7 @@
       const labelEl = document.createElement("div");
       labelEl.className = "tool-label";
       labelEl.textContent = label;
-      const pre = document.createElement("pre");
-      pre.textContent = stringifyPretty(value);
-      section.append(labelEl, pre);
+      section.append(labelEl, capped("pre", "", stringifyPretty(value), OUTPUT_LIMIT));
       return section;
     }
 
@@ -2139,27 +2273,41 @@
       return text.length > 140 ? `${text.slice(0, 137)}...` : text;
     }
 
-    function renderTimeline(trace) {
-      if (!trace.length) {
-        timelineEl.innerHTML = '<div class="empty">No trace loaded.</div>';
-        return;
-      }
-      timelineEl.replaceChildren(...trace.map(renderEvent));
+    function renderTimeline() {
+      renderRows(timelineEl, renderEvent);
     }
 
-    function renderEvents(trace) {
+    function renderEvents() {
+      renderRows(eventsEl, renderRawEvent);
+    }
+
+    function renderRows(container, render) {
+      const { trace } = shown;
       if (!trace.length) {
-        eventsEl.innerHTML = '<div class="empty">No trace loaded.</div>';
+        container.replaceChildren(emptyNode("No trace loaded."));
+        renderedRows.delete(container);
         return;
       }
-      eventsEl.replaceChildren(...trace.map(renderRawEvent));
+      // Rows only append within one trace generation.
+      let rendered = renderedRows.get(container);
+      if (rendered?.trace !== trace) {
+        container.replaceChildren();
+        rendered = { trace, count: 0 };
+        renderedRows.set(container, rendered);
+      }
+      const fragment = document.createDocumentFragment();
+      for (let index = rendered.count; index < trace.length; index++) {
+        fragment.append(render(trace[index]));
+      }
+      container.append(fragment);
+      rendered.count = trace.length;
     }
 
     function renderRawEvent(envelope) {
       const event = envelope.event || {};
       const node = document.createElement("article");
       node.className = "event";
-      node.dataset.type = event.type || "";
+      node.dataset.type = textOf(event.type);
       const head = document.createElement("div");
       head.className = "event-head";
       const title = document.createElement("div");
@@ -2169,9 +2317,7 @@
       meta.className = "event-meta";
       meta.textContent = `#${envelope.sequence} ${shortTime(envelope.timestamp)}`;
       head.append(title, meta);
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(envelope, null, 2);
-      node.append(head, pre);
+      node.append(head, capped("pre", "", JSON.stringify(envelope, null, 2), OUTPUT_LIMIT));
       return node;
     }
 
@@ -2179,7 +2325,7 @@
       const event = envelope.event || {};
       const node = document.createElement("article");
       node.className = "event";
-      node.dataset.type = event.type || "";
+      node.dataset.type = textOf(event.type);
 
       const head = document.createElement("div");
       head.className = "event-head";
@@ -2193,51 +2339,59 @@
       node.append(head);
 
       const body = eventBody(event);
-      if (body) {
-        const bodyEl = document.createElement("div");
-        bodyEl.textContent = body;
-        node.append(bodyEl);
-      }
+      if (body) node.append(capped("div", "", body, OUTPUT_LIMIT));
 
       const details = document.createElement("details");
       const summary = document.createElement("summary");
       summary.textContent = "JSON";
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(envelope, null, 2);
-      details.append(summary, pre);
+      details.append(summary);
+      // Serialize on first open; most rows stay closed.
+      let filled = false;
+      details.addEventListener("toggle", () => {
+        if (!details.open || filled) return;
+        filled = true;
+        details.append(capped("pre", "", JSON.stringify(envelope, null, 2), OUTPUT_LIMIT));
+      });
       node.append(details);
       return node;
     }
 
     function eventTitle(event) {
       if (event.type === "tool_call") {
-        return `tool_call ${event.name || ""}`.trim();
+        return `tool_call ${textOf(event.name)}`.trim();
       }
       if (event.type === "tool_result") {
         return `tool_result${event.is_error ? " error" : ""}`;
       }
       if (event.type === "run_finished") {
-        return `run_finished ${event.status || ""}`.trim();
+        return `run_finished ${textOf(event.status)}`.trim();
       }
       if (event.type === "usage") {
         return "usage";
       }
       if (event.type === "session_info") {
-        return `session_info ${event.id || ""}`.trim();
+        return `session_info ${textOf(event.id)}`.trim();
       }
-      return event.type || "event";
+      return textOf(event.type) || "event";
     }
 
     function eventBody(event) {
-      if (event.text) return event.text;
-      if (event.message) return event.message;
+      if (event.text) return textOf(event.text);
+      if (event.message) return textOf(event.message);
+      if (event.prompt) return textOf(event.prompt);
       if (event.output !== undefined) return stringifyBody(event.output);
       if (event.value !== undefined) return stringifyBody(event.value);
-      if (event.usage) {
+      if (isObject(event.usage)) {
         return `${event.usage.total_tokens ?? "-"} tokens`;
       }
+      if (event.model) return `model: ${textOf(event.model)}`;
       if (event.input) return stringifyBody(event.input);
       return "";
+    }
+
+    function renderFilesView() {
+      if (shown.source.byPath) renderFiles(shown.manifest, shown.source.byPath);
+      else renderServerFiles(shown.manifest, shown.source.runUrl, shown.source.traceRel);
     }
 
     function renderFiles(manifest, byPath) {
@@ -2304,8 +2458,13 @@
       return date.toLocaleTimeString();
     }
 
+    function textOf(value) {
+      if (typeof value === "string") return value;
+      return value === undefined || value === null ? "" : JSON.stringify(value);
+    }
+
     function stringifyBody(value) {
-      return typeof value === "string" ? value : JSON.stringify(value);
+      return typeof value === "string" ? value : textOf(value);
     }
 
     function stringifyPretty(value) {
@@ -2327,30 +2486,40 @@
       return JSON.stringify(value, null, 2);
     }
 
+    // Render text in `tag`, truncated to `limit` characters until expanded.
+    function capped(tag, className, text, limit) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text.length <= limit) {
+        node.textContent = text;
+        return node;
+      }
+      node.textContent = text.slice(0, limit);
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "button show-all";
+      more.textContent = `Show all ${text.length.toLocaleString()} characters`;
+      more.addEventListener("click", () => {
+        node.textContent = text;
+        more.remove();
+      });
+      const wrap = document.createElement("div");
+      wrap.className = "capped";
+      wrap.append(node, more);
+      return wrap;
+    }
+
     function jsonDetails(label, value) {
       const details = document.createElement("details");
       const summary = document.createElement("summary");
       summary.textContent = label;
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(value, null, 2);
-      details.append(summary, pre);
+      details.append(summary, capped("pre", "", JSON.stringify(value, null, 2), OUTPUT_LIMIT));
       return details;
     }
 
-    function jsonBlock(label, value) {
-      const block = document.createElement("div");
-      block.className = "json-block";
-      const labelEl = document.createElement("div");
-      labelEl.className = "json-label";
-      labelEl.textContent = label;
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(value, null, 2);
-      block.append(labelEl, pre);
-      return block;
-    }
-
     function switchView(viewId) {
-      if (!viewId) return;
+      if (!viewRenderers[viewId]) return;
+      activeView = viewId;
       for (const button of tabButtons) {
         const active = button.dataset.view === viewId;
         button.classList.toggle("active", active);
@@ -2359,6 +2528,7 @@
       for (const view of document.querySelectorAll(".view")) {
         view.classList.toggle("active", view.id === viewId);
       }
+      renderActiveView();
       // Reset the shared scroll position when switching tabs.
       resetWorkspaceScroll();
     }
@@ -2369,16 +2539,30 @@
       }
     }
 
+    function emptyNode(text, tag = "div") {
+      const node = document.createElement(tag);
+      node.className = "empty";
+      node.textContent = text;
+      return node;
+    }
+
     function emptyListItem(text) {
-      const li = document.createElement("li");
-      li.className = "empty";
-      li.textContent = text;
-      return li;
+      return emptyNode(text, "li");
     }
 
     function setLoadError(message) {
       loadErrorEl.textContent = message;
       loadErrorEl.setAttribute("aria-hidden", message ? "false" : "true");
+    }
+
+    function setLoadWarning(warnings) {
+      const listed = warnings.slice(0, 3).join("; ");
+      const more = warnings.length > 3 ? `; ${warnings.length - 3} more` : "";
+      const message = warnings.length
+        ? `Skipped ${warnings.length} invalid trace line${warnings.length === 1 ? "" : "s"}: ${listed}${more}.`
+        : "";
+      loadWarningEl.textContent = message;
+      loadWarningEl.setAttribute("aria-hidden", message ? "false" : "true");
     }
 
     function setResultsStatus(message) {
@@ -2408,20 +2592,26 @@
       toggleResultsButton.textContent = collapsed ? "Show Results" : "Hide Results";
     }
 
-    let rawTraceText = "";
-
-    function renderRaw(text) {
+    function renderRaw() {
       // Show the loaded trace text without re-serializing it.
-      rawTraceText = text || "";
-      if (!rawTraceText) {
-        rawEl.innerHTML = '<span class="empty">No trace loaded.</span>';
+      const text = shown?.traceText || "";
+      if (!text) {
+        rawEl.replaceChildren(emptyNode("No trace loaded.", "span"));
         rawMetaEl.textContent = "";
+        rawMoreButton.hidden = true;
+        rawState = null;
         return;
       }
-      rawEl.textContent = rawTraceText;
-      const lines = rawTraceText.split(/\r?\n/).filter(Boolean).length;
-      const bytes = new Blob([rawTraceText]).size;
-      rawMetaEl.textContent = `${lines.toLocaleString()} lines · ${formatBytes(bytes)}`;
+      const visible = rawExpanded ? text.length : Math.min(text.length, RAW_LIMIT);
+      if (rawState?.generation === shown.generation && rawState.visible <= visible) {
+        if (visible > rawState.visible) rawEl.append(text.slice(rawState.visible, visible));
+      } else {
+        rawEl.textContent = text.slice(0, visible);
+      }
+      rawState = { generation: shown.generation, visible };
+      rawMoreButton.hidden = visible === text.length;
+      rawMoreButton.textContent = `Show all ${formatBytes(shown.bytes)}`;
+      rawMetaEl.textContent = `${shown.lines.toLocaleString()} lines · ${formatBytes(shown.bytes)}`;
     }
 
     function formatBytes(bytes) {
@@ -2431,9 +2621,9 @@
     }
 
     async function copyRawTrace() {
-      if (!rawTraceText) return;
+      if (!shown?.traceText) return;
       try {
-        await navigator.clipboard.writeText(rawTraceText);
+        await navigator.clipboard.writeText(shown.traceText);
         flashCopyLabel("Copied");
       } catch {
         flashCopyLabel("Copy failed");
@@ -2448,16 +2638,19 @@
     }
 
     function renderEmpty() {
-      loadedContent = "";
-      summaryEl.innerHTML = '<div class="empty">No trace loaded.</div>';
+      shown = null;
+      staleViews.clear();
+      renderedRows.clear();
+      summaryEl.replaceChildren(emptyNode("No trace loaded."));
       runBadgesEl.replaceChildren();
       runIdentEl.replaceChildren();
       resultEl.replaceChildren();
-      conversationEl.innerHTML = '<div class="empty">No trace loaded.</div>';
-      timelineEl.innerHTML = '<div class="empty">No trace loaded.</div>';
-      eventsEl.innerHTML = '<div class="empty">No trace loaded.</div>';
+      setLoadWarning([]);
+      for (const view of [conversationEl, timelineEl, eventsEl]) {
+        view.replaceChildren(emptyNode("No trace loaded."));
+      }
       filesEl.replaceChildren(emptyListItem("No files loaded."));
-      renderRaw("");
+      renderRaw();
     }
 
     function clearObjectUrls() {
