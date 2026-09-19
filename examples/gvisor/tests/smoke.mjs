@@ -106,7 +106,7 @@ if (["--offline", "--live"].includes(mode)) {
     assert.match(readOutputFile(`${output}/fix.patch`), /milliseconds \/ 10\)/);
   for (const text of [stdout, stderr]) {
     assert.match(text, /forged/);
-    assert.doesNotMatch(text, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+    assert.doesNotMatch(text.replace(/[\t\n]/g, ""), /\p{Cc}/u);
   }
 }
 console.log(

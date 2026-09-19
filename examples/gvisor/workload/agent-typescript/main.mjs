@@ -73,7 +73,7 @@ try {
     // The launcher passes only printable ASCII, like Python's json.dumps output.
     console.log(
       JSON.stringify({ kind: "result", result }).replace(
-        /[^\x00-\x7e]/g,
+        /[^ -~]/g,
         (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
       ),
     );
