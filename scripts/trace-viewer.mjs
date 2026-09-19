@@ -9,19 +9,28 @@ const viewer = fileURLToPath(
 );
 const urlPath = (path) => path.split("/").map(encodeURIComponent).join("/");
 
+export const MAX_DIRECTORIES = 500;
+
 async function listRuns(directory, depth) {
-  const queue = [""];
+  // Scan recently modified directories first so the cap drops the oldest runs.
+  const queue = [{ relative: "", mtime: Infinity }];
   const runs = [];
-  for (let visited = 0; queue.length && visited < 500; visited++) {
-    const relative = queue.shift();
+  for (let visited = 0; queue.length && visited < MAX_DIRECTORIES; visited++) {
+    let newest = 0;
+    for (let index = 1; index < queue.length; index++)
+      if (queue[index].mtime > queue[newest].mtime) newest = index;
+    const { relative } = queue[newest];
+    queue[newest] = queue.at(-1);
+    queue.pop();
     let entries;
     try {
       entries = await readdir(resolve(directory, relative), {
         withFileTypes: true,
       });
     } catch (error) {
-      if (error.code === "ENOENT") continue;
-      throw error;
+      // An unreadable or replaced directory must not hide the other runs.
+      if (!relative && error.code !== "ENOENT") throw error;
+      continue;
     }
     const prefix = relative ? `${relative}/` : "";
     const hasManifest = entries.some(
@@ -32,39 +41,36 @@ async function listRuns(directory, depth) {
         entry.isFile() &&
         (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
     ).length;
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      if (
-        entry.isDirectory() &&
-        depth > 0 &&
-        (!relative || relative.split("/").length < depth)
-      )
-        queue.push(prefix + entry.name);
-      if (
-        !entry.isFile() ||
-        !(hasManifest
-          ? entry.name === "manifest.json"
-          : entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl"))
-      )
-        continue;
-      const path = prefix + entry.name;
-      let info;
-      try {
-        info = await lstat(resolve(directory, path));
-      } catch (error) {
-        if (error.code === "ENOENT") continue;
-        throw error;
-      }
-      if (!info.isFile() || info.nlink !== 1) continue;
-      runs.push({
-        label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
-        trace: hasManifest ? null : `/results/${urlPath(path)}`,
-        manifest: hasManifest ? `/results/${urlPath(path)}` : null,
-        updated_at: info.mtime.toISOString(),
-      });
-    }
+    const descend =
+      depth > 0 && (!relative || relative.split("/").length < depth);
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.name.startsWith(".")) return;
+        const path = prefix + entry.name;
+        const isRun =
+          entry.isFile() &&
+          (hasManifest
+            ? entry.name === "manifest.json"
+            : entry.name === "trace.jsonl" ||
+              entry.name.endsWith(".trace.jsonl"));
+        if (!isRun && !(descend && entry.isDirectory())) return;
+        const info = await lstat(resolve(directory, path)).catch(() => null);
+        if (info?.isDirectory() && !isRun)
+          return queue.push({ relative: path, mtime: info.mtimeMs });
+        if (!isRun || !info?.isFile() || info.nlink !== 1) return;
+        runs.push({
+          label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
+          trace: hasManifest ? null : `/results/${urlPath(path)}`,
+          manifest: hasManifest ? `/results/${urlPath(path)}` : null,
+          updated_at: info.mtime.toISOString(),
+        });
+      }),
+    );
   }
-  return runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  return {
+    runs: runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+    truncated: queue.length > 0,
+  };
 }
 
 // Ancestors must be host-controlled. Depth 1 reads only files in fixed job mounts.
@@ -73,11 +79,12 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
     throw new Error("Trace directory depth must be 0–20");
   directory = resolve(directory);
   return createServer(async (request, response) => {
-    const send = (status, type, body) => {
+    const send = (status, type, body, headers) => {
       response.writeHead(status, {
         "content-type": type,
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
+        ...headers,
       });
       response.end(request.method === "HEAD" ? undefined : body);
     };
@@ -96,14 +103,19 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
         });
         return response.end();
       }
-      if (path === "/docs/trace-viewer.html")
-        return send(200, "text/html; charset=utf-8", await readFile(viewer));
-      if (path === "/api/runs")
+      if (path === "/docs/trace-viewer.html") {
+        const html = await readFile(viewer, "utf8");
+        return send(200, "text/html; charset=utf-8", html);
+      }
+      if (path === "/api/runs") {
+        const { runs, truncated } = await listRuns(directory, depth);
         return send(
           200,
           "application/json",
-          JSON.stringify(await listRuns(directory, depth)),
+          JSON.stringify(runs),
+          truncated ? { "x-runs-truncated": String(MAX_DIRECTORIES) } : {},
         );
+      }
       if (
         !path.startsWith("/results/") ||
         path.split("/").some((part) => part.startsWith(".")) ||

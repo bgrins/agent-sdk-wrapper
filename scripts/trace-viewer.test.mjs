@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import fs, {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { request } from "node:http";
@@ -15,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
-import { createTraceServer } from "./trace-viewer.mjs";
+import { createTraceServer, MAX_DIRECTORIES } from "./trace-viewer.mjs";
 
 test("server discovers new traces and reads updates without exposing files outside the results directory", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "trace-viewer-"));
@@ -86,6 +88,8 @@ test("server discovers new traces and reads updates without exposing files outsi
   });
   assert.equal(blocked, 403);
 
+  await mkdir(join(results, ".cache"));
+  await writeFile(join(results, ".cache", "trace.jsonl"), "{}\n");
   await mkdir(join(results, "custom trace", "logs"), { recursive: true });
   await writeFile(
     join(results, "custom trace", "manifest.json"),
@@ -151,6 +155,74 @@ test("server discovers new traces and reads updates without exposing files outsi
       syncBuiltinESMExports();
     }
   }
+});
+
+function get(base, path, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = request(`${base}/`, { path, headers }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () =>
+        resolve({ status: res.statusCode, headers: res.headers, body }),
+      );
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+async function listen(t, directory, options) {
+  const server = createTraceServer(directory, options);
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+test("run discovery skips unreadable directories and keeps the newest runs when capped", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-discovery-"));
+  const locked = join(root, "locked");
+  t.after(async () => {
+    await chmod(locked, 0o700);
+    await rm(root, { recursive: true, force: true });
+  });
+  const base = await listen(t, root);
+  const count = MAX_DIRECTORIES + 100;
+  const stamp = (index) => new Date(Date.UTC(2026, 0, 1) + index * 60_000);
+  await Promise.all(
+    Array.from({ length: count }, async (_, index) => {
+      // Name order differs from age order, so directory order cannot pass.
+      const age = (index * 7919) % count;
+      const dir = join(root, `run-${String(index).padStart(4, "0")}`);
+      await mkdir(dir);
+      await writeFile(join(dir, "trace.jsonl"), "{}\n");
+      await utimes(join(dir, "trace.jsonl"), stamp(age), stamp(age));
+      await utimes(dir, stamp(age), stamp(age));
+    }),
+  );
+  await mkdir(join(locked, "hidden"), { recursive: true });
+  await chmod(locked, 0);
+  const response = await get(base, "/api/runs");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["x-runs-truncated"], String(MAX_DIRECTORIES));
+  const runs = JSON.parse(response.body);
+  const newest = Array.from({ length: count }, (_, age) =>
+    stamp(age).toISOString(),
+  )
+    .reverse()
+    .slice(0, runs.length);
+  // The root and the locked directories use part of the directory budget.
+  assert.ok(runs.length >= MAX_DIRECTORIES - 3);
+  assert.deepEqual(
+    runs.map((run) => run.updated_at),
+    newest,
+  );
 });
 
 function viewerContext(script) {
