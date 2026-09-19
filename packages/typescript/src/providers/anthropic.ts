@@ -204,6 +204,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     let assistantError: SDKAssistantMessageError | undefined;
     let session: string | undefined;
     let sessionModel: string | undefined;
+    // Claude sends one frame per content block; join a message's contiguous text.
+    let pending: { id: string; text: string; raw: Raw } | undefined;
+    const flush = (): ProviderEvent[] => {
+      const text = pending;
+      pending = undefined;
+      return text ? [{ type: "text", text: text.text, ...text.raw }] : [];
+    };
     const names = new Map<string, string>();
     const seen = new Set<string>();
     try {
@@ -241,6 +248,13 @@ export class AnthropicAdapter implements ProviderAdapter {
             "Claude message retractions are not implemented in the v1 event contract; partial output must not be treated as a completed answer",
           );
         if (
+          pending &&
+          (message.type !== "assistant" ||
+            message.parent_tool_use_id ||
+            message.message.id !== pending.id)
+        )
+          yield* flush();
+        if (
           "session_id" in message &&
           message.session_id &&
           !("parent_tool_use_id" in message && message.parent_tool_use_id)
@@ -273,19 +287,25 @@ export class AnthropicAdapter implements ProviderAdapter {
           }
           if (message.aborted) {
             interrupted = true;
+            yield* flush();
             continue; // Truncated content is not a completed text/thinking item.
           }
           // The CLI reports API failures as synthetic assistant text.
           if (message.error || message.message.model === "<synthetic>") {
             assistantError = message.error;
+            yield* flush();
             continue;
           }
           assistantError = undefined;
           for (const block of message.message.content) {
             if (block.type === "text") {
               seenText = true;
-              yield { type: "text", text: block.text, ...raw };
-            } else if (block.type === "thinking") {
+              const text = (pending?.text ?? "") + block.text;
+              pending = { id: message.message.id, text, raw };
+              continue;
+            }
+            yield* flush();
+            if (block.type === "thinking") {
               seenThinking = true;
               yield { type: "thinking", text: block.thinking, ...raw };
             } else if (block.type === "redacted_thinking") {
@@ -357,6 +377,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             "Unexpected partial Claude frames with includePartialMessages disabled",
           );
       }
+      yield* flush();
       throw new ProviderProtocolError("Claude stream ended without a result");
     } catch (cause) {
       throw nativeError(cause);
@@ -367,6 +388,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
   }
 }
+type Raw = { raw?: Record<string, unknown> };
 const cancelled = (): ErrorEvent => ({
   type: "error",
   message: "Run cancelled",
@@ -460,7 +482,7 @@ function toolOutput(content: unknown): string {
 }
 function usageEvent(
   message: SDKResultMessage,
-  raw: { raw?: Record<string, unknown> },
+  raw: Raw,
 ): Extract<ProviderEvent, { type: "usage" }> {
   const usage = emptyUsage();
   const models = Object.values(message.modelUsage);

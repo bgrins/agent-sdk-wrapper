@@ -527,18 +527,6 @@ test("Claude checkRuntime verifies a missing override without a model request", 
   });
   await assert.rejects(agent.checkRuntime(), RuntimeUnavailableError);
 });
-test("Claude stops at its first result, ignoring background-task turns", async () => {
-  const { agent, closed } = harness([
-    assistant([textBlock("launched")]),
-    result({ result: "launched" }),
-    assistant([textBlock("background answer")], {}, { id: "second" }),
-    result({ result: "background answer" }),
-  ]);
-  const run = await agent.run("subagent");
-  assert.equal(run.status, "success");
-  assert.equal(run.final_text, "launched");
-  assert.equal(closed(), 1);
-});
 // Frames captured from the Claude CLI against a local mock API.
 for (const [error, status, reason, message, expected] of [
   [
@@ -640,6 +628,18 @@ test("Claude retries transient failures reported through synthetic messages", as
     run.events.filter((env) => env.event.type === "error").length,
     1,
   );
+});
+test("Claude stops at its first result, ignoring background-task turns", async () => {
+  const { agent, closed } = harness([
+    assistant([textBlock("launched")]),
+    result({ result: "launched" }),
+    assistant([textBlock("background answer")], {}, { id: "second" }),
+    result({ result: "background answer" }),
+  ]);
+  const run = await agent.run("subagent");
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "launched");
+  assert.equal(closed(), 1);
 });
 test("Claude child env disables background tasks and pins effort without replacing env semantics", async () => {
   const inherited = harness([result()], { effort: "low" });
@@ -749,4 +749,24 @@ test("Claude list tool results join their text blocks", async () => {
     output?.type === "tool_result" && output.output,
     "RESULT_42\nagentId: a1",
   );
+});
+test("Claude joins contiguous text blocks of one assistant message", async () => {
+  const run = await harness([
+    assistant([textBlock("one "), textBlock("message")], {}, { id: "a" }),
+    assistant([textBlock(" continued")], {}, { id: "a" }),
+    assistant(
+      [{ type: "tool_use", id: "call", name: "Read", input: {} }],
+      {},
+      { id: "a" },
+    ),
+    assistant([textBlock("final "), textBlock("answer")], {}, { id: "b" }),
+    result({ result: "final answer" }),
+  ]).agent.run("join");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "text")
+      .map((env) => env.event.type === "text" && env.event.text),
+    ["one message continued", "final answer"],
+  );
+  assert.equal(run.final_text, "final answer");
 });
