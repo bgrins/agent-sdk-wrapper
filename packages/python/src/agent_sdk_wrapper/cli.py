@@ -18,6 +18,7 @@ from . import (
     McpHttpServer,
     McpServer,
     McpStdioServer,
+    ProcessTerminatedError,
     RunFinished,
     RunStatus,
     Text,
@@ -208,8 +209,8 @@ async def _run(args: argparse.Namespace) -> int:
     output = args.output or _config_str(config, "output") or ("text" if stream else "jsonl")
     if output not in _OUTPUTS:
         raise ConfigError("config field output must be one of: jsonl, text, json")
-    if stream and output == "jsonl":
-        raise ConfigError("--stream cannot be combined with --output jsonl")
+    if stream and output != "text":
+        raise ConfigError(f"--stream cannot be combined with --output {output}")
     env = {
         **_config_str_dict(config, "env"),
         **_parse_env_assignments(args.env or []),
@@ -685,12 +686,20 @@ def _set_nested_option(target: dict[str, Any], key: str, value: Any, *, flag: st
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     _setup_logging(args.verbose)
+    # Lone surrogates in provider text would otherwise abort output; the
+    # escapes this writes decode back to the same string inside JSON.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="backslashreplace")
     if args.command == "run":
         try:
             return asyncio.run(_run(args))
         except ConfigError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 2
+        except ProcessTerminatedError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 128 + exc.signal
         except KeyboardInterrupt:
             return 130
     return 1
