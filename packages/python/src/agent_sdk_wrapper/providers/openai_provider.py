@@ -10,6 +10,7 @@ import dis
 import inspect
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -216,13 +217,20 @@ class OpenAIProvider(ProviderAdapter):
             thread = await codex.thread_resume(thread_id, **thread_kwargs)
         else:
             thread = await codex.thread_start(**thread_kwargs)
-        yield SessionInfo(id=thread.id)
+        yield SessionInfo(id=thread.id, model=await _thread_model(thread))
 
         for warning in runtime_config.warnings:
             yield WarningEvent(message=warning)
+        # A caller-owned client may consume its own global notifications.
+        runtime_warnings = (
+            None if self._codex is not None else _RuntimeWarnings(codex, thread.id, req.include_raw)
+        )
+        if runtime_warnings is not None:
+            for warning in runtime_warnings.drain():
+                yield warning
 
         turn = await thread.turn(req.prompt, **turn_kwargs)
-        async for event in _stream_turn(turn, req, thread.id):
+        async for event in _stream_turn(turn, req, thread.id, runtime_warnings):
             yield event
 
     @asynccontextmanager
@@ -288,6 +296,7 @@ async def _stream_turn(
     turn: Any,
     req: RunRequest,
     thread_id: str | None = None,
+    runtime_warnings: _RuntimeWarnings | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Normalize one Codex turn, ending with its terminal state."""
 
@@ -310,6 +319,9 @@ async def _stream_turn(
 
     async for event in turn.stream():
         provider_log.write(event)
+        if runtime_warnings is not None:
+            for warning in runtime_warnings.drain():
+                yield warning
         method = getattr(event, "method", "")
         payload = getattr(event, "payload", None)
         if method == "item/agentMessage/delta":
@@ -392,6 +404,17 @@ async def _stream_turn(
             usage.add(getattr(payload, "token_usage", None) or getattr(payload, "tokenUsage", None))
             continue
 
+        if method == "model/rerouted":
+            from_model = getattr(payload, "from_model", None)
+            to_model = getattr(payload, "to_model", None)
+            reason = _to_plain(getattr(payload, "reason", None))
+            yield WarningEvent(
+                message=f"Codex rerouted the turn from {from_model} to {to_model} ({reason})",
+                raw=_raw(event) if req.include_raw else None,
+            )
+            yield SessionInfo(id=thread_id or getattr(payload, "thread_id", ""), model=to_model)
+            continue
+
         if method == "error":
             error = getattr(payload, "error", None)
             # Keep SDK retries as warnings; the terminal state determines success.
@@ -444,6 +467,71 @@ async def _stream_turn(
         message="Codex turn stream ended before turn/completed",
         error_type="provider_protocol_error",
     )
+
+
+async def _thread_model(thread: Any) -> str | None:
+    """Return the model the runtime resolved for a started or resumed thread."""
+
+    from openai_codex.errors import CodexError
+
+    read = getattr(thread, "read", None)
+    if not callable(read):
+        return None
+    try:
+        response = await read()
+    except CodexError:
+        return None
+    model = getattr(getattr(response, "thread", None), "model", None)
+    return model if isinstance(model, str) and model else None
+
+
+class _RuntimeWarnings:
+    """Surface thread-level runtime notifications, which arrive outside the turn stream.
+
+    MCP startup failures and config warnings reach only the SDK's global queue, which
+    nothing else reads when the provider owns the client.
+    """
+
+    def __init__(self, codex: Any, thread_id: str, include_raw: bool) -> None:
+        router = getattr(getattr(getattr(codex, "_client", None), "_sync", None), "_router", None)
+        self._queue = getattr(router, "_global_notifications", None)
+        self._thread_id = thread_id
+        self._include_raw = include_raw
+
+    def drain(self) -> list[WarningEvent]:
+        warnings: list[WarningEvent] = []
+        while self._queue is not None:
+            try:
+                notification = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            warning = self._warning(notification)
+            if warning is not None:
+                warnings.append(warning)
+        return warnings
+
+    def _warning(self, notification: Any) -> WarningEvent | None:
+        method = getattr(notification, "method", None)
+        payload = getattr(notification, "payload", None)
+        thread_id = getattr(payload, "thread_id", None)
+        if thread_id is not None and thread_id != self._thread_id:
+            return None
+        if method == "mcpServer/startupStatus/updated":
+            if _status_value(getattr(payload, "status", None)) != "failed":
+                return None
+            name = getattr(payload, "name", "")
+            message = getattr(payload, "error", None) or f"MCP server {name!r} failed to start"
+        elif method == "configWarning":
+            details = getattr(payload, "details", None)
+            summary = getattr(payload, "summary", "")
+            message = f"{summary}: {details}" if details else summary
+        elif method == "warning":
+            message = getattr(payload, "message", "")
+        else:
+            return None
+        return WarningEvent(
+            message=message, raw=_raw(notification) if self._include_raw else None
+        )
 
 
 def _structured_output_event(output_schema: type, text: str) -> AgentEvent:

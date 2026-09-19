@@ -1448,6 +1448,58 @@ def codex_frames(name: str) -> list[Any]:
 
 
 @pytest.mark.asyncio
+async def test_codex_model_reroute_updates_the_session_model():
+    from agent_sdk_wrapper import SessionInfo
+
+    req = RunRequest(provider="openai", prompt="ignored")
+    reroute = notification(
+        "model/rerouted",
+        {
+            "fromModel": "gpt-5.4",
+            "toModel": "gpt-5.4-safe",
+            "reason": "highRiskCyberActivity",
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+        },
+    )
+
+    out = [event async for event in _stream_turn(FakeTurn([reroute, turn_completed()]), req)]
+
+    assert [type(event) for event in out] == [WarningEvent, SessionInfo]
+    assert "gpt-5.4-safe" in out[0].message
+    assert out[1] == SessionInfo(id="thread-1", model="gpt-5.4-safe")
+
+
+def test_codex_runtime_warnings_report_this_threads_mcp_failures():
+    import queue
+
+    from agent_sdk_wrapper.providers.openai_provider import _RuntimeWarnings
+
+    def mcp_status(thread_id: str, status: str, error: str | None = None):
+        payload = {"name": "broken", "status": status, "threadId": thread_id, "error": error}
+        return notification("mcpServer/startupStatus/updated", payload)
+
+    notifications = queue.Queue()
+    for item in (
+        mcp_status("thread-1", "starting"),
+        mcp_status("thread-2", "failed", "other thread"),
+        mcp_status("thread-1", "failed", "MCP client for `broken` failed to start"),
+        notification("configWarning", {"summary": "Unknown key", "details": "x.y"}),
+    ):
+        notifications.put(item)
+    router = SimpleNamespace(_global_notifications=notifications)
+    codex = SimpleNamespace(_client=SimpleNamespace(_sync=SimpleNamespace(_router=router)))
+
+    warnings = _RuntimeWarnings(codex, "thread-1", include_raw=False).drain()
+
+    assert [w.message for w in warnings] == [
+        "MCP client for `broken` failed to start",
+        "Unknown key: x.y",
+    ]
+    assert notifications.empty()
+
+
+@pytest.mark.asyncio
 async def test_codex_tool_call_is_emitted_when_the_item_starts():
     req = RunRequest(provider="openai", prompt="ignored")
     frames = codex_frames("tool-turn.provider-events.jsonl")

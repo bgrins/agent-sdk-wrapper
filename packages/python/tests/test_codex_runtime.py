@@ -424,6 +424,20 @@ async def test_wrapper_tools_see_the_parent_env_and_imports(
     assert content["text"] == "token:t0k3n"
 
 
+async def test_session_reports_the_model_and_mcp_startup_failures(
+    mock_api, codex_home, tmp_path
+):
+    broken = McpStdioServer(name="broken", command="/bin/sh", args=["-c", "exit 3"])
+
+    result = await codex_agent(mock_api, codex_home, tmp_path, mcp_servers=[broken]).run("hi")
+
+    assert result.ok, result.error
+    events = [envelope.event for envelope in result.events]
+    assert [e.model for e in events if e.type == "session_info"] == [MODEL]
+    warnings = [e.message for e in events if e.type == "warning"]
+    assert any("`broken` failed to start" in message for message in warnings), warnings
+
+
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):
     mock_api.plan = [
         {
