@@ -1,5 +1,5 @@
-# syntax=docker/dockerfile:1.7
-FROM node:22.23.2-bookworm-slim AS node-bin
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9 AS node-bin
 
 FROM node-bin AS sample
 WORKDIR /sample-app
@@ -7,7 +7,9 @@ COPY examples/gvisor/workload/project/package*.json examples/gvisor/workload/pro
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY examples/gvisor/workload/project/ ./
 
-FROM ubuntu:24.04 AS base
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS os
+
+FROM os AS base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
@@ -26,19 +28,31 @@ COPY examples/gvisor/tests/security.test.mjs examples/gvisor/tests/fixture-worke
 ENTRYPOINT ["node"]
 CMD ["tests/fixture-worker.mjs"]
 
-FROM caddy:2.11.4 AS caddy-bin
-FROM base AS gateway
+FROM caddy:2.11.4@sha256:14a9c00d4e833ebc2b65d36515b37bde3b73f0b323a2663aaafc88953d8c4e3f AS caddy-bin
+FROM os AS gateway
+# The gateway holds the provider key: no Node, git or setuid binaries, and a non-root user.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+    && groupadd --system --gid 10001 gateway \
+    && useradd --system --uid 10001 --gid gateway --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin gateway \
+    && mkdir /socket && chown gateway:gateway /socket
 COPY --from=caddy-bin /usr/bin/caddy /usr/local/bin/caddy
 # Clear file capabilities: only a Unix socket is needed, and Compose drops all caps.
 RUN chown 0:0 /usr/local/bin/caddy
+WORKDIR /example
 COPY examples/gvisor/infra/gateway/Caddyfile ./gateway/Caddyfile
+USER 10001:10001
 ENTRYPOINT ["timeout", "--kill-after=3s", "360s", "caddy", "run", "--config", "/example/gateway/Caddyfile", "--adapter", "caddyfile"]
 
 FROM gateway AS gateway-tests
+COPY --from=node-bin /usr/local/bin/node /usr/local/bin/node
 COPY examples/gvisor/tests/gateway.test.mjs examples/gvisor/tests/Caddyfile ./tests/
 ENTRYPOINT ["timeout", "--kill-after=3s", "360s", "caddy", "run", "--config", "/example/tests/Caddyfile", "--adapter", "caddyfile"]
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.12.13@sha256:b485bd65cc2cf1c9a93b3554012c9c3778cf7b1b5fd3d3096ce9e1226c97e1e6 AS uv-bin
 FROM base AS python-base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3.12 python3.12-venv \
@@ -46,7 +60,7 @@ RUN apt-get update \
 ENV PATH="/opt/venv/bin:${PATH}" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 FROM python-base AS python-install
-COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=uv-bin /uv /usr/local/bin/uv
 ENV UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/venv
 COPY packages/python/ /build/packages/python/
 COPY examples/gvisor/workload/agent-python/pyproject.toml examples/gvisor/workload/agent-python/uv.lock /build/examples/gvisor/workload/agent-python/

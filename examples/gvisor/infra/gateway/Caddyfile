@@ -40,17 +40,30 @@ http:// {
 			}
 		}
 	}
+	# Match the raw request target: path matchers clean and case-fold it, but the proxy forwards it as sent.
+	# Betas are those the pinned SDKs send; the list excludes the MCP connector.
 	@claude {
-		expression `{env.PROVIDER} == "anthropic"`
+		expression `
+			{env.PROVIDER} == "anthropic" &&
+			{http.request.uri}.matches("^/v1/messages(/count_tokens)?([?][^#]*)?$") &&
+			{http.request.header.anthropic-beta}.matches("^((" +
+				"claude-code-20250219|context-1m-2025-08-07|context-management-2025-06-27|" +
+				"effort-2025-11-24|fallback-credit-2026-06-01|interleaved-thinking-2025-05-14|" +
+				"mid-conversation-system-2026-04-07|per-turn-control-2026-07-01|" +
+				"prompt-caching-scope-2026-01-05|thinking-token-count-2026-05-13|" +
+				"token-counting-2024-11-01" +
+				")(,|$))*$")
+		`
 		header X-Api-Key {env.GATEWAY_TOKEN}
 		method POST
-		path /v1/messages /v1/messages/count_tokens
 	}
 	@codex {
-		expression `{env.PROVIDER} == "openai"`
+		expression `
+			{env.PROVIDER} == "openai" &&
+			{http.request.uri}.matches("^/v1/(responses(/compact)?|models)([?][^#]*)?$")
+		`
 		header Authorization "Bearer {env.GATEWAY_TOKEN}"
 		method GET POST
-		path /v1/responses /v1/responses/compact /v1/models
 	}
 	handle @claude {
 		import request
