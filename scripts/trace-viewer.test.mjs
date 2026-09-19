@@ -52,41 +52,48 @@ test("server discovers new traces and reads updates without exposing files outsi
   assert.match(page.url, /index=\/api\/runs/);
   assert.match(await page.text(), /agent-sdk-wrapper Trace Viewer/);
   await writeFile(join(root, ".env"), "private");
+  await writeFile(join(root, "secret"), "private");
+  await writeFile(join(results, ".hidden"), "private");
   await symlink(join(root, ".env"), join(results, "secret.jsonl"));
+  await symlink(join(results, ".hidden"), join(results, "alias.jsonl"));
   await symlink(root, join(results, "outside"));
   await writeFile(join(results, "script.html"), "<script>bad()</script>");
+  // Raw paths: fetch() would normalize dot segments before they reach the server.
   for (const path of [
     "/.env",
     "/results/../.env",
+    "/results/%2e%2e/.env",
     "/results/%2e%2e%2f.env",
+    "/results/.hidden",
+    "/results/alias.jsonl",
     "/results/secret.jsonl",
     "/results/outside/.env",
+    `/results/${await fs.realpath(join(root, "secret"))}`,
+    `/results/${encodeURIComponent(await fs.realpath(join(root, "secret")))}`,
   ]) {
-    const response = await fetch(base + path);
-    assert.ok([403, 404].includes(response.status));
-    assert.ok(!(await response.text()).includes("private"));
+    const response = await get(base, path);
+    assert.ok([403, 404].includes(response.status), path);
+    assert.ok(!response.body.includes("private"), path);
   }
-  assert.equal(
-    (await fetch(`${base}/results/script.html`)).headers.get("content-type"),
-    "text/plain; charset=utf-8",
-  );
+  assert.equal((await get(base, "/results/a%00b")).status, 400);
+  const artifact = await get(base, "/results/script.html");
+  assert.equal(artifact.headers["content-type"], "text/plain; charset=utf-8");
+  assert.equal(artifact.headers["x-content-type-options"], "nosniff");
   assert.equal(
     (await fetch(`${base}/api/runs`, { method: "POST" })).status,
     405,
   );
-  const blocked = await new Promise((resolve, reject) => {
-    const req = request(
-      `${base}/api/runs`,
-      { headers: { host: "untrusted.test" } },
-      (res) => {
-        res.resume();
-        resolve(res.statusCode);
-      },
-    );
-    req.on("error", reject);
-    req.end();
-  });
-  assert.equal(blocked, 403);
+  for (const host of [
+    "untrusted.test",
+    "localhost.untrusted.test",
+    "127.0.0.1.untrusted.test",
+    "untrusted.localhost",
+  ])
+    assert.equal((await get(base, "/api/runs", { host })).status, 403, host);
+  assert.equal(
+    (await get(base, "/api/runs", { host: "localhost:8765" })).status,
+    200,
+  );
 
   await mkdir(join(results, ".cache"));
   await writeFile(join(results, ".cache", "trace.jsonl"), "{}\n");

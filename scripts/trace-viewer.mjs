@@ -97,6 +97,7 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
       const path = decodeURIComponent(
         new URL(request.url, "http://localhost").pathname,
       );
+      if (path.includes("\0")) return send(400, "text/plain", "Invalid path");
       if (path === "/") {
         response.writeHead(302, {
           location: "/docs/trace-viewer.html?index=/api/runs",
