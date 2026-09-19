@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import Agent, RunResult
 
@@ -245,3 +246,36 @@ async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_ho
     assert result.final_text == "hello"
     assert [r["authorization"] for r in mock_api.posts()] == ["Bearer sk-mock-key"]
     assert auth.read_text(encoding="utf-8") == before
+
+
+class Detail(BaseModel):
+    note: str
+    score: int = 0
+
+
+class Report(BaseModel):
+    a: int
+    b: str | None = None
+    detail: Detail = Field(description="Supporting detail.")
+
+
+async def test_structured_output_is_sent_in_strict_form(mock_api, codex_home, tmp_path):
+    answer = {"a": 1, "b": None, "detail": {"note": "n", "score": None}}
+    mock_api.plan = [{"text": json.dumps(answer)}]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path, output_schema=Report).run("go")
+
+    assert result.ok, result.error
+    assert result.structured_output == Report(a=1, detail=Detail(note="n"))
+    text_format = mock_api.posts()[0]["body"]["text"]["format"]
+    assert text_format["type"] == "json_schema"
+    assert text_format["strict"] is True
+    schema = text_format["schema"]
+    assert schema["required"] == ["a", "b", "detail"]
+    assert schema["additionalProperties"] is False
+    detail = schema["properties"]["detail"]
+    assert "$ref" not in detail
+    assert detail["description"] == "Supporting detail."
+    assert detail["required"] == ["note", "score"]
+    assert detail["additionalProperties"] is False
+    assert "default" not in json.dumps(schema)

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any, TypedDict
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import (
     AgentSdkWrapperError,
@@ -1120,10 +1121,98 @@ def test_runtime_config_targets_one_external_mcp_server_among_many():
         assert 'mcp_servers.bugs.disabled_tools=["search_bugs"]' in overrides
 
 
-def test_codex_output_schema_disallows_additional_properties():
-    schema = _codex_output_schema(Answer)
+class OptionalAnswer(BaseModel):
+    a: int
+    b: str | None = None
 
-    assert schema["additionalProperties"] is False
+
+class Inner(BaseModel):
+    x: int
+    label: str = "none"
+
+
+class Outer(BaseModel):
+    inner: Inner = Field(description="The inner part.")
+    items: list[Inner]
+    count: int = 3
+
+
+def test_codex_output_schema_is_strict():
+    assert _codex_output_schema(OptionalAnswer) == {
+        "properties": {
+            "a": {"title": "A", "type": "integer"},
+            "b": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "B"},
+        },
+        "required": ["a", "b"],
+        "title": "OptionalAnswer",
+        "type": "object",
+        "additionalProperties": False,
+    }
+
+
+def test_codex_output_schema_inlines_described_refs_and_nulls_defaults():
+    schema = _codex_output_schema(Outer)
+
+    inner = schema["properties"]["inner"]
+    assert "$ref" not in inner
+    assert inner["description"] == "The inner part."
+    assert inner["required"] == ["x", "label"]
+    assert inner["additionalProperties"] is False
+    assert inner["properties"]["label"] == {
+        "anyOf": [{"title": "Label", "type": "string"}, {"type": "null"}]
+    }
+    assert schema["properties"]["items"]["items"] == {"$ref": "#/$defs/Inner"}
+    assert schema["$defs"]["Inner"]["required"] == ["x", "label"]
+    assert schema["required"] == ["inner", "items", "count"]
+    assert "default" not in json.dumps(schema)
+    assert "x-agent-sdk-wrapper" not in json.dumps(schema)
+
+
+@pytest.mark.asyncio
+async def test_codex_structured_output_restores_defaults_for_forced_nulls():
+    req = RunRequest(provider="openai", prompt="ignored", output_schema=Outer)
+    text = json.dumps(
+        {
+            "inner": {"x": 1, "label": None},
+            "items": [{"x": 2, "label": "two"}, {"x": 3, "label": None}],
+            "count": None,
+        }
+    )
+    events = [
+        SimpleNamespace(
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text=text))
+            ),
+        ),
+        SimpleNamespace(
+            method="turn/completed",
+            payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
+        ),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    structured = next(event for event in out if isinstance(event, StructuredOutput))
+    assert structured.value == Outer(
+        inner=Inner(x=1), items=[Inner(x=2, label="two"), Inner(x=3)], count=3
+    )
+
+
+@pytest.mark.parametrize(
+    ("output_schema", "match"),
+    [
+        (list[int], "object schema"),
+        (dict[str, int], "free-form"),
+        (TypedDict("Loose", {"meta": dict[str, int]}), "free-form"),
+        (TypedDict("Anything", {"value": Any}), "any value"),
+    ],
+)
+def test_codex_rejects_output_schemas_strict_mode_cannot_express(output_schema, match):
+    req = RunRequest(provider="openai", prompt="ignored", output_schema=output_schema)
+
+    with pytest.raises(ConfigError, match=match):
+        OpenAIProvider().validate_request(req)
 
 
 def _usage_events(input_tokens: int, output_tokens: int):

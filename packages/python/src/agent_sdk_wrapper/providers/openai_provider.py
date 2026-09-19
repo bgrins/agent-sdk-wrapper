@@ -391,7 +391,8 @@ async def _stream_turn(
             if req.output_schema is not None:
                 text = completed_texts[-1] if completed_texts else "".join(text_parts)
                 if text:
-                    value = validate_output(req.output_schema, _parse_json(text))
+                    parsed = _structured_value(req.output_schema, _parse_json(text))
+                    value = validate_output(req.output_schema, parsed)
                     yield StructuredOutput(value=value)
             continue
 
@@ -399,6 +400,8 @@ async def _stream_turn(
 def _validate_supported(req: RunRequest) -> None:
     normalize_effort_for_provider("openai", req.effort)
     validate_tool_names(req.tools)
+    if req.output_schema is not None:
+        _codex_output_schema(req.output_schema)
     unsupported: list[str] = []
     if req.max_turns is not None and req.max_turns < 1:
         unsupported.append("max_turns < 1")
@@ -1085,20 +1088,164 @@ def _codex_config(
 
 
 def _codex_output_schema(tp: type) -> dict[str, Any]:
-    schema = deepcopy(json_schema_of_type(tp))
-    _disallow_additional_properties(schema)
+    """Return the schema Codex sends with ``strict: true``."""
+
+    schema = _strict_schema(tp)
+    _walk_schema(schema, lambda node: node.pop(_OPTIONAL_MARKER, None))
     return schema
 
 
-def _disallow_additional_properties(value: Any) -> None:
-    if isinstance(value, dict):
-        if value.get("type") == "object":
-            value.setdefault("additionalProperties", False)
-        for child in value.values():
-            _disallow_additional_properties(child)
-    elif isinstance(value, list):
-        for child in value:
-            _disallow_additional_properties(child)
+def _structured_value(tp: type, value: Any) -> Any:
+    """Drop nulls strict mode forced onto optional fields so their defaults apply."""
+
+    schema = _strict_schema(tp)
+    return _drop_optional_nulls(value, schema, schema)
+
+
+# Marks properties that strict mode made nullable; never sent to Codex.
+_OPTIONAL_MARKER = "x-agent-sdk-wrapper-optional"
+
+
+def _strict_schema(tp: type) -> dict[str, Any]:
+    """Rewrite a JSON schema into the Structured Outputs strict subset.
+
+    Every property becomes required; optional ones become nullable; defaults are
+    removed; ``$ref`` never has siblings; objects disallow additional properties.
+    """
+
+    root = deepcopy(json_schema_of_type(tp))
+    if "$ref" in root:
+        defs = root.get("$defs", {})
+        root = {**deepcopy(_resolve_ref(root, root["$ref"])), "$defs": defs}
+    if root.get("type") != "object":
+        raise ConfigError(
+            "Codex structured output requires an object schema (a Pydantic model, "
+            f"dataclass, or TypedDict); {tp!r} is not an object"
+        )
+    _make_strict(root, root, "output")
+    for name, definition in root.get("$defs", {}).items():
+        _make_strict(definition, root, name)
+    return root
+
+
+def _make_strict(node: Any, root: dict[str, Any], where: str) -> None:
+    if not isinstance(node, dict):
+        return
+    if "$ref" in node:
+        if len(node) == 1:
+            return
+        siblings = {key: value for key, value in node.items() if key != "$ref"}
+        resolved = deepcopy(_resolve_ref(root, node["$ref"]))
+        node.clear()
+        node.update({**resolved, **siblings})
+    node.pop("default", None)
+    if "oneOf" in node:
+        node["anyOf"] = [*node.get("anyOf", []), *node.pop("oneOf")]
+        node.pop("discriminator", None)
+    if isinstance(node.get("allOf"), list) and len(node["allOf"]) == 1:
+        node.update({**node.pop("allOf")[0], **node})
+        _make_strict(node, root, where)
+        return
+    if not any(key in node for key in ("type", "enum", "const", "anyOf", "allOf", "$ref")):
+        raise ConfigError(
+            f"Codex structured output cannot express {where}: it accepts any value; "
+            "strict mode needs a concrete type"
+        )
+    for key in ("anyOf", "allOf", "prefixItems"):
+        for index, branch in enumerate(node.get(key, [])):
+            _make_strict(branch, root, f"{where}[{index}]")
+    if isinstance(node.get("items"), dict):
+        _make_strict(node["items"], root, f"{where}[]")
+    types = node.get("type")
+    if types == "object" or (isinstance(types, list) and "object" in types):
+        _make_object_strict(node, root, where)
+
+
+def _make_object_strict(node: dict[str, Any], root: dict[str, Any], where: str) -> None:
+    if (
+        "properties" not in node
+        or "patternProperties" in node
+        or node.get("additionalProperties", False) is not False
+    ):
+        raise ConfigError(
+            f"Codex structured output cannot express {where}: strict mode has no "
+            "free-form objects; use a model with named fields instead of a dict"
+        )
+    properties = node["properties"]
+    required = set(node.get("required", []))
+    optional: list[str] = []
+    for name, prop in properties.items():
+        _make_strict(prop, root, f"{where}.{name}")
+        if name not in required and not _schema_nullable(prop, root):
+            properties[name] = {"anyOf": [prop, {"type": "null"}]}
+            optional.append(name)
+    node["required"] = list(properties)
+    node["additionalProperties"] = False
+    if optional:
+        node[_OPTIONAL_MARKER] = optional
+
+
+def _schema_nullable(node: Any, root: dict[str, Any]) -> bool:
+    if not isinstance(node, dict):
+        return False
+    if "$ref" in node:
+        return _schema_nullable(_resolve_ref(root, node["$ref"]), root)
+    types = node.get("type")
+    if types == "null" or (isinstance(types, list) and "null" in types):
+        return True
+    if "const" in node and node["const"] is None:
+        return True
+    if None in node.get("enum", ()):
+        return True
+    return any(_schema_nullable(branch, root) for branch in node.get("anyOf", ()))
+
+
+def _resolve_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not ref.startswith("#/"):
+        raise ConfigError(f"Codex structured output cannot resolve schema reference {ref!r}")
+    node: Any = root
+    for part in ref[2:].split("/"):
+        node = node.get(part) if isinstance(node, dict) else None
+    if not isinstance(node, dict):
+        raise ConfigError(f"Codex structured output cannot resolve schema reference {ref!r}")
+    return node
+
+
+def _walk_schema(node: Any, visit: Any) -> None:
+    if not isinstance(node, dict):
+        return
+    visit(node)
+    for key in ("properties", "$defs"):
+        for child in node.get(key, {}).values():
+            _walk_schema(child, visit)
+    for key in ("anyOf", "allOf", "prefixItems"):
+        for child in node.get(key, []):
+            _walk_schema(child, visit)
+    _walk_schema(node.get("items"), visit)
+
+
+def _drop_optional_nulls(value: Any, node: Any, root: dict[str, Any]) -> Any:
+    if not isinstance(node, dict):
+        return value
+    if "$ref" in node:
+        node = _resolve_ref(root, node["$ref"])
+    if isinstance(value, dict) and "properties" in node:
+        optional = set(node.get(_OPTIONAL_MARKER, ()))
+        properties = node["properties"]
+        return {
+            key: _drop_optional_nulls(item, properties.get(key), root)
+            for key, item in value.items()
+            if not (item is None and key in optional)
+        }
+    if isinstance(value, list) and isinstance(node.get("items"), dict):
+        return [_drop_optional_nulls(item, node["items"], root) for item in value]
+    for branch in node.get("anyOf", ()):
+        resolved = _resolve_ref(root, branch["$ref"]) if "$ref" in branch else branch
+        if (isinstance(value, dict) and "properties" in resolved) or (
+            isinstance(value, list) and "items" in resolved
+        ):
+            return _drop_optional_nulls(value, resolved, root)
+    return value
 
 
 def _config_has_codex_bin(config: Any) -> bool:
