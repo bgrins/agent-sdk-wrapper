@@ -273,6 +273,41 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
   );
 });
 
+test("a symlinked ancestor swapped in after path checks is not followed", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ancestor-swap-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const results = join(root, "results");
+  await mkdir(join(results, "job", "logs"), { recursive: true });
+  await mkdir(join(root, "elsewhere"));
+  await writeFile(join(results, "job", "logs", "trace.jsonl"), "{}\n");
+  await writeFile(join(root, "elsewhere", "trace.jsonl"), "private\n");
+  const base = await listen(t, results);
+  const canonical = await fs.realpath(
+    join(results, "job", "logs", "trace.jsonl"),
+  );
+  const realpath = fs.realpath;
+  let swapped = false;
+  const mocked = t.mock.method(fs, "realpath", async (path, ...args) => {
+    const resolved = await realpath(path, ...args);
+    if (path === canonical && !swapped) {
+      swapped = true;
+      await fs.rename(join(results, "job", "logs"), join(root, "moved"));
+      await symlink(join(root, "elsewhere"), join(results, "job", "logs"));
+    }
+    return resolved;
+  });
+  syncBuiltinESMExports();
+  try {
+    const response = await get(base, "/results/job/logs/trace.jsonl");
+    assert.ok(swapped, "Swap the ancestor after path resolution");
+    assert.equal(response.status, 403);
+    assert.ok(!response.body.includes("private"));
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
 function viewerContext(script) {
   const element = () => ({
     addEventListener() {},

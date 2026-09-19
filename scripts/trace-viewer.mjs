@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir, readFile, realpath } from "node:fs/promises";
+import {
+  lstat,
+  open,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -98,6 +105,22 @@ export function contentSecurityPolicy(html) {
   ].join("; ");
 }
 
+// O_NOFOLLOW guards only the last component. macOS O_NOFOLLOW_ANY refuses a
+// symlink anywhere in the path; Linux reports the opened file's real path.
+// Elsewhere, comparing inodes after open narrows the race but cannot close it.
+const openFlags =
+  constants.O_RDONLY |
+  constants.O_NONBLOCK |
+  (process.platform === "darwin" ? 0x20000000 : constants.O_NOFOLLOW);
+
+async function openedElsewhere(handle, file) {
+  if (process.platform === "darwin") return false;
+  if (process.platform === "linux")
+    return (await readlink(`/proc/self/fd/${handle.fd}`)) !== file;
+  const [opened, current] = await Promise.all([handle.stat(), lstat(file)]);
+  return opened.dev !== current.dev || opened.ino !== current.ino;
+}
+
 // Ancestors must be host-controlled. Depth 1 reads only files in fixed job mounts.
 export function createTraceServer(directory, { depth = 20 } = {}) {
   if (!Number.isInteger(depth) || depth < 0 || depth > 20)
@@ -159,11 +182,10 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
       if (!file.startsWith(root + sep))
         return send(403, "text/plain", "Forbidden");
       if (file !== requested) return send(403, "text/plain", "Forbidden");
-      const handle = await open(
-        file,
-        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      );
+      const handle = await open(file, openFlags);
       try {
+        if (await openedElsewhere(handle, file))
+          return send(403, "text/plain", "Forbidden");
         const info = await handle.stat();
         if (!info.isFile() || info.nlink !== 1 || info.size > 16 * 1024 * 1024)
           return send(413, "text/plain", "Unsupported file");
