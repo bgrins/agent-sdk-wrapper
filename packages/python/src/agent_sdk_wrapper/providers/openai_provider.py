@@ -682,8 +682,9 @@ class _RuntimeConfig:
 def _runtime_config(req: RunRequest):
     web_tools_override: tuple[str, ...] = ()
     if req.web_tools is not None:
+        # Codex ignores the legacy tools.web_search flag; the top-level mode controls the tool.
         web_tools_override = (
-            f"tools.web_search={'true' if req.web_tools else 'false'}",
+            _config_override("web_search", value="live" if req.web_tools else "disabled"),
         )
 
     if not req.tools and not req.subagents and not req.mcp_servers:

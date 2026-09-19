@@ -241,7 +241,7 @@ class RunRequest:
     # None keeps defaults; "none" requires disabling all built-ins or rejection.
     builtin_tools: BuiltinTools | None = None
     # None keeps defaults. False disables Claude WebSearch/WebFetch or Codex
-    # tools.web_search; True enables them. This does not restrict network egress.
+    # web_search ("disabled"); True sets it to "live". This does not restrict network egress.
     web_tools: bool | None = None
     # Claude tool approvals; Agent is added when subagents exist.
     allowed_tools: list[str] = field(default_factory=list)

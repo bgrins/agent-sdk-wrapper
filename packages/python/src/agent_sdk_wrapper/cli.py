@@ -99,14 +99,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_const",
         const=True,
         default=None,
-        help="Enable WebSearch/WebFetch (Anthropic) or tools.web_search (Codex).",
+        help="Enable WebSearch/WebFetch (Anthropic) or live web_search (Codex).",
     )
     web_tools.add_argument(
         "--no-web-tools",
         dest="web_tools",
         action="store_const",
         const=False,
-        help="Disable WebSearch/WebFetch (Anthropic) or tools.web_search (Codex).",
+        help="Disable WebSearch/WebFetch (Anthropic) or web_search (Codex).",
     )
     run.add_argument(
         "--allowed-tool",

@@ -1047,17 +1047,6 @@ def test_codex_rejects_builtin_tools():
         _validate_supported(req)
 
 
-def test_codex_web_tools_emits_config_override():
-    with _runtime_config(
-        RunRequest(provider="openai", prompt="ignored", web_tools=False)
-    ) as runtime:
-        assert "tools.web_search=false" in runtime.config_overrides
-    with _runtime_config(
-        RunRequest(provider="openai", prompt="ignored", web_tools=True)
-    ) as runtime:
-        assert "tools.web_search=true" in runtime.config_overrides
-
-
 def test_codex_web_tools_coexists_with_tools(tmp_path):
     req = RunRequest(
         provider="openai",
@@ -1068,7 +1057,7 @@ def test_codex_web_tools_coexists_with_tools(tmp_path):
     )
 
     with _runtime_config(req) as runtime:
-        assert "tools.web_search=false" in runtime.config_overrides
+        assert 'web_search="disabled"' in runtime.config_overrides
         assert any(
             value.startswith("mcp_servers.agent_sdk_wrapper_tools.command=")
             for value in runtime.config_overrides

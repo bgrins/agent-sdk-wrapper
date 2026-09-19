@@ -286,6 +286,20 @@ async def test_structured_output_is_sent_in_strict_form(mock_api, codex_home, tm
     assert "default" not in json.dumps(schema)
 
 
+def _web_search_tools(api: MockResponses) -> list[dict[str, Any]]:
+    return [t for t in api.posts()[-1]["body"]["tools"] if t.get("type") == "web_search"]
+
+
+async def test_web_tools_controls_the_web_search_tool(mock_api, codex_home, tmp_path):
+    disabled = await codex_agent(mock_api, codex_home, tmp_path, web_tools=False).run("hi")
+    assert disabled.ok, disabled.error
+    assert _web_search_tools(mock_api) == []
+
+    enabled = await codex_agent(mock_api, codex_home, tmp_path, web_tools=True).run("hi")
+    assert enabled.ok, enabled.error
+    assert [t["external_web_access"] for t in _web_search_tools(mock_api)] == [True]
+
+
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):
     mock_api.plan = [
         {
