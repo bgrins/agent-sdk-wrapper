@@ -76,12 +76,20 @@ def test_codex_options_default_to_auto_reasoning_summary():
     assert turn_options["summary"] == "auto"
 
 
-def test_codex_options_normalize_provider_effort_alias():
+def test_codex_options_pass_native_effort_through():
     req = RunRequest(provider="openai", prompt="ignored")
 
     _, turn_options = OpenAIProvider(effort="max")._build_options(req, None, None)
 
-    assert turn_options["effort"] == "xhigh"
+    assert turn_options["effort"] == "max"
+
+
+def test_codex_efforts_match_the_sdk_enum():
+    from openai_codex.generated.v2_all import ReasoningEffort
+
+    from agent_sdk_wrapper.request import _OPENAI_EFFORTS
+
+    assert _OPENAI_EFFORTS == {member.value for member in ReasoningEffort}
 
 
 def test_codex_options_allow_summary_constructor_override():

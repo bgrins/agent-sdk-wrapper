@@ -18,7 +18,7 @@ ProviderInput = str | None
 BuiltinTools = Literal["none"] | list[str]
 BuiltinToolsInput = Literal["none"] | Sequence[str] | None
 INHERIT_MODEL = "inherit"
-Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 _PROVIDER_ALIASES: dict[str, Provider] = {
     "anthropic": "anthropic",
@@ -28,7 +28,8 @@ _PROVIDER_ALIASES: dict[str, Provider] = {
 _OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "o5", "codex", "chatgpt-")
 _ANTHROPIC_MODEL_PREFIXES = ("claude",)
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-_OPENAI_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+# Mirrors openai_codex ReasoningEffort.
+_OPENAI_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 def normalize_provider(provider: ProviderInput) -> Provider | None:
@@ -166,8 +167,6 @@ def normalize_effort_for_provider(provider: Provider, value: str | None) -> Effo
             f"effort {value!r} is not supported by provider {provider!r}; "
             f"expected one of: {', '.join(sorted(allowed))}"
         )
-    if provider == "openai" and effort == "max":
-        return "xhigh"
     return cast(Effort, effort)
 
 

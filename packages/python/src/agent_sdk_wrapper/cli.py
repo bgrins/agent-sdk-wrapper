@@ -71,7 +71,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--effort",
         default=None,
-        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         help="Reasoning effort tier. Unsupported provider/tier combinations are rejected.",
     )
     run.add_argument("--timeout", default=None, type=float)
