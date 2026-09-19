@@ -142,7 +142,7 @@ def test_run_forwards_extended_cli_options(monkeypatch, capsys):
     ]
 
     req = seen_requests[0]
-    assert req.effort == "xhigh"
+    assert req.effort == "max"
     assert req.builtin_tools == ["Read", "Grep"]
     assert req.allowed_tools == ["repo.read_file"]
     assert req.disallowed_tools == ["repo.write_file"]

@@ -20,7 +20,7 @@ BuiltinToolsInput = Literal["none"] | Sequence[str] | None
 INHERIT_MODEL = "inherit"
 CliLogin = Literal["deny", "require"]
 _CLI_LOGIN_VALUES = ("deny", "require")
-Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 _PROVIDER_ALIASES: dict[str, Provider] = {
     "anthropic": "anthropic",
@@ -30,7 +30,8 @@ _PROVIDER_ALIASES: dict[str, Provider] = {
 _OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "o5", "codex", "chatgpt-")
 _ANTHROPIC_MODEL_PREFIXES = ("claude",)
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-_OPENAI_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+# Mirrors openai_codex ReasoningEffort.
+_OPENAI_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 def normalize_provider(provider: ProviderInput) -> Provider | None:
@@ -168,8 +169,6 @@ def normalize_effort_for_provider(provider: Provider, value: str | None) -> Effo
             f"effort {value!r} is not supported by provider {provider!r}; "
             f"expected one of: {', '.join(sorted(allowed))}"
         )
-    if provider == "openai" and effort == "max":
-        return "xhigh"
     return cast(Effort, effort)
 
 
@@ -250,7 +249,7 @@ class RunRequest:
     # None keeps defaults; "none" requires disabling all built-ins or rejection.
     builtin_tools: BuiltinTools | None = None
     # None keeps defaults. False disables Claude WebSearch/WebFetch or Codex
-    # tools.web_search; True enables them. This does not restrict network egress.
+    # web_search ("disabled"); True sets it to "live". This does not restrict network egress.
     web_tools: bool | None = None
     # Claude tool approvals; Agent is added when subagents exist.
     allowed_tools: list[str] = field(default_factory=list)

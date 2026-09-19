@@ -72,7 +72,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--effort",
         default=None,
-        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         help="Reasoning effort tier. Unsupported provider/tier combinations are rejected.",
     )
     run.add_argument("--timeout", default=None, type=float)
@@ -100,14 +100,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_const",
         const=True,
         default=None,
-        help="Enable WebSearch/WebFetch (Anthropic) or tools.web_search (Codex).",
+        help="Enable WebSearch/WebFetch (Anthropic) or live web_search (Codex).",
     )
     web_tools.add_argument(
         "--no-web-tools",
         dest="web_tools",
         action="store_const",
         const=False,
-        help="Disable WebSearch/WebFetch (Anthropic) or tools.web_search (Codex).",
+        help="Disable WebSearch/WebFetch (Anthropic) or web_search (Codex).",
     )
     run.add_argument(
         "--allowed-tool",

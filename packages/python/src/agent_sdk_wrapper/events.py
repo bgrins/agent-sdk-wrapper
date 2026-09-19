@@ -61,7 +61,6 @@ class TokenUsage:
     ``input_tokens`` includes cache; ``output_tokens`` includes reasoning.
     Cache read/write and reasoning fields are subsets of those totals.
     ``requests`` counts model requests where available; provider proxies differ.
-    Codex cache-write counts are unavailable and remain zero.
     """
 
     input_tokens: int = 0

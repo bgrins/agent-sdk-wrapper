@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import builtins
 import dataclasses
+import dis
+import functools
 import inspect
 import json
 import os
+import queue
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import textwrap
@@ -15,10 +22,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..artifacts import ProviderEventLogger, sdk_dir_for
-from ..errors import AgentSdkWrapperError, ConfigError, ProviderNotAvailableError, TransientError
+from ..errors import (
+    AgentSdkWrapperError,
+    ConfigError,
+    ProcessTerminatedError,
+    ProviderNotAvailableError,
+    TransientError,
+)
 from ..events import (
     AgentEvent,
     ContextCompacted,
@@ -39,18 +52,6 @@ from ..structured import json_schema_of_type, validate_output
 from ..tools import CODEX_TOOL_SERVER, tool_description, tool_name, validate_tool_names
 from .base import ProviderAdapter
 
-_THREAD_RESUME_OPTION_KEYS = {
-    "approval_mode",
-    "base_instructions",
-    "config",
-    "cwd",
-    "developer_instructions",
-    "model",
-    "model_provider",
-    "personality",
-    "sandbox",
-    "service_tier",
-}
 _CODEX_NATIVE_TOOL_FILTER_NAMES = {
     "agent",
     "command",
@@ -60,7 +61,9 @@ _CODEX_NATIVE_TOOL_FILTER_NAMES = {
     "web_search",
 }
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
+_WRAPPER_TOOL_TIMEOUT_SEC = 600
 
 
 class OpenAIProvider(ProviderAdapter):
@@ -104,7 +107,6 @@ class OpenAIProvider(ProviderAdapter):
         self._debug = debug
         self._thread_options = dict(thread_options or {})
         self._turn_options = dict(turn_options or {})
-        self._usage_baseline = _UsageBaseline()
 
     def ensure_available(self) -> None:
         try:
@@ -126,48 +128,62 @@ class OpenAIProvider(ProviderAdapter):
 
     def validate_request(self, req: RunRequest) -> None:
         _validate_supported(req)
+        self._validate_native_options(req)
+        try:
+            from openai_codex import ApprovalMode, Sandbox
+        except ImportError:
+            pass
+        else:
+            _enum_value(ApprovalMode, self._approval_mode)
+            _enum_value(Sandbox, self._sandbox)
+        if self._api_key and not self._launches_codex():
+            raise ConfigError(
+                "api_key requires the provider to launch Codex; authenticate the "
+                "pre-built codex client or custom launch command instead"
+            )
+        if not self._launches_codex() and (
+            req.tools or req.subagents or req.mcp_servers or req.web_tools is not None
+        ):
+            raise ConfigError(
+                "Codex tools, subagents, MCP servers and web_tools require the provider "
+                "to launch Codex; a pre-built codex client or launch_args_override "
+                "cannot be reconfigured"
+            )
+
+    def _launches_codex(self) -> bool:
+        return self._codex is None and _config_value(self._config, "launch_args_override") is None
+
+    def _login_api_key(self) -> str | None:
+        # A pre-built client or custom launch command cannot take the ephemeral
+        # credential store override, so logging in would overwrite auth.json.
+        if not self._launches_codex():
+            return None
+        return self._api_key or os.environ.get("OPENAI_API_KEY") or None
 
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
         self.validate_request(req)
         self.ensure_available()
 
-        from openai_codex import ApprovalMode, Sandbox, is_retryable_error
+        from openai_codex import is_retryable_error
 
         codex: Any = None
         try:
+            api_key = self._login_api_key()
             with _runtime_config(req) as runtime_config:
-                if self._codex is not None and runtime_config.config_overrides:
-                    raise ConfigError(
-                        "Codex tools, subagents, and web_tools require the provider "
-                        "to launch Codex; a pre-built codex client cannot be reconfigured"
+                config_overrides = runtime_config.config_overrides
+                if api_key:
+                    # Keep the API key in memory instead of replacing auth.json.
+                    config_overrides += (
+                        _config_override("cli_auth_credentials_store", value="ephemeral"),
                     )
-                async with self._codex_client(req, runtime_config.config_overrides) as codex:
-                    api_key = self._api_key or os.environ.get("OPENAI_API_KEY")
-                    if api_key:
-                        await codex.login_api_key(api_key)
-
-                    approval_mode = _enum_value(ApprovalMode, self._approval_mode)
-                    sandbox = _enum_value(Sandbox, self._sandbox)
-                    thread_kwargs, turn_kwargs = self._build_options(
-                        req, approval_mode, sandbox
-                    )
-
-                    thread_id = req.session_id or self._thread_id
-                    if thread_id:
-                        _validate_thread_resume_options(thread_kwargs)
-                        thread = await codex.thread_resume(thread_id, **thread_kwargs)
-                    else:
-                        thread = await codex.thread_start(**thread_kwargs)
-                    yield SessionInfo(id=thread.id)
-
-                    for warning in runtime_config.warnings:
-                        yield WarningEvent(message=warning)
-
-                    turn = await thread.turn(req.prompt, **turn_kwargs)
-                    async for event in _stream_turn(
-                        turn, req, thread.id, self._usage_baseline
-                    ):
-                        yield event
+                async with self._codex_client(req, config_overrides) as codex:
+                    process = _codex_process(codex)
+                    try:
+                        async for event in self._run(codex, req, runtime_config, api_key):
+                            yield event
+                    except Exception as exc:
+                        await _raise_if_signaled(process, exc)
+                        raise
         except (ProviderNotAvailableError, ConfigError, AgentSdkWrapperError):
             raise
         except FileNotFoundError as exc:
@@ -178,6 +194,43 @@ class OpenAIProvider(ProviderAdapter):
             raise AgentSdkWrapperError(f"{type(exc).__name__}: {exc}", cause=exc) from exc
         finally:
             _write_sdk_debug_log(codex, req.artifacts_dir, debug=self._debug)
+
+    async def _run(
+        self,
+        codex: Any,
+        req: RunRequest,
+        runtime_config: _RuntimeConfig,
+        api_key: str | None,
+    ) -> AsyncIterator[AgentEvent]:
+        from openai_codex import ApprovalMode, Sandbox
+
+        if api_key:
+            await codex.login_api_key(api_key)
+
+        approval_mode = _enum_value(ApprovalMode, self._approval_mode)
+        sandbox = _enum_value(Sandbox, self._sandbox)
+        thread_kwargs, turn_kwargs = self._build_options(req, approval_mode, sandbox)
+
+        thread_id = req.session_id or self._thread_id
+        if thread_id:
+            thread = await codex.thread_resume(thread_id, **thread_kwargs)
+        else:
+            thread = await codex.thread_start(**thread_kwargs)
+        yield SessionInfo(id=thread.id, model=await _thread_model(thread))
+
+        for warning in runtime_config.warnings:
+            yield WarningEvent(message=warning)
+        # A caller-owned client may consume its own global notifications.
+        runtime_warnings = (
+            None if self._codex is not None else _RuntimeWarnings(codex, thread.id, req.include_raw)
+        )
+        if runtime_warnings is not None:
+            for warning in runtime_warnings.drain():
+                yield warning
+
+        turn = await thread.turn(req.prompt, **turn_kwargs)
+        async for event in _stream_turn(turn, req, thread.id, runtime_warnings):
+            yield event
 
     @asynccontextmanager
     async def _codex_client(self, req: RunRequest, config_overrides: tuple[str, ...] = ()):
@@ -197,21 +250,46 @@ class OpenAIProvider(ProviderAdapter):
         async with AsyncCodex(config=config) as codex:
             yield codex
 
-    def _build_options(
-        self, req: RunRequest, approval_mode: Any, sandbox: Any
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        req_effort = normalize_effort_for_provider("openai", req.effort)
+    def _native_options(self, req: RunRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         extra = dict(req.extra_options)
-        thread_options = dict(self._thread_options)
-        turn_options = dict(self._turn_options)
-        thread_options.update(extra.pop("thread_options", {}))
-        turn_options.update(extra.pop("turn_options", {}))
+        thread_options = {**self._thread_options, **extra.pop("thread_options", {})}
+        turn_options = {**self._turn_options, **extra.pop("turn_options", {})}
         if extra:
             keys = ", ".join(sorted(extra))
             raise ConfigError(
                 "unsupported Codex SDK extra_options keys: "
                 f"{keys}. Use 'thread_options' or 'turn_options'."
             )
+        return thread_options, turn_options
+
+    def _validate_native_options(self, req: RunRequest) -> None:
+        thread_options, turn_options = self._native_options(req)
+        resuming = bool(req.session_id or self._thread_id)
+        if thread_options.get("ephemeral", self._ephemeral) and (
+            resuming or req.continue_session
+        ):
+            raise ConfigError(
+                "ephemeral Codex threads cannot be resumed: each run starts a new "
+                "app-server, so session_id and continue_session would not find the thread"
+            )
+        names = _sdk_option_names()
+        if names is None:
+            return
+        method = "thread_resume" if resuming else "thread_start"
+        # Resuming drops the start-only ephemeral flag, which is false by now.
+        allowed = names[method] | ({"ephemeral"} if resuming else set())
+        unknown = sorted(set(thread_options) - allowed)
+        if unknown:
+            raise ConfigError(f"unsupported Codex {method} options: {', '.join(unknown)}")
+        unknown = sorted(set(turn_options) - names["turn"])
+        if unknown:
+            raise ConfigError(f"unsupported Codex turn options: {', '.join(unknown)}")
+
+    def _build_options(
+        self, req: RunRequest, approval_mode: Any, sandbox: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        req_effort = normalize_effort_for_provider("openai", req.effort)
+        thread_options, turn_options = self._native_options(req)
 
         thread_options.setdefault("model", req.model)
         thread_options.setdefault("model_provider", self._model_provider)
@@ -221,12 +299,16 @@ class OpenAIProvider(ProviderAdapter):
         thread_options.setdefault("sandbox", sandbox)
         thread_options.setdefault("personality", self._personality)
         thread_options.setdefault("service_tier", self._service_tier)
-        thread_options.setdefault("ephemeral", self._ephemeral)
+        if req.session_id or self._thread_id:
+            thread_options.pop("ephemeral", None)
+        else:
+            thread_options.setdefault("ephemeral", self._ephemeral)
 
         turn_options.setdefault("model", req.model)
         turn_options.setdefault("cwd", _as_str(req.cwd))
         turn_options.setdefault("approval_mode", approval_mode)
-        turn_options.setdefault("sandbox", sandbox)
+        # No turn sandbox: the SDK sends it as a full policy with default writable roots
+        # and network access, overriding sandbox_workspace_write from config.
         turn_options.setdefault("effort", req_effort or self._effort)
         turn_options.setdefault("summary", self._summary)
         turn_options.setdefault("personality", self._personality)
@@ -241,11 +323,10 @@ async def _stream_turn(
     turn: Any,
     req: RunRequest,
     thread_id: str | None = None,
-    baseline: _UsageBaseline | None = None,
+    runtime_warnings: _RuntimeWarnings | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Normalize one Codex turn. ``baseline`` tracks previously reported thread usage."""
+    """Normalize one Codex turn, ending with its terminal state."""
 
-    baseline = _UsageBaseline() if baseline is None else baseline
     provider_log = ProviderEventLogger(
         "openai",
         req.artifacts_dir,
@@ -255,16 +336,19 @@ async def _stream_turn(
     )
     text_delta_parts: dict[str | None, list[str]] = {}
     thinking_delta_parts: dict[str | None, list[str]] = {}
-    text_parts: list[str] = []
-    completed_texts: list[str] = []
-    last_usage: Any = None
-    # Count usage updates as a proxy for model requests.
-    usage_updates = 0
+    texts: list[str] = []
+    usage = _TurnUsage()
+    started_calls: set[str] = set()
     completed_action_items = 0
-    max_turns_interrupted = False
+    interrupted_for_max_turns = False
+    # A non-retried error notification precedes the failed turn/completed; emit one Error.
+    reported_error: Error | None = None
 
     async for event in turn.stream():
         provider_log.write(event)
+        if runtime_warnings is not None:
+            for warning in runtime_warnings.drain():
+                yield warning
         method = getattr(event, "method", "")
         payload = getattr(event, "payload", None)
         if method == "item/agentMessage/delta":
@@ -284,6 +368,16 @@ async def _stream_turn(
                 thinking_delta_parts.setdefault(item_id, []).append(delta)
             continue
 
+        if method == "item/started":
+            item = getattr(payload, "item", None)
+            tool_events = _tool_events(getattr(item, "root", item), event, req.include_raw)
+            if tool_events is not None:
+                call = tool_events[0]
+                if call.id is not None:
+                    started_calls.add(call.id)
+                yield call
+            continue
+
         if method == "item/completed":
             item = getattr(payload, "item", None)
             root = getattr(item, "root", item)
@@ -293,8 +387,7 @@ async def _stream_turn(
                 buffered_text = _pop_delta_buffer(text_delta_parts, item_id)
                 text = getattr(root, "text", "") or buffered_text
                 if text:
-                    completed_texts.append(text)
-                    text_parts.append(text)
+                    texts.append(text)
                     yield Text(text=text, raw=_raw(event) if req.include_raw else None)
                 continue
             if root_type == "reasoning":
@@ -316,68 +409,184 @@ async def _stream_turn(
                 )
                 continue
             tool_events = _tool_events(root, event, req.include_raw)
-            for tool_event in tool_events:
-                yield tool_event
+            if tool_events is not None:
+                call, result = tool_events
+                if call.id is None or call.id not in started_calls:
+                    yield call
+                started_calls.discard(call.id)
+                yield result
             if _counts_toward_max_turns(root_type):
                 completed_action_items += 1
                 if (
                     req.max_turns is not None
                     and completed_action_items >= req.max_turns
-                    and not max_turns_interrupted
+                    and not interrupted_for_max_turns
                 ):
-                    max_turns_interrupted = True
+                    interrupted_for_max_turns = True
+                    # Keep draining so buffered text and usage still arrive.
                     await _interrupt_for_max_turns(turn, req.max_turns)
-                    yield Error(
-                        message=(
-                            f"Codex max_turns={req.max_turns} reached after "
-                            f"{completed_action_items} completed action item(s); "
-                            "interrupted turn"
-                        ),
-                        error_type="max_turns",
-                    )
-                    return
             continue
 
         if method == "thread/tokenUsage/updated":
-            last_usage = getattr(payload, "token_usage", None) or getattr(
-                payload, "tokenUsage", None
+            usage.add(getattr(payload, "token_usage", None) or getattr(payload, "tokenUsage", None))
+            continue
+
+        if method == "model/rerouted":
+            from_model = getattr(payload, "from_model", None)
+            to_model = getattr(payload, "to_model", None)
+            reason = _to_plain(getattr(payload, "reason", None))
+            yield WarningEvent(
+                message=f"Codex rerouted the turn from {from_model} to {to_model} ({reason})",
+                raw=_raw(event) if req.include_raw else None,
             )
-            usage_updates += 1
+            yield SessionInfo(id=thread_id or getattr(payload, "thread_id", ""), model=to_model)
             continue
 
         if method == "error":
-            error = getattr(payload, "error", None)
-            text = _error_message(error) or "Codex reported an error"
+            error = _field(payload, "error", "error")
             # Keep SDK retries as warnings; the terminal state determines success.
-            if getattr(payload, "will_retry", False):
-                yield WarningEvent(message=text)
+            if _field(payload, "will_retry", "willRetry"):
+                yield WarningEvent(message=_turn_error_text(error))
             else:
-                yield Error(message=text, error_type="codex", retryable=True)
+                reported_error = _error_event(error, _raw(event) if req.include_raw else None)
             continue
 
         if method == "turn/completed":
             for text in _drain_delta_buffers(text_delta_parts):
-                completed_texts.append(text)
-                text_parts.append(text)
+                texts.append(text)
                 yield Text(text=text)
             for text in _drain_delta_buffers(thinking_delta_parts):
                 yield Thinking(text=text)
-            if last_usage is not None:
-                yield _usage_event(last_usage, req.include_raw, usage_updates, thread_id, baseline)
-            turn_info = getattr(payload, "turn", None)
-            if _turn_failed(turn_info):
-                raise AgentSdkWrapperError(_turn_error_message(turn_info))
+            usage_event = usage.event(req.include_raw)
+            if usage_event is not None:
+                yield usage_event
+            turn_info = _field(payload, "turn", "turn")
+            status = _status_value(_field(turn_info, "status", "status"))
+            # A turn that finished before the interrupt landed stays a success.
+            if interrupted_for_max_turns and status != "completed":
+                yield Error(
+                    message=(
+                        f"Codex max_turns={req.max_turns} reached after "
+                        f"{completed_action_items} completed action item(s); "
+                        "interrupted turn"
+                    ),
+                    error_type="max_turns",
+                )
+                return
+            if status == "failed":
+                error = _field(turn_info, "error", "error")
+                if error is not None:
+                    yield _error_event(error, _raw(event) if req.include_raw else None)
+                else:
+                    yield reported_error or Error(
+                        message="Codex turn failed", error_type="provider_exception"
+                    )
+                return
+            if status == "interrupted":
+                yield Error(message="Codex turn was interrupted", error_type="cancelled")
+                return
+            if reported_error is not None:
+                yield WarningEvent(message=reported_error.message)
             if req.output_schema is not None:
-                text = completed_texts[-1] if completed_texts else "".join(text_parts)
-                if text:
-                    value = validate_output(req.output_schema, _parse_json(text))
-                    yield StructuredOutput(value=value)
-            continue
+                yield _structured_output_event(req.output_schema, texts[-1] if texts else "")
+            return
+
+    yield reported_error or Error(
+        message="Codex turn stream ended before turn/completed",
+        error_type="provider_protocol_error",
+    )
+
+
+async def _thread_model(thread: Any) -> str | None:
+    """Return the model the runtime resolved for a started or resumed thread."""
+
+    from openai_codex.errors import CodexError
+
+    read = getattr(thread, "read", None)
+    if not callable(read):
+        return None
+    try:
+        response = await read()
+    except CodexError:
+        return None
+    model = getattr(getattr(response, "thread", None), "model", None)
+    return model if isinstance(model, str) and model else None
+
+
+class _RuntimeWarnings:
+    """Surface thread-level runtime notifications, which arrive outside the turn stream.
+
+    MCP startup failures and config warnings reach only the SDK's global queue, which
+    nothing else reads when the provider owns the client.
+    """
+
+    def __init__(self, codex: Any, thread_id: str, include_raw: bool) -> None:
+        router = getattr(getattr(getattr(codex, "_client", None), "_sync", None), "_router", None)
+        self._queue = getattr(router, "_global_notifications", None)
+        self._thread_id = thread_id
+        self._include_raw = include_raw
+
+    def drain(self) -> list[WarningEvent]:
+        warnings: list[WarningEvent] = []
+        while self._queue is not None:
+            try:
+                notification = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            warning = self._warning(notification)
+            if warning is not None:
+                warnings.append(warning)
+        return warnings
+
+    def _warning(self, notification: Any) -> WarningEvent | None:
+        method = getattr(notification, "method", None)
+        payload = getattr(notification, "payload", None)
+        thread_id = getattr(payload, "thread_id", None)
+        if thread_id is not None and thread_id != self._thread_id:
+            return None
+        if method == "mcpServer/startupStatus/updated":
+            if _status_value(getattr(payload, "status", None)) != "failed":
+                return None
+            name = getattr(payload, "name", "")
+            message = getattr(payload, "error", None) or f"MCP server {name!r} failed to start"
+        elif method == "configWarning":
+            details = getattr(payload, "details", None)
+            summary = getattr(payload, "summary", "")
+            message = f"{summary}: {details}" if details else summary
+        elif method == "warning":
+            message = getattr(payload, "message", "")
+        else:
+            return None
+        return WarningEvent(
+            message=message, raw=_raw(notification) if self._include_raw else None
+        )
+
+
+def _structured_output_event(output_schema: type, text: str) -> AgentEvent:
+    if not text:
+        return Error(
+            message="Codex returned no structured output", error_type="structured_output_failed"
+        )
+    try:
+        parsed = _structured_value(output_schema, _parse_json(text))
+        return StructuredOutput(value=validate_output(output_schema, parsed))
+    except AgentSdkWrapperError as exc:
+        return Error(message=str(exc), error_type="structured_output_failed")
 
 
 def _validate_supported(req: RunRequest) -> None:
     normalize_effort_for_provider("openai", req.effort)
     validate_tool_names(req.tools)
+    for fn in req.tools:
+        _tool_entry(fn)
+    if req.output_schema is not None:
+        _codex_output_schema(req.output_schema)
+    _mcp_config_overrides(
+        req.mcp_servers, allowed_tools=req.allowed_tools, disallowed_tools=req.disallowed_tools
+    )
+    for name, subagent in req.subagents.items():
+        _validate_config_key_part(name)
+        _toml_literal([subagent.description, subagent.prompt, subagent.model or ""])
     unsupported: list[str] = []
     if req.max_turns is not None and req.max_turns < 1:
         unsupported.append("max_turns < 1")
@@ -428,35 +637,58 @@ _CODEX_ACTION_ITEM_TYPES = {
 }
 
 
-@dataclasses.dataclass
-class _UsageBaseline:
-    """Track reported thread usage and subtract it from new cumulative snapshots.
+_USAGE_FIELDS = {
+    "input_tokens": ("inputTokens", "input_tokens"),
+    "cache_read_tokens": ("cachedInputTokens", "cached_input_tokens"),
+    "cache_write_tokens": ("cacheWriteInputTokens", "cache_write_input_tokens"),
+    "output_tokens": ("outputTokens", "output_tokens"),
+    "reasoning_output_tokens": ("reasoningOutputTokens", "reasoning_output_tokens"),
+    "total_tokens": ("totalTokens", "total_tokens"),
+}
 
-    An external session starts without a baseline and can include prior history.
+
+@dataclasses.dataclass
+class _TurnUsage:
+    """Per-turn usage from the thread's cumulative ``total`` and per-request ``last``.
+
+    The first update's ``total - last`` is the thread's usage before this turn,
+    which covers resumed history without state kept across runs. Native output
+    already includes reasoning and ``totalTokens`` is input plus output.
     """
 
-    thread_id: str | None = None
-    total: TokenUsage = dataclasses.field(default_factory=TokenUsage)
+    before: dict[str, int] | None = None
+    total: dict[str, int] | None = None
+    updates: int = 0
+    raw: dict[str, Any] | None = None
 
-    def delta(self, thread_id: str | None, total: TokenUsage) -> TokenUsage:
-        """Return the usage added since the last snapshot and adopt the new one."""
-
-        if thread_id != self.thread_id:
-            self.thread_id = thread_id
-            self.total = TokenUsage()
-        previous = self.total
+    def add(self, token_usage: Any) -> None:
+        data = _to_plain(token_usage)
+        if not isinstance(data, dict):
+            return
+        total = _usage_breakdown(data.get("total", data))
+        last = _usage_breakdown(data["last"]) if "last" in data else total
+        if self.before is None:
+            self.before = {key: total[key] - last[key] for key in total}
         self.total = total
-        return TokenUsage(
-            input_tokens=max(0, total.input_tokens - previous.input_tokens),
-            output_tokens=max(0, total.output_tokens - previous.output_tokens),
-            total_tokens=max(0, total.total_tokens - previous.total_tokens),
-            cache_read_tokens=max(0, total.cache_read_tokens - previous.cache_read_tokens),
-            cache_write_tokens=max(0, total.cache_write_tokens - previous.cache_write_tokens),
-            reasoning_output_tokens=max(
-                0, total.reasoning_output_tokens - previous.reasoning_output_tokens
-            ),
-            requests=total.requests,
+        self.updates += 1
+        self.raw = data
+
+    def event(self, include_raw: bool) -> Usage | None:
+        if self.total is None or self.before is None:
+            return None
+        delta = {key: max(0, self.total[key] - self.before[key]) for key in self.total}
+        # Count usage updates as a proxy for model requests.
+        return Usage(
+            usage=TokenUsage(**delta, requests=self.updates),
+            raw=self.raw if include_raw else None,
         )
+
+
+def _usage_breakdown(data: Any) -> dict[str, int]:
+    values = {key: _int_field(data, *aliases) for key, aliases in _USAGE_FIELDS.items()}
+    if not values["total_tokens"]:
+        values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
+    return values
 
 
 def _counts_toward_max_turns(root_type: str) -> bool:
@@ -495,12 +727,18 @@ def _buffer_sort_key(item: tuple[str | None, list[str]]) -> str:
 
 
 async def _interrupt_for_max_turns(turn: Any, max_turns: int) -> None:
+    from openai_codex.errors import InvalidRequestError
+
     interrupt = getattr(turn, "interrupt", None)
     if not callable(interrupt):
         raise AgentSdkWrapperError(
             f"Codex max_turns={max_turns} reached, but the SDK turn cannot be interrupted"
         )
-    await interrupt()
+    try:
+        await interrupt()
+    except InvalidRequestError:
+        # The turn finished before the interrupt landed; its turn/completed still follows.
+        pass
 
 
 @dataclasses.dataclass(frozen=True)
@@ -570,13 +808,27 @@ def _unsupported_subagent_controls(subagents: dict[str, Any]) -> list[str]:
     return unsupported
 
 
-def _validate_thread_resume_options(options: dict[str, Any]) -> None:
-    unsupported = sorted(set(options) - _THREAD_RESUME_OPTION_KEYS)
-    if unsupported:
-        raise ConfigError(
-            "unsupported Codex thread_resume options with thread_id: "
-            f"{', '.join(unsupported)}"
+@functools.cache
+def _sdk_option_names() -> dict[str, frozenset[str]] | None:
+    """Keyword options the SDK's thread and turn methods accept."""
+
+    try:
+        from openai_codex import AsyncCodex, AsyncThread
+    except ImportError:
+        return None
+
+    def keywords(method: Any) -> frozenset[str]:
+        return frozenset(
+            name
+            for name, param in inspect.signature(method).parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY
         )
+
+    return {
+        "thread_start": keywords(AsyncCodex.thread_start),
+        "thread_resume": keywords(AsyncCodex.thread_resume),
+        "turn": keywords(AsyncThread.turn),
+    }
 
 
 @dataclasses.dataclass
@@ -589,8 +841,9 @@ class _RuntimeConfig:
 def _runtime_config(req: RunRequest):
     web_tools_override: tuple[str, ...] = ()
     if req.web_tools is not None:
+        # Codex ignores the legacy tools.web_search flag; the top-level mode controls the tool.
         web_tools_override = (
-            f"tools.web_search={'true' if req.web_tools else 'false'}",
+            _config_override("web_search", value="live" if req.web_tools else "disabled"),
         )
 
     if not req.tools and not req.subagents and not req.mcp_servers:
@@ -607,6 +860,7 @@ def _runtime_config(req: RunRequest):
                     req.tools,
                     root,
                     req.cwd,
+                    req.env,
                     allowed_tools=req.allowed_tools,
                     disallowed_tools=req.disallowed_tools,
                 )
@@ -628,16 +882,18 @@ def _tool_config_overrides(
     callables: list[Any],
     root: Path,
     cwd: str | Path | None,
+    env: dict[str, str],
     *,
     allowed_tools: list[str],
     disallowed_tools: list[str],
 ) -> list[str]:
     tool_dir = root / "tools"
     tool_dir.mkdir()
-    manifest = tool_dir / "tools.json"
+    manifest = _tool_manifest(callables)
     script = tool_dir / "server.py"
-    entries = [_tool_entry(fn) for fn in callables]
-    manifest.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    (tool_dir / "tools.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     script.write_text(_tool_server_script(), encoding="utf-8")
 
     overrides = [
@@ -655,12 +911,27 @@ def _tool_config_overrides(
             "default_tools_approval_mode",
             value="approve",
         ),
+        # Codex starts stdio servers with a minimal env; forward the parent's by name
+        # so values never appear on the command line.
+        _config_override(
+            "mcp_servers",
+            CODEX_TOOL_SERVER,
+            "env_vars",
+            value=sorted(name for name in {**os.environ, **env} if _ENV_NAME_RE.fullmatch(name)),
+        ),
+        # Codex's default MCP tool timeout is too short for arbitrary Python callables.
+        _config_override(
+            "mcp_servers",
+            CODEX_TOOL_SERVER,
+            "tool_timeout_sec",
+            value=_WRAPPER_TOOL_TIMEOUT_SEC,
+        ),
     ]
     if cwd is not None:
         overrides.append(
             _config_override("mcp_servers", CODEX_TOOL_SERVER, "cwd", value=_as_str(cwd))
         )
-    tool_names = [entry["name"] for entry in entries]
+    tool_names = [entry["name"] for entry in manifest["tools"]]
     enabled_tools = _server_enabled_tools(CODEX_TOOL_SERVER, None, allowed_tools, tool_names)
     disabled_tools = _server_disabled_tools(CODEX_TOOL_SERVER, [], disallowed_tools, tool_names)
     if enabled_tools is not None:
@@ -684,6 +955,15 @@ def _tool_config_overrides(
     return overrides
 
 
+def _tool_manifest(callables: list[Any]) -> dict[str, Any]:
+    """Describe the tool server: the parent's import path and one entry per tool."""
+
+    return {
+        "sys_path": [os.path.abspath(path or os.curdir) for path in sys.path],
+        "tools": [_tool_entry(fn) for fn in callables],
+    }
+
+
 def _tool_entry(fn: Any) -> dict[str, Any]:
     importable = _is_importable(fn)
     try:
@@ -692,6 +972,8 @@ def _tool_entry(fn: Any) -> dict[str, Any]:
         if not importable:
             raise
         source = None
+    if not importable:
+        _check_source_fallback(fn, source or "")
     return {
         "name": tool_name(fn),
         "description": tool_description(fn),
@@ -729,6 +1011,74 @@ def _source_for_tool(fn: Any) -> str:
         ) from exc
 
 
+def _check_source_fallback(fn: Any, source: str) -> None:
+    """Reject callables whose source cannot run alone in the tool server.
+
+    The server execs a non-importable callable's source in an empty namespace, so
+    module globals, closure variables and decorators are unavailable there.
+    """
+
+    name = getattr(fn, "__name__", "")
+    problems: list[str] = []
+    if inspect.ismethod(fn):
+        problems.append("it is a bound method")
+    code = getattr(fn, "__code__", None)
+    if code is not None and code.co_freevars:
+        problems.append("it closes over " + ", ".join(code.co_freevars))
+    try:
+        definition = ast.parse(source).body[0]
+    except (SyntaxError, IndexError):
+        definition = None
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)) or (
+        definition.name != name
+    ):
+        problems.append("its source is not a plain function definition")
+    else:
+        if definition.decorator_list:
+            problems.append("it is decorated")
+        used = _global_names(code) if code is not None else set()
+        used |= {
+            node.id
+            for part in _signature_nodes(definition)
+            for node in ast.walk(part)
+            if isinstance(node, ast.Name)
+        }
+        free = sorted(used - {name} - set(vars(builtins)))
+        if free:
+            problems.append("it uses module-level names " + ", ".join(free))
+    if problems:
+        raise ConfigError(
+            f"Codex tool {tool_name(fn)!r} cannot be imported by the tool server and its "
+            f"source cannot run alone: {'; '.join(problems)}. Define it at module level "
+            "in an importable module"
+        )
+
+
+def _global_names(code: Any) -> set[str]:
+    names = {
+        instruction.argval
+        for instruction in dis.get_instructions(code)
+        if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME", "STORE_GLOBAL", "DELETE_GLOBAL"}
+    }
+    for const in code.co_consts:
+        if inspect.iscode(const):
+            names |= _global_names(const)
+    return names
+
+
+def _signature_nodes(definition: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    args = definition.args
+    parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    nodes: list[ast.AST] = [
+        param.annotation for param in parameters if param is not None and param.annotation
+    ]
+    nodes.extend(args.defaults)
+    nodes.extend(default for default in args.kw_defaults if default is not None)
+    if definition.returns is not None:
+        nodes.append(definition.returns)
+    return nodes
+
+
 def _source_for_tool_from_repo_path(fn: Any) -> str | None:
     code = getattr(fn, "__code__", None)
     filename = getattr(code, "co_filename", None)
@@ -754,6 +1104,7 @@ def _tool_server_script() -> str:
 
         import importlib
         import json
+        import sys
         from pathlib import Path
 
         try:
@@ -762,6 +1113,9 @@ def _tool_server_script() -> str:
         except ImportError:  # mcp < 2
             from mcp.server.fastmcp import FastMCP as _Server
 
+        manifest = json.loads(Path(__file__).with_name("tools.json").read_text(encoding="utf-8"))
+        # Import tools from the same paths the parent process used.
+        sys.path[:0] = [path for path in manifest["sys_path"] if path not in sys.path]
         server = _Server("agent_sdk_wrapper_tools")
 
 
@@ -779,7 +1133,7 @@ def _tool_server_script() -> str:
                 return namespace[entry["source_name"]]
 
 
-        for entry in json.loads(Path(__file__).with_name("tools.json").read_text()):
+        for entry in manifest["tools"]:
             server.add_tool(
                 _resolve(entry),
                 name=entry["name"],
@@ -992,20 +1346,52 @@ def _toml_literal(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return json.dumps(value)
+        return _toml_string(value)
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
     if isinstance(value, dict):
         items = [
-            f"{json.dumps(str(key))} = {_toml_literal(item)}"
+            f"{_toml_string(str(key))} = {_toml_literal(item)}"
             for key, item in value.items()
         ]
         return "{ " + ", ".join(items) + " }"
     if value is None:
         raise ConfigError("None is not a valid Codex config override value")
-    return json.dumps(str(value))
+    return _toml_string(str(value))
+
+
+_TOML_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_string(value: str) -> str:
+    """Encode a TOML basic string.
+
+    JSON escapes split non-BMP characters into surrogate pairs, which TOML rejects.
+    """
+
+    out = ['"']
+    for char in value:
+        code = ord(char)
+        if char in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[char])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        elif 0xD800 <= code <= 0xDFFF:
+            raise ConfigError(f"Codex config strings cannot contain lone surrogates: {value!r}")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
 
 
 def _codex_config(
@@ -1038,8 +1424,9 @@ def _codex_config(
         if codex_bin is not None and "codex_bin" not in kwargs:
             kwargs["codex_bin"] = codex_bin
         if config_overrides:
-            kwargs["config_overrides"] = tuple(kwargs.get("config_overrides", ())) + tuple(
-                config_overrides
+            # Later overrides win, so the caller's own config_overrides come last.
+            kwargs["config_overrides"] = tuple(config_overrides) + tuple(
+                kwargs.get("config_overrides", ())
             )
         if env:
             kwargs["env"] = {**kwargs.get("env", {}), **env}
@@ -1052,8 +1439,8 @@ def _codex_config(
     if codex_bin is not None and getattr(config, "codex_bin", None) is None:
         updates["codex_bin"] = codex_bin
     if config_overrides:
-        updates["config_overrides"] = tuple(getattr(config, "config_overrides", ())) + tuple(
-            config_overrides
+        updates["config_overrides"] = tuple(config_overrides) + tuple(
+            getattr(config, "config_overrides", ())
         )
     if env:
         current = getattr(config, "env", None) or {}
@@ -1064,26 +1451,174 @@ def _codex_config(
 
 
 def _codex_output_schema(tp: type) -> dict[str, Any]:
-    schema = deepcopy(json_schema_of_type(tp))
-    _disallow_additional_properties(schema)
+    """Return the schema Codex sends with ``strict: true``."""
+
+    schema = _strict_schema(tp)
+    _walk_schema(schema, lambda node: node.pop(_OPTIONAL_MARKER, None))
     return schema
 
 
-def _disallow_additional_properties(value: Any) -> None:
-    if isinstance(value, dict):
-        if value.get("type") == "object":
-            value.setdefault("additionalProperties", False)
-        for child in value.values():
-            _disallow_additional_properties(child)
-    elif isinstance(value, list):
-        for child in value:
-            _disallow_additional_properties(child)
+def _structured_value(tp: type, value: Any) -> Any:
+    """Drop nulls strict mode forced onto optional fields so their defaults apply."""
+
+    schema = _strict_schema(tp)
+    return _drop_optional_nulls(value, schema, schema)
+
+
+# Marks properties that strict mode made nullable; never sent to Codex.
+_OPTIONAL_MARKER = "x-agent-sdk-wrapper-optional"
+
+
+def _strict_schema(tp: type) -> dict[str, Any]:
+    """Rewrite a JSON schema into the Structured Outputs strict subset.
+
+    Every property becomes required; optional ones become nullable; defaults are
+    removed; ``$ref`` never has siblings; objects disallow additional properties.
+    """
+
+    root = deepcopy(json_schema_of_type(tp))
+    if "$ref" in root:
+        defs = root.get("$defs", {})
+        root = {**deepcopy(_resolve_ref(root, root["$ref"])), "$defs": defs}
+    if root.get("type") != "object":
+        raise ConfigError(
+            "Codex structured output requires an object schema (a Pydantic model, "
+            f"dataclass, or TypedDict); {tp!r} is not an object"
+        )
+    _make_strict(root, root, "output")
+    for name, definition in root.get("$defs", {}).items():
+        _make_strict(definition, root, name)
+    return root
+
+
+def _make_strict(node: Any, root: dict[str, Any], where: str) -> None:
+    if not isinstance(node, dict):
+        return
+    if "$ref" in node:
+        if len(node) == 1:
+            return
+        siblings = {key: value for key, value in node.items() if key != "$ref"}
+        resolved = deepcopy(_resolve_ref(root, node["$ref"]))
+        node.clear()
+        node.update({**resolved, **siblings})
+    node.pop("default", None)
+    if "oneOf" in node:
+        node["anyOf"] = [*node.get("anyOf", []), *node.pop("oneOf")]
+        node.pop("discriminator", None)
+    if isinstance(node.get("allOf"), list) and len(node["allOf"]) == 1:
+        node.update({**node.pop("allOf")[0], **node})
+        _make_strict(node, root, where)
+        return
+    if not any(key in node for key in ("type", "enum", "const", "anyOf", "allOf", "$ref")):
+        raise ConfigError(
+            f"Codex structured output cannot express {where}: it accepts any value; "
+            "strict mode needs a concrete type"
+        )
+    for key in ("anyOf", "allOf", "prefixItems"):
+        for index, branch in enumerate(node.get(key, [])):
+            _make_strict(branch, root, f"{where}[{index}]")
+    if isinstance(node.get("items"), dict):
+        _make_strict(node["items"], root, f"{where}[]")
+    types = node.get("type")
+    if types == "object" or (isinstance(types, list) and "object" in types):
+        _make_object_strict(node, root, where)
+
+
+def _make_object_strict(node: dict[str, Any], root: dict[str, Any], where: str) -> None:
+    if (
+        "properties" not in node
+        or "patternProperties" in node
+        or node.get("additionalProperties", False) is not False
+    ):
+        raise ConfigError(
+            f"Codex structured output cannot express {where}: strict mode has no "
+            "free-form objects; use a model with named fields instead of a dict"
+        )
+    properties = node["properties"]
+    required = set(node.get("required", []))
+    optional: list[str] = []
+    for name, prop in properties.items():
+        _make_strict(prop, root, f"{where}.{name}")
+        if name not in required and not _schema_nullable(prop, root):
+            properties[name] = {"anyOf": [prop, {"type": "null"}]}
+            optional.append(name)
+    node["required"] = list(properties)
+    node["additionalProperties"] = False
+    if optional:
+        node[_OPTIONAL_MARKER] = optional
+
+
+def _schema_nullable(node: Any, root: dict[str, Any]) -> bool:
+    if not isinstance(node, dict):
+        return False
+    if "$ref" in node:
+        return _schema_nullable(_resolve_ref(root, node["$ref"]), root)
+    types = node.get("type")
+    if types == "null" or (isinstance(types, list) and "null" in types):
+        return True
+    if "const" in node and node["const"] is None:
+        return True
+    if None in node.get("enum", ()):
+        return True
+    return any(_schema_nullable(branch, root) for branch in node.get("anyOf", ()))
+
+
+def _resolve_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not ref.startswith("#/"):
+        raise ConfigError(f"Codex structured output cannot resolve schema reference {ref!r}")
+    node: Any = root
+    for part in ref[2:].split("/"):
+        node = node.get(part) if isinstance(node, dict) else None
+    if not isinstance(node, dict):
+        raise ConfigError(f"Codex structured output cannot resolve schema reference {ref!r}")
+    return node
+
+
+def _walk_schema(node: Any, visit: Any) -> None:
+    if not isinstance(node, dict):
+        return
+    visit(node)
+    for key in ("properties", "$defs"):
+        for child in node.get(key, {}).values():
+            _walk_schema(child, visit)
+    for key in ("anyOf", "allOf", "prefixItems"):
+        for child in node.get(key, []):
+            _walk_schema(child, visit)
+    _walk_schema(node.get("items"), visit)
+
+
+def _drop_optional_nulls(value: Any, node: Any, root: dict[str, Any]) -> Any:
+    if not isinstance(node, dict):
+        return value
+    if "$ref" in node:
+        node = _resolve_ref(root, node["$ref"])
+    if isinstance(value, dict) and "properties" in node:
+        optional = set(node.get(_OPTIONAL_MARKER, ()))
+        properties = node["properties"]
+        return {
+            key: _drop_optional_nulls(item, properties.get(key), root)
+            for key, item in value.items()
+            if not (item is None and key in optional)
+        }
+    if isinstance(value, list) and isinstance(node.get("items"), dict):
+        return [_drop_optional_nulls(item, node["items"], root) for item in value]
+    for branch in node.get("anyOf", ()):
+        resolved = _resolve_ref(root, branch["$ref"]) if "$ref" in branch else branch
+        if (isinstance(value, dict) and "properties" in resolved) or (
+            isinstance(value, list) and "items" in resolved
+        ):
+            return _drop_optional_nulls(value, resolved, root)
+    return value
 
 
 def _config_has_codex_bin(config: Any) -> bool:
+    return bool(_config_value(config, "codex_bin"))
+
+
+def _config_value(config: Any, key: str) -> Any:
     if isinstance(config, dict):
-        return bool(config.get("codex_bin"))
-    return bool(getattr(config, "codex_bin", None))
+        return config.get(key)
+    return getattr(config, key, None)
 
 
 def _codex_cli_bin_available() -> bool:
@@ -1131,6 +1666,37 @@ def _write_sdk_debug_log(
     return path
 
 
+def _codex_process(codex: Any) -> Any:
+    return getattr(getattr(getattr(codex, "_client", None), "_sync", None), "_proc", None)
+
+
+async def _raise_if_signaled(process: Any, exc: BaseException) -> None:
+    """Raise ProcessTerminatedError when the app-server died from a signal."""
+
+    from openai_codex.errors import TransportClosedError
+
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return
+    returncode = poll()
+    if returncode is None and isinstance(exc, TransportClosedError):
+        # stdout can close a moment before the exit status is reapable.
+        try:
+            returncode = await asyncio.to_thread(process.wait, 2)
+        except Exception:
+            return
+    if not isinstance(returncode, int) or returncode >= 0:
+        return
+    number = -returncode
+    try:
+        name = signal.Signals(number).name
+    except ValueError:
+        name = str(number)
+    raise ProcessTerminatedError(
+        number, message=f"Codex app-server was killed by signal {name}: {exc}", cause=exc
+    ) from exc
+
+
 def _codex_stderr_tail(codex: Any) -> str | None:
     client = getattr(codex, "_client", None)
     sync_client = getattr(client, "_sync", None)
@@ -1159,15 +1725,16 @@ def _enum_value(enum_type: Any, value: Any) -> Any:
             ) from exc
 
 
-def _tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:
-    """Map a completed action to a tool call and result, both carrying the tool name."""
+def _tool_events(root: Any, event: Any, include_raw: bool) -> tuple[ToolCall, ToolResult] | None:
+    """Map an action item to a tool call and result, both carrying the tool name."""
 
     events = _build_tool_events(root, event, include_raw)
-    names = {e.id: e.name for e in events if isinstance(e, ToolCall) and e.id}
-    for tool_event in events:
-        if isinstance(tool_event, ToolResult) and tool_event.name is None:
-            tool_event.name = names.get(tool_event.id)
-    return events
+    if not events:
+        return None
+    call, result = cast(tuple[ToolCall, ToolResult], tuple(events))
+    if result.name is None:
+        result.name = call.name
+    return call, result
 
 
 def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEvent]:
@@ -1399,54 +1966,6 @@ def _stringify_output(value: Any) -> str | None:
     return json.dumps(plain)
 
 
-def _usage_event(
-    usage: Any,
-    include_raw: bool,
-    requests: int,
-    thread_id: str | None,
-    baseline: _UsageBaseline,
-) -> Usage:
-    """Convert cumulative counters to per-run usage.
-
-    This adapter adds reasoning to raw output; raw output inclusivity is unverified.
-    Cache-write counts remain zero.
-    """
-
-    data = _to_plain(usage)
-    total = data.get("total", data) if isinstance(data, dict) else {}
-    inp = _int_field(total, "input_tokens", "inputTokens", "input", "prompt_tokens", "promptTokens")
-    out = _int_field(
-        total,
-        "output_tokens",
-        "outputTokens",
-        "output",
-        "completion_tokens",
-        "completionTokens",
-    )
-    cached = _int_field(
-        total,
-        "cached_input_tokens",
-        "cachedInputTokens",
-        "cache_read_input_tokens",
-        "cacheReadInputTokens",
-    )
-    reasoning = _int_field(total, "reasoning_output_tokens", "reasoningOutputTokens")
-    out += reasoning
-    cumulative = TokenUsage(
-        requests=requests,
-        input_tokens=inp,
-        output_tokens=out,
-        total_tokens=inp + out,
-        cache_read_tokens=cached,
-        reasoning_output_tokens=reasoning,
-    )
-    return Usage(
-        usage=baseline.delta(thread_id, cumulative),
-        cost_usd=None,
-        raw=data if include_raw and isinstance(data, dict) else None,
-    )
-
-
 def _int_field(data: Any, *keys: str) -> int:
     if not isinstance(data, dict):
         return 0
@@ -1467,14 +1986,148 @@ def _parse_json(text: str) -> Any:
         return text
 
 
-def _turn_failed(turn: Any) -> bool:
-    return _status_value(getattr(turn, "status", None)) == "failed"
+_TRANSIENT = "transient_api_error"
+_CODEX_ERROR_TYPES = {
+    "contextWindowExceeded": "context_window_exceeded",
+    "sessionBudgetExceeded": "max_budget",
+    "usageLimitExceeded": "usage_limit_exceeded",
+    "rateLimitExceeded": _TRANSIENT,
+    "serverOverloaded": _TRANSIENT,
+    "internalServerError": _TRANSIENT,
+    "unauthorized": "authentication_failed",
+    "badRequest": "invalid_request",
+    "cyberPolicy": "refused",
+    "misalignmentPolicyViolation": "refused",
+    "sandboxError": "execution_error",
+    "threadRollbackFailed": "execution_error",
+    "activeTurnNotSteerable": "invalid_request",
+}
+# codexErrorInfo variants that carry an optional upstream HTTP status.
+_CODEX_HTTP_ERRORS = {
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts",
+}
+_HTTP_STATUS_RE = re.compile(
+    r"\b(?:status(?: code)?|http)[:\s]+(\d{3})\b"
+    r"|\b(\d{3}) (?:bad request|unauthorized|payment required|forbidden|not found"
+    r"|too many requests|internal server error|bad gateway|service unavailable"
+    r"|gateway timeout)\b",
+    re.IGNORECASE,
+)
+_ERROR_PATTERNS = tuple(
+    (re.compile(pattern, re.IGNORECASE), error_type)
+    for pattern, error_type in (
+        (
+            r"\bcontext[ _-]?window\b|\bcontext_length_exceeded\b"
+            r"|\bmaximum context length\b|\bprompt is too long\b",
+            "context_window_exceeded",
+        ),
+        (
+            r"\binsufficient_quota\b|\bexceeded your current quota\b|\bquota exceeded\b"
+            r"|\busage limit\b",
+            "usage_limit_exceeded",
+        ),
+        (r"\bbilling\b|\bcredit balance\b", "billing_error"),
+        (
+            r"\bunauthorized\b|\bnot logged in\b|\binvalid_api_key\b"
+            r"|\b(?:invalid|incorrect|missing) api key\b",
+            "authentication_failed",
+        ),
+        (r"\bforbidden\b|\bpermission denied\b", "permission_denied"),
+        (
+            r"\bmodel_not_found\b|\bunknown model\b"
+            r"|\bmodel\b.{0,80}?\b(?:does not exist|not found|is not supported)\b",
+            "model_not_found",
+        ),
+        (
+            r"\brate[ _-]?limit|\boverloaded\b|\bserver busy\b|\bat capacity\b"
+            r"|\bstream disconnected\b|\bconnection (?:reset|refused|closed|timed out)\b"
+            r"|\btimed out\b|\btemporarily unavailable\b",
+            _TRANSIENT,
+        ),
+        (r"\binvalid_request_error\b|\bbad request\b|\binvalid prompt\b", "invalid_request"),
+    )
+)
 
 
-def _turn_error_message(turn: Any) -> str:
-    error = getattr(turn, "error", None)
-    message = getattr(error, "message", None)
-    return str(message or "Codex turn failed")
+def _error_event(error: Any, raw: dict[str, Any] | None = None) -> Error:
+    message = _turn_error_text(error)
+    info = _field(error, "codex_error_info", "codexErrorInfo")
+    error_type = _classify_codex_error(info, message)
+    return Error(
+        message=message, error_type=error_type, retryable=error_type == _TRANSIENT, raw=raw
+    )
+
+
+def _turn_error_text(error: Any) -> str:
+    """Keep the runtime's own text; an empty message can leave it only in the details."""
+
+    message = str(_field(error, "message", "message") or "")
+    details = str(_field(error, "additional_details", "additionalDetails") or "")
+    if message and details and details not in message:
+        return f"{message}: {details}"
+    return message or details or "Codex reported an error"
+
+
+def _field(value: Any, attr: str, key: str) -> Any:
+    """Read a field from an SDK model, or from the raw dict of an unparsed payload."""
+
+    if isinstance(value, dict):
+        return value.get(key, value.get(attr))
+    params = getattr(value, "params", None)
+    if isinstance(params, dict) and not hasattr(value, attr):
+        return params.get(key, params.get(attr))
+    return getattr(value, attr, None)
+
+
+def _classify_codex_error(info: Any, message: str) -> str:
+    """Prefer the structured ``codexErrorInfo``; fall back to the message for ``other``."""
+
+    plain = _to_plain(info)
+    plain = getattr(plain, "value", plain)
+    if isinstance(plain, str) and plain in _CODEX_ERROR_TYPES:
+        return _CODEX_ERROR_TYPES[plain]
+    if isinstance(plain, dict) and plain:
+        kind, detail = next(iter(plain.items()))
+        if kind in _CODEX_ERROR_TYPES:
+            return _CODEX_ERROR_TYPES[kind]
+        if kind in _CODEX_HTTP_ERRORS:
+            status = detail.get("httpStatusCode") if isinstance(detail, dict) else None
+            return _http_error_type(status, message) if status else _TRANSIENT
+    return _message_error_type(message) or "provider_exception"
+
+
+def _message_error_type(message: str) -> str | None:
+    match = _HTTP_STATUS_RE.search(message)
+    if match:
+        return _http_error_type(int(match.group(1) or match.group(2)), message)
+    return _pattern_error_type(message)
+
+
+def _pattern_error_type(message: str) -> str | None:
+    for pattern, error_type in _ERROR_PATTERNS:
+        if pattern.search(message):
+            return error_type
+    return None
+
+
+def _http_error_type(status: int, message: str) -> str:
+    if status in (408, 429) or status >= 500:
+        return _TRANSIENT
+    if status == 401:
+        return "authentication_failed"
+    if status == 402:
+        return "billing_error"
+    if status == 403:
+        return "permission_denied"
+    specific = _pattern_error_type(message)
+    if specific is not None and specific != _TRANSIENT:
+        return specific
+    if status in (400, 422):
+        return "invalid_request"
+    return f"api_error_{status}"
 
 
 def _status_value(status: Any) -> str:
@@ -1524,20 +2177,4 @@ def _as_str(value: Any) -> str | None:
 
 
 def _looks_transient(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    return any(
-        phrase in text
-        for phrase in (
-            "rate limit",
-            "overloaded",
-            "server busy",
-            "stream disconnected",
-            "timeout",
-            "timed out",
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
-        )
-    )
+    return _message_error_type(str(exc)) == _TRANSIENT

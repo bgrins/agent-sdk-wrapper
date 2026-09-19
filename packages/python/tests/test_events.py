@@ -126,7 +126,7 @@ def test_normalize_builtin_tools():
 def test_normalize_effort_for_provider():
     assert normalize_effort_for_provider("anthropic", "HIGH") == "high"
     assert normalize_effort_for_provider("anthropic", "max") == "max"
-    assert normalize_effort_for_provider("openai", "max") == "xhigh"
+    assert normalize_effort_for_provider("openai", "max") == "max"
     assert normalize_effort_for_provider("openai", "minimal") == "minimal"
 
     with pytest.raises(ConfigError, match="not supported"):
@@ -223,7 +223,7 @@ def test_provider_can_be_inferred_from_model():
     assert Agent(model="codex:gpt-5").model == "gpt-5"
     assert Agent(provider="codex").provider == "openai"
     assert Agent(provider="anthropic", model="gpt-5").provider == "anthropic"
-    assert Agent(model="codex:gpt-5", effort="max").effort == "xhigh"
+    assert Agent(model="codex:gpt-5", effort="max").effort == "max"
 
     with pytest.raises(ConfigError, match="not supported"):
         Agent(model="anthropic:claude-haiku-4-5", effort="none")
