@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import builtins
 import dataclasses
+import dis
 import inspect
 import json
 import os
@@ -68,7 +71,9 @@ _CODEX_NATIVE_TOOL_FILTER_NAMES = {
     "web_search",
 }
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
+_WRAPPER_TOOL_TIMEOUT_SEC = 600
 
 
 class OpenAIProvider(ProviderAdapter):
@@ -441,6 +446,8 @@ def _structured_output_event(output_schema: type, text: str) -> AgentEvent:
 def _validate_supported(req: RunRequest) -> None:
     normalize_effort_for_provider("openai", req.effort)
     validate_tool_names(req.tools)
+    for fn in req.tools:
+        _tool_entry(fn)
     if req.output_schema is not None:
         _codex_output_schema(req.output_schema)
     unsupported: list[str] = []
@@ -702,6 +709,7 @@ def _runtime_config(req: RunRequest):
                     req.tools,
                     root,
                     req.cwd,
+                    req.env,
                     allowed_tools=req.allowed_tools,
                     disallowed_tools=req.disallowed_tools,
                 )
@@ -723,16 +731,18 @@ def _tool_config_overrides(
     callables: list[Any],
     root: Path,
     cwd: str | Path | None,
+    env: dict[str, str],
     *,
     allowed_tools: list[str],
     disallowed_tools: list[str],
 ) -> list[str]:
     tool_dir = root / "tools"
     tool_dir.mkdir()
-    manifest = tool_dir / "tools.json"
+    manifest = _tool_manifest(callables)
     script = tool_dir / "server.py"
-    entries = [_tool_entry(fn) for fn in callables]
-    manifest.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    (tool_dir / "tools.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     script.write_text(_tool_server_script(), encoding="utf-8")
 
     overrides = [
@@ -750,12 +760,27 @@ def _tool_config_overrides(
             "default_tools_approval_mode",
             value="approve",
         ),
+        # Codex starts stdio servers with a minimal env; forward the parent's by name
+        # so values never appear on the command line.
+        _config_override(
+            "mcp_servers",
+            CODEX_TOOL_SERVER,
+            "env_vars",
+            value=sorted(name for name in {**os.environ, **env} if _ENV_NAME_RE.fullmatch(name)),
+        ),
+        # Codex's default MCP tool timeout is too short for arbitrary Python callables.
+        _config_override(
+            "mcp_servers",
+            CODEX_TOOL_SERVER,
+            "tool_timeout_sec",
+            value=_WRAPPER_TOOL_TIMEOUT_SEC,
+        ),
     ]
     if cwd is not None:
         overrides.append(
             _config_override("mcp_servers", CODEX_TOOL_SERVER, "cwd", value=_as_str(cwd))
         )
-    tool_names = [entry["name"] for entry in entries]
+    tool_names = [entry["name"] for entry in manifest["tools"]]
     enabled_tools = _server_enabled_tools(CODEX_TOOL_SERVER, None, allowed_tools, tool_names)
     disabled_tools = _server_disabled_tools(CODEX_TOOL_SERVER, [], disallowed_tools, tool_names)
     if enabled_tools is not None:
@@ -779,6 +804,15 @@ def _tool_config_overrides(
     return overrides
 
 
+def _tool_manifest(callables: list[Any]) -> dict[str, Any]:
+    """Describe the tool server: the parent's import path and one entry per tool."""
+
+    return {
+        "sys_path": [os.path.abspath(path or os.curdir) for path in sys.path],
+        "tools": [_tool_entry(fn) for fn in callables],
+    }
+
+
 def _tool_entry(fn: Any) -> dict[str, Any]:
     importable = _is_importable(fn)
     try:
@@ -787,6 +821,8 @@ def _tool_entry(fn: Any) -> dict[str, Any]:
         if not importable:
             raise
         source = None
+    if not importable:
+        _check_source_fallback(fn, source or "")
     return {
         "name": tool_name(fn),
         "description": tool_description(fn),
@@ -824,6 +860,74 @@ def _source_for_tool(fn: Any) -> str:
         ) from exc
 
 
+def _check_source_fallback(fn: Any, source: str) -> None:
+    """Reject callables whose source cannot run alone in the tool server.
+
+    The server execs a non-importable callable's source in an empty namespace, so
+    module globals, closure variables and decorators are unavailable there.
+    """
+
+    name = getattr(fn, "__name__", "")
+    problems: list[str] = []
+    if inspect.ismethod(fn):
+        problems.append("it is a bound method")
+    code = getattr(fn, "__code__", None)
+    if code is not None and code.co_freevars:
+        problems.append("it closes over " + ", ".join(code.co_freevars))
+    try:
+        definition = ast.parse(source).body[0]
+    except (SyntaxError, IndexError):
+        definition = None
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)) or (
+        definition.name != name
+    ):
+        problems.append("its source is not a plain function definition")
+    else:
+        if definition.decorator_list:
+            problems.append("it is decorated")
+        used = _global_names(code) if code is not None else set()
+        used |= {
+            node.id
+            for part in _signature_nodes(definition)
+            for node in ast.walk(part)
+            if isinstance(node, ast.Name)
+        }
+        free = sorted(used - {name} - set(vars(builtins)))
+        if free:
+            problems.append("it uses module-level names " + ", ".join(free))
+    if problems:
+        raise ConfigError(
+            f"Codex tool {tool_name(fn)!r} cannot be imported by the tool server and its "
+            f"source cannot run alone: {'; '.join(problems)}. Define it at module level "
+            "in an importable module"
+        )
+
+
+def _global_names(code: Any) -> set[str]:
+    names = {
+        instruction.argval
+        for instruction in dis.get_instructions(code)
+        if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME", "STORE_GLOBAL", "DELETE_GLOBAL"}
+    }
+    for const in code.co_consts:
+        if inspect.iscode(const):
+            names |= _global_names(const)
+    return names
+
+
+def _signature_nodes(definition: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    args = definition.args
+    parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    nodes: list[ast.AST] = [
+        param.annotation for param in parameters if param is not None and param.annotation
+    ]
+    nodes.extend(args.defaults)
+    nodes.extend(default for default in args.kw_defaults if default is not None)
+    if definition.returns is not None:
+        nodes.append(definition.returns)
+    return nodes
+
+
 def _source_for_tool_from_repo_path(fn: Any) -> str | None:
     code = getattr(fn, "__code__", None)
     filename = getattr(code, "co_filename", None)
@@ -849,6 +953,7 @@ def _tool_server_script() -> str:
 
         import importlib
         import json
+        import sys
         from pathlib import Path
 
         try:
@@ -857,6 +962,9 @@ def _tool_server_script() -> str:
         except ImportError:  # mcp < 2
             from mcp.server.fastmcp import FastMCP as _Server
 
+        manifest = json.loads(Path(__file__).with_name("tools.json").read_text(encoding="utf-8"))
+        # Import tools from the same paths the parent process used.
+        sys.path[:0] = [path for path in manifest["sys_path"] if path not in sys.path]
         server = _Server("agent_sdk_wrapper_tools")
 
 
@@ -874,7 +982,7 @@ def _tool_server_script() -> str:
                 return namespace[entry["source_name"]]
 
 
-        for entry in json.loads(Path(__file__).with_name("tools.json").read_text()):
+        for entry in manifest["tools"]:
             server.add_tool(
                 _resolve(entry),
                 name=entry["name"],
@@ -1165,8 +1273,9 @@ def _codex_config(
         if codex_bin is not None and "codex_bin" not in kwargs:
             kwargs["codex_bin"] = codex_bin
         if config_overrides:
-            kwargs["config_overrides"] = tuple(kwargs.get("config_overrides", ())) + tuple(
-                config_overrides
+            # Later overrides win, so the caller's own config_overrides come last.
+            kwargs["config_overrides"] = tuple(config_overrides) + tuple(
+                kwargs.get("config_overrides", ())
             )
         if env:
             kwargs["env"] = {**kwargs.get("env", {}), **env}
@@ -1179,8 +1288,8 @@ def _codex_config(
     if codex_bin is not None and getattr(config, "codex_bin", None) is None:
         updates["codex_bin"] = codex_bin
     if config_overrides:
-        updates["config_overrides"] = tuple(getattr(config, "config_overrides", ())) + tuple(
-            config_overrides
+        updates["config_overrides"] = tuple(config_overrides) + tuple(
+            getattr(config, "config_overrides", ())
         )
     if env:
         current = getattr(config, "env", None) or {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import signal
@@ -390,6 +391,37 @@ async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_pat
     assert content["text"] == f"{UNICODE_TEXT}|{UNICODE_TEXT}"
     followup = _strings(mock_api.posts()[-1]["body"]["input"])
     assert any(f"fox: {{\n{UNICODE_TEXT}\n}}" in text for text in followup)
+
+
+async def test_wrapper_tools_see_the_parent_env_and_imports(
+    mock_api, codex_home, tmp_path, monkeypatch
+):
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "runtime_tools.py").write_text(
+        "import os\n\nPREFIX = 'token:'\n\n\n"
+        "def token() -> str:\n"
+        '    """Return the token."""\n'
+        "    return PREFIX + os.environ.get('WRAPPER_TOOL_TOKEN', '<unset>')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(modules))
+    token = importlib.import_module("runtime_tools").token
+    mock_api.plan = [
+        {"call": {"name": "token", "namespace": "mcp__agent_sdk_wrapper_tools"}},
+        {"text": "done"},
+    ]
+    agent = codex_agent(
+        mock_api, codex_home, tmp_path, tools=[token], env={"WRAPPER_TOOL_TOKEN": "t0k3n"}
+    )
+
+    result = await agent.run("token?")
+
+    assert result.ok, result.error
+    [tool_result] = [e.event for e in result.events if e.event.type == "tool_result"]
+    assert not tool_result.is_error, tool_result.output
+    [content] = json.loads(tool_result.output or "{}")["content"]
+    assert content["text"] == "token:t0k3n"
 
 
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):

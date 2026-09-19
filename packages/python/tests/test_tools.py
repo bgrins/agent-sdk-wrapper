@@ -65,45 +65,47 @@ def test_json_schema_optional_unwrap():
     assert schema["properties"]["x"] == {"type": "integer"}
 
 
-async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
-    """Check the generated MCP server with a real offline handshake."""
+async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path, monkeypatch):
+    """Check the generated MCP server with a real offline handshake and tool calls."""
     import asyncio
+    import importlib
     import json
     import sys
 
-    from agent_sdk_wrapper.providers.openai_provider import _tool_entry, _tool_server_script
+    from agent_sdk_wrapper.providers.openai_provider import _tool_manifest, _tool_server_script
+
+    # Importable only through the parent's sys.path; uses a module global.
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "handshake_tools.py").write_text(
+        "OFFSET = 10\n\n\n"
+        "def shift(value: int) -> int:\n"
+        '    """Shift a value."""\n'
+        "    return value + OFFSET\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(modules))
+    shift = importlib.import_module("handshake_tools").shift
 
     def add(a: int, b: int) -> int:
         """Add two integers."""
         return a + b
 
-    script = tmp_path / "server.py"
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    script = server_dir / "server.py"
     script.write_text(_tool_server_script(), encoding="utf-8")
-    (tmp_path / "tools.json").write_text(
-        json.dumps([_tool_entry(add)], ensure_ascii=False), encoding="utf-8"
+    (server_dir / "tools.json").write_text(
+        json.dumps(_tool_manifest([add, shift]), ensure_ascii=False), encoding="utf-8"
     )
 
-    requests = [
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "1"},
-            },
-        },
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-    ]
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         str(script),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=tmp_path,
+        cwd=server_dir,
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     stderr_task = asyncio.create_task(proc.stderr.read())
@@ -121,15 +123,39 @@ async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
         stderr = (await stderr_task).decode(errors="replace")
         raise AssertionError(f"server closed before response {request_id}; stderr:\n{stderr}")
 
+    async def call(request_id, name, arguments):
+        await send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+        )
+        return (await receive(request_id))["result"]
+
     try:
         async with asyncio.timeout(60):
-            # Wait for initialization; keep stdin open until tools/list responds.
-            await send(requests[0])
+            # Wait for initialization; keep stdin open until the last response.
+            await send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                }
+            )
             initialized = await receive(1)
             assert "tools" in initialized["result"]["capabilities"]
-            await send(requests[1])
-            await send(requests[2])
+            await send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            await send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
             listed = await receive(2)
+            added = await call(3, "add", {"a": 2, "b": 3})
+            shifted = await call(4, "shift", {"value": 1})
     finally:
         proc.stdin.close()
         try:
@@ -140,4 +166,6 @@ async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path):
         stderr = (await stderr_task).decode(errors="replace")
 
     assert proc.returncode == 0, stderr
-    assert [tool["name"] for tool in listed["result"]["tools"]] == ["add"]
+    assert [tool["name"] for tool in listed["result"]["tools"]] == ["add", "shift"]
+    assert (added.get("isError"), added["content"][0]["text"]) == (False, "5")
+    assert (shifted.get("isError"), shifted["content"][0]["text"]) == (False, "11")

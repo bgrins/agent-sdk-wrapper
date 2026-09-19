@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 import pytest
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ from agent_sdk_wrapper.providers.openai_provider import (
     _validate_thread_resume_options,
     _write_sdk_debug_log,
 )
+from agent_sdk_wrapper.tools import TOOL_NAME_ATTR
 
 
 class Answer(BaseModel):
@@ -577,6 +578,87 @@ def test_codex_tool_entry_keeps_source_fallback_for_importable_tool():
     assert "def sample_importable_tool" in entry["source"]
 
 
+MODULE_OFFSET = 3
+
+
+def _register(fn):
+    return fn
+
+
+class _Tools:
+    def method(self, value: int) -> int:
+        return value
+
+
+def _source_fallback_candidates():
+    offset = 1
+
+    def uses_global(value: int) -> int:
+        return value + MODULE_OFFSET
+
+    def uses_closure(value: int) -> int:
+        return value + offset
+
+    @_register
+    def decorated(value: int) -> int:
+        return value
+
+    def annotated(value: Literal["a", "b"]) -> str:
+        return value
+
+    identity = lambda value: value  # noqa: E731
+    setattr(identity, TOOL_NAME_ATTR, "identity")
+
+    return {
+        "module-level names MODULE_OFFSET": uses_global,
+        "closes over offset": uses_closure,
+        "decorated": decorated,
+        "module-level names Literal": annotated,
+        "bound method": _Tools().method,
+        "not a plain function definition": identity,
+    }
+
+
+@pytest.mark.parametrize("problem", list(_source_fallback_candidates()))
+def test_codex_rejects_tools_the_server_cannot_rebuild_from_source(problem):
+    tool = _source_fallback_candidates()[problem]
+    req = RunRequest(provider="openai", prompt="ignored", tools=[tool])
+
+    with pytest.raises(ConfigError, match=problem):
+        OpenAIProvider().validate_request(req)
+
+
+def test_codex_accepts_self_contained_local_tools():
+    def scale(value: float, factor: int = 2, label: str | None = None) -> dict[str, float]:
+        import math
+
+        return {label or "value": math.fsum([value] * factor)}
+
+    OpenAIProvider().validate_request(RunRequest(provider="openai", prompt="x", tools=[scale]))
+
+
+def test_codex_tool_server_gets_env_names_and_a_long_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARENT_ONLY_TOKEN", "parent-secret")
+    req = RunRequest(
+        provider="openai",
+        prompt="ignored",
+        tools=[sample_importable_tool],
+        env={"REQUEST_TOKEN": "request-secret"},
+        cwd=tmp_path,
+    )
+
+    with _runtime_config(req) as runtime:
+        overrides = runtime.config_overrides
+        [env_vars] = [v for v in overrides if v.startswith(f"{WRAPPER_SERVER}.env_vars=")]
+        assert '"PARENT_ONLY_TOKEN"' in env_vars
+        assert '"REQUEST_TOKEN"' in env_vars
+        assert "secret" not in " ".join(overrides)
+        assert f"{WRAPPER_SERVER}.tool_timeout_sec=600" in overrides
+
+
+WRAPPER_SERVER = "mcp_servers.agent_sdk_wrapper_tools"
+
+
 def _command_completed(item_id: str = "cmd-1") -> SimpleNamespace:
     return SimpleNamespace(
         method="item/completed",
@@ -985,19 +1067,23 @@ def test_codex_config_uses_path_codex_when_sdk_bin_missing(monkeypatch):
     assert config.codex_bin == "/usr/bin/codex"
 
 
-def test_codex_config_merges_config_overrides(monkeypatch):
+def test_codex_config_lets_caller_overrides_win(monkeypatch):
     from agent_sdk_wrapper.providers import openai_provider as op_mod
 
     monkeypatch.setattr(op_mod, "_path_codex_bin_when_sdk_bin_missing", lambda: None)
 
     config = _codex_config(
-        {"config_overrides": ("model=\"gpt-5\"",)},
+        {"config_overrides": ("mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=5",)},
         {},
         None,
-        config_overrides=("features.multi_agent=true",),
+        config_overrides=("mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=600",),
     )
 
-    assert config.config_overrides == ("model=\"gpt-5\"", "features.multi_agent=true")
+    # Codex applies overrides in order, so the caller's value is the effective one.
+    assert config.config_overrides == (
+        "mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=600",
+        "mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=5",
+    )
 
 
 def test_codex_config_rejects_launch_args_with_generated_overrides(monkeypatch):
