@@ -1074,3 +1074,53 @@ def test_late_config_error_is_recorded_then_raised(monkeypatch, tmp_path):
     events = _trace_events(trace_file)
     assert [event["type"] for event in events][-2:] == ["error", "run_finished"]
     assert events[-2]["error_type"] == "invalid_request"
+
+
+def test_concurrent_continue_session_runs_are_rejected(monkeypatch):
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def waits(req):
+        yield SessionInfo(id="s1")
+        await release.wait()
+        yield Text(text="done")
+
+    install_fake_providers(monkeypatch, events=waits)
+    agent = Agent(provider="openai", continue_session=True)
+
+    async def scenario() -> list[str]:
+        first = asyncio.create_task(agent.run("one"))
+        await asyncio.sleep(0.01)
+        with pytest.raises(ConfigError, match="continue_session"):
+            await asyncio.wait_for(agent.run("two"), 1)
+        with pytest.raises(ConfigError, match="continue_session"):
+            await asyncio.wait_for(agent.run("three", continue_session=False), 1)
+        release.set()
+        results = [await first, await agent.run("four")]
+        return [result.final_text for result in results]
+
+    assert asyncio.run(scenario()) == ["done", "done"]
+
+
+def test_concurrent_runs_without_continue_session_are_allowed(monkeypatch):
+    import asyncio
+
+    started = []
+    both_started = asyncio.Event()
+
+    async def waits(req):
+        started.append(req.prompt)
+        if len(started) == 2:
+            both_started.set()
+        await both_started.wait()
+        yield Text(text=req.prompt)
+
+    install_fake_providers(monkeypatch, events=waits)
+    agent = Agent(provider="openai")
+
+    async def scenario():
+        return await asyncio.gather(agent.run("one"), agent.run("two"))
+
+    results = asyncio.run(scenario())
+    assert [result.final_text for result in results] == ["one", "two"]

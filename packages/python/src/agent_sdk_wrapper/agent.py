@@ -215,6 +215,8 @@ class Agent:
         self.raise_on_error = raise_on_error
 
         self._provider = build_provider(self.provider, **(provider_options or {}))
+        self._active_runs = 0
+        self._continuing_run_active = False
 
     def check_runtime(self) -> None:
         """Validate the request before checking runtime availability."""
@@ -335,6 +337,7 @@ class Agent:
 
     async def _events(self, run: _Run) -> AsyncIterator[EventEnvelope]:
         req = run.req
+        self._acquire(req)
         run_id = uuid.uuid4().hex
         req.run_id = run_id
         if not run.session_overridden:
@@ -507,35 +510,53 @@ class Agent:
                 finish()
             raise
         finally:
-            if writer is not None:
-                writer.close()
-                if not finished:
-                    duration_ms = _elapsed_ms(start)
-                run.result = state.to_result(
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status=status,
-                    ended_reason=ended_reason,
-                    events=result_events,
-                    duration_ms=duration_ms,
-                    artifacts_dir=_as_str(artifacts_dir),
-                    error_msg=error_msg,
-                )
-                if artifacts_dir is not None:
-                    result_path = write_result_artifact(artifacts_dir, run.result)
-                    write_manifest(
-                        artifacts_dir,
+            try:
+                if writer is not None:
+                    writer.close()
+                    if not finished:
+                        duration_ms = _elapsed_ms(start)
+                    run.result = state.to_result(
                         run_id=run_id,
                         provider=req.provider,
                         model=req.model,
-                        status=status.value,
-                        trace_file=trace_path,
-                        result_file=result_path,
+                        status=status,
+                        ended_reason=ended_reason,
+                        events=result_events,
                         duration_ms=duration_ms,
-                        error=error_msg,
-                        extra_files=collect_side_files(artifacts_dir),
+                        artifacts_dir=_as_str(artifacts_dir),
+                        error_msg=error_msg,
                     )
+                    if artifacts_dir is not None:
+                        result_path = write_result_artifact(artifacts_dir, run.result)
+                        write_manifest(
+                            artifacts_dir,
+                            run_id=run_id,
+                            provider=req.provider,
+                            model=req.model,
+                            status=status.value,
+                            trace_file=trace_path,
+                            result_file=result_path,
+                            duration_ms=duration_ms,
+                            error=error_msg,
+                            extra_files=collect_side_files(artifacts_dir),
+                        )
+            finally:
+                self._release(req)
+
+    def _acquire(self, req: RunRequest) -> None:
+        # continue_session runs read and write self.session_id.
+        if self._active_runs and (req.continue_session or self._continuing_run_active):
+            raise ConfigError(
+                "continue_session allows one active run per Agent; "
+                "use separate Agent instances for concurrent runs"
+            )
+        self._active_runs += 1
+        self._continuing_run_active = req.continue_session
+
+    def _release(self, req: RunRequest) -> None:
+        self._active_runs -= 1
+        if req.continue_session:
+            self._continuing_run_active = False
 
 
 class _SeqGen:
