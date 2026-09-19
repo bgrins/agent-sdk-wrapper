@@ -130,7 +130,6 @@ export class CodexAdapter implements ProviderAdapter {
     req.signal?.addEventListener("abort", onAbort, { once: true });
     if (req.signal?.aborted) abort.abort();
     let iterator: AsyncIterator<ThreadEvent> | undefined;
-    let terminal = false;
     let session = req.sessionId;
     let sawReasoning = false;
     const started = new Set<string>();
@@ -169,11 +168,6 @@ export class CodexAdapter implements ProviderAdapter {
           session = event.thread_id;
           yield { type: "session_info", id: session };
         } else if (event.type === "turn.completed") {
-          if (terminal)
-            throw new ProviderProtocolError(
-              "Codex emitted more than one terminal result",
-            );
-          terminal = true;
           const nativeUsage = event.usage;
           const input = nativeUsage.input_tokens;
           // ThreadTokenUsage.total is cumulative; output includes reasoning.
@@ -217,17 +211,17 @@ export class CodexAdapter implements ProviderAdapter {
           if (usage.reasoning_output_tokens > 0 && !sawReasoning)
             yield { type: "thinking", text: "" };
           yield { type: "usage", usage, ...raw };
-        } else if (event.type === "turn.failed" || event.type === "error") {
-          terminal = true;
+          return;
+        } else if (event.type === "turn.failed") {
           yield {
-            ...classify(
-              event.type === "turn.failed"
-                ? event.error.message
-                : event.message,
-              event.type === "turn.failed" ? "turn_failed" : "stream_error",
-            ),
+            ...classify(event.error.message, "provider_exception"),
             ...raw,
           };
+          return;
+        } else if (event.type === "error") {
+          // Top-level errors include recoverable "Reconnecting... N/5" notices;
+          // a fatal failure repeats its message in turn.failed.
+          yield { type: "warning", message: event.message, ...raw };
         } else if (
           event.type === "item.started" ||
           event.type === "item.updated" ||
@@ -265,10 +259,9 @@ export class CodexAdapter implements ProviderAdapter {
             };
         }
       }
-      if (!terminal)
-        throw new ProviderProtocolError(
-          "Codex stream ended without turn.completed or a terminal error",
-        );
+      throw new ProviderProtocolError(
+        "Codex stream ended without turn.completed or turn.failed",
+      );
     } catch (cause) {
       throw nativeError(cause);
     } finally {

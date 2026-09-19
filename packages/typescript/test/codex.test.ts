@@ -207,28 +207,57 @@ test("Codex subtracts cumulative thread usage on resume", async () => {
   assert.deepEqual(first.usage, second.usage);
   assert.equal(second.session_id, "saved");
 });
-for (const type of ["turn.failed", "error"] as const)
-  test(`Codex ${type} is a terminal typed failure`, async () => {
-    const message = "401 Unauthorized";
-    const event: ThreadEvent =
-      type === "turn.failed" ? { type, error: { message } } : { type, message };
-    const { agent } = harness([event], {}, new Error("secondary exit failure"));
-    const run = await agent.run("bad credentials");
-    assert.equal(run.status, "failure");
-    assert.equal(run.error, message);
-    assert.equal(
-      run.events.filter((env) => env.event.type === "error").length,
-      1,
-    );
-    assert.ok(
-      run.events.some(
-        (env) =>
-          env.event.type === "error" &&
-          env.event.error_type === "authentication_failed" &&
-          !env.event.retryable,
-      ),
-    );
-  });
+test("Codex turn.failed is the one terminal typed failure; error events warn", async () => {
+  const message = "401 Unauthorized";
+  const { agent } = harness(
+    [
+      { type: "error", message },
+      { type: "turn.failed", error: { message } },
+    ],
+    {},
+    new Error("secondary exit failure"),
+  );
+  const run = await agent.run("bad credentials");
+  assert.equal(run.status, "failure");
+  assert.equal(run.error, message);
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "error")
+      .map((env) => env.event),
+    [
+      {
+        type: "error",
+        message,
+        error_type: "authentication_failed",
+        retryable: false,
+      },
+    ],
+  );
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "warning")
+      .map((env) => env.event),
+    [{ type: "warning", message }],
+  );
+});
+test("Codex stops reading at its terminal event", async () => {
+  const { agent, closed } = harness([
+    completed,
+    {
+      type: "item.completed",
+      item: { type: "agent_message", id: "late", text: "late" },
+    },
+    completed,
+  ]);
+  const run = await agent.run("once");
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "");
+  assert.equal(
+    run.events.filter((env) => env.event.type === "usage").length,
+    1,
+  );
+  assert.equal(closed(), 1);
+});
 test("Codex transient error events are classified and item errors remain warnings", async () => {
   const failure = await harness([
     { type: "turn.failed", error: { message: "429 rate limit" } },

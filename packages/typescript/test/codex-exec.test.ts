@@ -70,6 +70,16 @@ const answer: ThreadEvent = {
   type: "item.completed",
   item: { type: "agent_message", id: "text", text: "answer" },
 };
+const completed: ThreadEvent = {
+  type: "turn.completed",
+  usage: {
+    input_tokens: 10,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: 2,
+    reasoning_output_tokens: 0,
+  },
+};
 
 test("closing a real Codex stream early exits cleanly and kills the runtime", async (t) => {
   const { agent, exited } = await fakeCodex(t, [...started, answer], "hang");
@@ -90,4 +100,68 @@ test("a throwing provider-event callback fails the run and kills the runtime", a
   assert.equal(run.status, "failure");
   assert.equal(run.error, "callback boom");
   await exited();
+});
+test("Codex reconnect notices are warnings and the recovered turn succeeds", async (t) => {
+  const { agent } = await fakeCodex(
+    t,
+    [
+      ...started,
+      {
+        type: "error",
+        message:
+          "Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)",
+      },
+      answer,
+      completed,
+    ],
+    "exit",
+  );
+  const run = await agent.run("recover");
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "answer");
+  assert.equal(run.error, null);
+  const warnings = run.events.flatMap((env) =>
+    env.event.type === "warning" ? [env.event.message] : [],
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /^Reconnecting\.\.\. 1\/5/);
+});
+test("a fatal Codex failure yields one classified error despite the exit code", async (t) => {
+  const message =
+    "unexpected status 401 Unauthorized: bad key, url: http://127.0.0.1/v1/responses";
+  const { agent } = await fakeCodex(
+    t,
+    [
+      ...started,
+      { type: "error", message },
+      { type: "turn.failed", error: { message } },
+    ],
+    "exit1",
+  );
+  const run = await agent.run("fail");
+  const errors = run.events.flatMap((env) =>
+    env.event.type === "error" ? [env.event] : [],
+  );
+  assert.deepEqual(errors, [
+    {
+      type: "error",
+      message,
+      error_type: "authentication_failed",
+      retryable: false,
+    },
+  ]);
+  assert.equal(run.status, "failure");
+});
+test("a Codex stream without turn.completed or turn.failed is a protocol error", async (t) => {
+  const { agent } = await fakeCodex(
+    t,
+    [...started, { type: "error", message: "Reconnecting... 5/5" }],
+    "exit",
+  );
+  const run = await agent.run("truncated");
+  const errors = run.events.flatMap((env) =>
+    env.event.type === "error" ? [env.event] : [],
+  );
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.error_type, "provider_protocol_error");
 });
