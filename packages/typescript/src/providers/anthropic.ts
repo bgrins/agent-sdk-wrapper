@@ -326,10 +326,7 @@ export class AnthropicAdapter implements ProviderAdapter {
                 type: "tool_result",
                 id: block.tool_use_id,
                 name: names.get(block.tool_use_id),
-                output:
-                  typeof block.content === "string"
-                    ? block.content
-                    : JSON.stringify(block.content ?? null),
+                output: toolOutput(block.content),
                 is_error: block.is_error ?? false,
                 ...raw,
               };
@@ -449,6 +446,17 @@ function resultError(
     (!reason || reason === "api_error" || reason === "completed")
     ? error("transient_api_error")
     : classified;
+}
+function toolOutput(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content
+      .map((item) => {
+        const text = object(item)?.text;
+        return typeof text === "string" && text ? text : JSON.stringify(item);
+      })
+      .join("");
+  return JSON.stringify(content ?? null);
 }
 function usageEvent(
   message: SDKResultMessage,

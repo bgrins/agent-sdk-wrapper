@@ -719,3 +719,34 @@ test("Claude rate limit events become warnings", async () => {
     ],
   );
 });
+test("Claude list tool results join their text blocks", async () => {
+  const run = await harness([
+    assistant([{ type: "tool_use", id: "call", name: "Agent", input: {} }]),
+    {
+      type: "user",
+      session_id: "claude-session",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call",
+            content: [
+              { type: "text", text: "RESULT_42" },
+              { type: "text", text: "\nagentId: a1" },
+            ],
+          },
+        ],
+      },
+    },
+    result(),
+  ]).agent.run("tool");
+  const output = run.events.find(
+    (env) => env.event.type === "tool_result",
+  )?.event;
+  assert.equal(
+    output?.type === "tool_result" && output.output,
+    "RESULT_42\nagentId: a1",
+  );
+});
