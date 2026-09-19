@@ -47,12 +47,13 @@ for test runs.
 - `workload/agent-{python,typescript}/`: your program and local SDK dependency.
 - `workload/shared/` and `workload/project/`: sample task and app setup.
 - `infra/` and `compose.yaml`: lifecycle, images, gateway and isolation.
+- `infra/gateway/Caddyfile`: API paths and the `anthropic-beta` values SDKs send.
 - `tests/run.sh` and `tests/compose.yaml`: test endpoint and workers.
 
 Workers take `PROVIDER`, `GVISOR_MODEL` and optional `JOB_REQUEST` JSON with prompts.
-They write results to stdout and files to `/job/output`. A session lasts one job:
-cleanup deletes its state, so a later job cannot resume it. Cloud deployment is
-not included.
+They write files to `/job/output` and results to stdout as ASCII JSON lines; the
+launcher drops other bytes. A session lasts one job: cleanup deletes its state,
+so a later job cannot resume it. Cloud deployment is not included.
 
 ```sh
 bash examples/gvisor/scripts/test.sh  # offline; builds test images; requires Node
