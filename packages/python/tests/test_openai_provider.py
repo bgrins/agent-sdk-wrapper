@@ -1817,3 +1817,41 @@ async def test_codex_reasoning_item_without_a_summary_still_emits_thinking():
 
     assert [type(event) for event in out] == [Thinking]
     assert out[0].text == ""
+
+
+@pytest.mark.parametrize(
+    ("account", "requires_auth", "cli_login", "allowed"),
+    [
+        ({"type": "apiKey"}, True, "deny", True),
+        ({"type": "amazonBedrock"}, True, "deny", True),
+        (None, False, "deny", True),
+        ({"type": "chatgpt", "email": None, "planType": "pro"}, True, "deny", False),
+        (None, True, "deny", False),
+        ({"type": "chatgpt", "email": None, "planType": "pro"}, True, "require", True),
+        ({"type": "apiKey"}, True, "require", False),
+        (None, True, "require", False),
+    ],
+)
+def test_codex_account_check_enforces_cli_login(account, requires_auth, cli_login, allowed):
+    from openai_codex.generated.v2_all import GetAccountResponse
+
+    from agent_sdk_wrapper.providers.openai_provider import _account_problem
+
+    response = GetAccountResponse.model_validate(
+        {"account": account, "requiresOpenaiAuth": requires_auth}
+    )
+    assert (_account_problem(response, cli_login) is None) is allowed
+
+
+def test_codex_cli_login_deny_needs_an_api_key_and_require_takes_none(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    req = RunRequest(provider="openai", prompt="x")
+
+    assert "OPENAI_API_KEY" in (OpenAIProvider().check_credentials(req) or "")
+    assert OpenAIProvider(api_key="sk-test").check_credentials(req) is None
+    assert OpenAIProvider(model_provider="local").check_credentials(req) is None
+
+    required = RunRequest(provider="openai", prompt="x", cli_login="require")
+    assert OpenAIProvider().check_credentials(required) is None
+    with pytest.raises(ConfigError, match="cli_login='require'"):
+        OpenAIProvider(api_key="sk-test").validate_request(required)

@@ -60,6 +60,7 @@ _CODEX_NATIVE_TOOL_FILTER_NAMES = {
     "view_image",
     "web_search",
 }
+_ACCESS_TOKEN_ENV = "CODEX_ACCESS_TOKEN"
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
@@ -136,6 +137,11 @@ class OpenAIProvider(ProviderAdapter):
         else:
             _enum_value(ApprovalMode, self._approval_mode)
             _enum_value(Sandbox, self._sandbox)
+        if req.cli_login == "require" and (self._api_key or self._model_provider):
+            raise ConfigError(
+                "cli_login='require' uses the stored ChatGPT login; remove api_key and "
+                "model_provider"
+            )
         if self._api_key and not self._launches_codex():
             raise ConfigError(
                 "api_key requires the provider to launch Codex; authenticate the "
@@ -150,6 +156,17 @@ class OpenAIProvider(ProviderAdapter):
                 "cannot be reconfigured"
             )
 
+    def check_credentials(self, req: RunRequest) -> str | None:
+        # require is checked against the runtime's account once it starts.
+        if req.cli_login == "require" or not self._launches_codex() or self._model_provider:
+            return None
+        if self._login_api_key():
+            return None
+        return (
+            "no OpenAI API key: set OPENAI_API_KEY or provider_options={'api_key': ...}; "
+            "cli_login='deny' never uses a stored Codex login"
+        )
+
     def _launches_codex(self) -> bool:
         return self._codex is None and _config_value(self._config, "launch_args_override") is None
 
@@ -163,16 +180,20 @@ class OpenAIProvider(ProviderAdapter):
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
         self.validate_request(req)
         self.ensure_available()
+        problem = self.check_credentials(req)
+        if problem:
+            yield Error(message=problem, error_type="authentication_failed")
+            return
 
         from openai_codex import is_retryable_error
 
         codex: Any = None
         try:
-            api_key = self._login_api_key()
+            api_key = None if req.cli_login == "require" else self._login_api_key()
             with _runtime_config(req) as runtime_config:
                 config_overrides = runtime_config.config_overrides
-                if api_key:
-                    # Keep the API key in memory instead of replacing auth.json.
+                if req.cli_login != "require" and self._launches_codex():
+                    # Never read or write auth.json; an API key stays in memory.
                     config_overrides += (
                         _config_override("cli_auth_credentials_store", value="ephemeral"),
                     )
@@ -206,6 +227,10 @@ class OpenAIProvider(ProviderAdapter):
 
         if api_key:
             await codex.login_api_key(api_key)
+        problem = _account_problem(await codex.account(), req.cli_login)
+        if problem:
+            yield Error(message=problem, error_type="authentication_failed")
+            return
 
         approval_mode = _enum_value(ApprovalMode, self._approval_mode)
         sandbox = _enum_value(Sandbox, self._sandbox)
@@ -240,9 +265,13 @@ class OpenAIProvider(ProviderAdapter):
 
         from openai_codex import AsyncCodex
 
+        env = dict(req.env)
+        if req.cli_login != "require":
+            # An access token is a ChatGPT login; Codex treats an empty value as unset.
+            env[_ACCESS_TOKEN_ENV] = ""
         config = _codex_config(
             self._config,
-            req.env,
+            env,
             req.artifacts_dir,
             debug=self._debug,
             config_overrides=config_overrides,
@@ -1633,6 +1662,25 @@ def _path_codex_bin_when_sdk_bin_missing() -> str | None:
     if _codex_cli_bin_available():
         return None
     return shutil.which("codex")
+
+
+def _account_problem(response: Any, cli_login: str) -> str | None:
+    """Explain why the runtime's active credentials violate ``cli_login``."""
+
+    account = getattr(getattr(response, "account", None), "root", None)
+    kind = getattr(account, "type", None)
+    if cli_login == "require":
+        if kind == "chatgpt":
+            return None
+        return "cli_login='require' needs a stored ChatGPT login; run `codex login`"
+    if kind == "chatgpt":
+        return "Codex is using a stored ChatGPT login; cli_login='deny' requires an API key"
+    if kind in ("apiKey", "amazonBedrock") or not getattr(response, "requires_openai_auth", True):
+        return None
+    return (
+        "no OpenAI credentials: set OPENAI_API_KEY; "
+        "cli_login='deny' never uses a stored Codex login"
+    )
 
 
 def _codex_env(env: dict[str, str], *, debug: bool = False) -> dict[str, str]:

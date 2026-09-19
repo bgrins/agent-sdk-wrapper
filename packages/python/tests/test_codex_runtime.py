@@ -240,24 +240,65 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_home, tmp_path):
-    auth = codex_home / "auth.json"
-    auth.write_text(
+def seed_chatgpt_login(home: Path) -> str:
+    """Write a stored ChatGPT login Codex accepts offline; return its access token.
+
+    Codex needs plan claims in the ID token, and a fresh last_refresh with a
+    far-future exp avoids a token refresh.
+    """
+
+    import base64
+    from datetime import UTC, datetime
+
+    def part(value: dict[str, Any]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+    def jwt(claims: dict[str, Any]) -> str:
+        return f"{part({'alg': 'RS256'})}.{part(claims)}.c2ln"
+
+    claims = {
+        "email": "a@b.c",
+        "exp": 4102444800,
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": "acct_1",
+            "chatgpt_user_id": "user_1",
+        },
+    }
+    access = jwt({**claims, "sub": "access"})
+    (home / "auth.json").write_text(
         json.dumps(
             {
-                "auth_mode": "chatgpt",
                 "OPENAI_API_KEY": None,
                 "tokens": {
-                    "id_token": "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImFAYi5jIn0.",
-                    "access_token": "chatgpt-access",
+                    "id_token": jwt(claims),
+                    "access_token": access,
                     "refresh_token": "chatgpt-refresh",
                     "account_id": "acct_1",
                 },
-                "last_refresh": "2026-09-01T00:00:00Z",
+                "last_refresh": datetime.now(UTC).isoformat(),
             }
         ),
         encoding="utf-8",
     )
+    return access
+
+
+def login_agent(api: MockResponses, home: Path, cwd: Path, cli_login: str) -> Agent:
+    return Agent(
+        provider="codex",
+        model=MODEL,
+        cwd=cwd,
+        max_retries=0,
+        timeout=60,
+        cli_login=cli_login,
+        provider_options={"config": codex_config(api, home)},
+    )
+
+
+async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_home, tmp_path):
+    seed_chatgpt_login(codex_home)
+    auth = codex_home / "auth.json"
     before = auth.read_text(encoding="utf-8")
     mock_api.plan = [{"text": "hello"}]
 
@@ -512,3 +553,47 @@ async def test_signal_killed_app_server_raises_process_terminated(
         await killer
 
     assert raised.value.signal == signal.SIGKILL
+
+
+async def test_cli_login_require_uses_the_stored_chatgpt_login(mock_api, codex_home, tmp_path):
+    access = seed_chatgpt_login(codex_home)
+    mock_api.plan = [{"text": "hello"}]
+
+    result = await login_agent(mock_api, codex_home, tmp_path, "require").run("hi")
+
+    assert result.ok, result.error
+    assert [r["authorization"] for r in mock_api.posts()] == [f"Bearer {access}"]
+
+
+async def test_cli_login_require_rejects_a_stored_api_key_before_any_request(
+    mock_api, codex_home, tmp_path
+):
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-stored"}), encoding="utf-8"
+    )
+
+    result = await login_agent(mock_api, codex_home, tmp_path, "require").run("hi")
+
+    errors = [env.event for env in result.events if env.event.type == "error"]
+    assert [e.error_type for e in errors] == ["authentication_failed"]
+    assert mock_api.posts() == []
+
+
+async def test_cli_login_deny_refuses_a_chatgpt_logged_in_client_before_any_request(
+    mock_api, codex_home, tmp_path
+):
+    from openai_codex import AsyncCodex, CodexConfig
+
+    from agent_sdk_wrapper import RunRequest
+    from agent_sdk_wrapper.providers.openai_provider import OpenAIProvider
+
+    seed_chatgpt_login(codex_home)
+    req = RunRequest(provider="openai", prompt="hi", model=MODEL, cwd=tmp_path)
+
+    async with AsyncCodex(config=CodexConfig(**codex_config(mock_api, codex_home))) as codex:
+        events = [event async for event in OpenAIProvider(codex=codex).stream(req)]
+
+    assert [(e.type, getattr(e, "error_type", None)) for e in events] == [
+        ("error", "authentication_failed")
+    ]
+    assert mock_api.posts() == []
