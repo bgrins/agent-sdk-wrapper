@@ -115,9 +115,19 @@ test("Codex maps final items once, tools and inclusive token totals", async () =
   const run = await agent.run("prompt");
   assert.equal(run.final_text, "answer");
   assert.equal(run.session_id, "thread-1");
-  assert.equal(
-    run.events.filter((env) => env.event.type === "tool_call").length,
-    1,
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "tool_call")
+      .map((env) => env.event),
+    [
+      {
+        type: "tool_call",
+        id: "cmd",
+        name: "command",
+        input: { command: "pwd" },
+        raw: messages[2],
+      },
+    ],
   );
   assert.equal(
     run.events.filter((env) => env.event.type === "tool_result").length,

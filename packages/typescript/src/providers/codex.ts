@@ -275,7 +275,7 @@ function toolInfo(
 ): { name: string; input?: Record<string, unknown> } | undefined {
   switch (item.type) {
     case "command_execution":
-      return { name: "command_execution", input: { command: item.command } };
+      return { name: "command", input: { command: item.command } };
     case "file_change":
       return { name: "file_change", input: { changes: item.changes } };
     case "mcp_tool_call":
