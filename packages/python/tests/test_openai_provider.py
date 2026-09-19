@@ -11,7 +11,6 @@ import pytest
 from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import (
-    AgentSdkWrapperError,
     ConfigError,
     Error,
     McpHttpServer,
@@ -67,6 +66,32 @@ class FakeTurn:
 
     async def interrupt(self):
         self.interrupt_count += 1
+
+
+def turn_completed(status: str = "completed", error: Any = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        method="turn/completed",
+        payload=SimpleNamespace(turn=SimpleNamespace(status=status, error=error)),
+    )
+
+
+def notification(method: str, payload: dict[str, Any]) -> Any:
+    """Build a real SDK notification from its wire payload."""
+
+    from openai_codex.generated.notification_registry import NOTIFICATION_MODELS
+    from openai_codex.models import Notification
+
+    return Notification(method=method, payload=NOTIFICATION_MODELS[method].model_validate(payload))
+
+
+def failed_turn(error: dict[str, Any]) -> Any:
+    return notification(
+        "turn/completed",
+        {
+            "threadId": "t",
+            "turn": {"id": "u", "items": [], "status": "failed", "error": error},
+        },
+    )
 
 
 def test_codex_options_default_to_auto_reasoning_summary():
@@ -227,19 +252,17 @@ async def test_codex_stream_writes_provider_events_sidecar(tmp_path):
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Text(text="hello")]
     path = tmp_path / "provider-events.jsonl"
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert [line["sequence"] for line in lines] == [0, 1]
-    assert [line["provider"] for line in lines] == ["openai", "openai"]
+    assert [line["sequence"] for line in lines] == [0, 1, 2]
+    assert [line["provider"] for line in lines] == ["openai", "openai", "openai"]
     assert lines[0]["class"] == "types.SimpleNamespace"
     assert lines[0]["message"]["method"] == "item/agentMessage/delta"
     assert lines[0]["message"]["payload"]["delta"] == "hello"
-    assert len(provider_events) == 2
-    assert provider_events[0].to_dict() == lines[0]
-    assert provider_events[1].to_dict() == lines[1]
+    assert [event.to_dict() for event in provider_events] == lines
     assert not (tmp_path / "sdk").exists()
 
 
@@ -261,7 +284,7 @@ async def test_codex_stream_buffers_text_deltas_until_completed_message():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Text(text="complete")]
 
@@ -288,7 +311,7 @@ async def test_codex_stream_emits_buffered_text_if_completion_has_no_text():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Text(text="hello world")]
 
@@ -313,7 +336,7 @@ async def test_codex_stream_drains_uncompleted_text_on_turn_completed():
 
 
 @pytest.mark.asyncio
-async def test_codex_structured_output_validation_failure_raises():
+async def test_codex_structured_output_validation_failure_is_an_error():
     req = RunRequest(
         provider="openai",
         prompt="ignored",
@@ -326,14 +349,32 @@ async def test_codex_structured_output_validation_failure_raises():
                 item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="{}"))
             ),
         ),
+        turn_completed(),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert isinstance(out[-1], Error)
+    assert out[-1].error_type == "structured_output_failed"
+    assert "structured output did not match" in out[-1].message
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_without_turn_completed_is_a_protocol_error():
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
         SimpleNamespace(
-            method="turn/completed",
-            payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="partial"))
+            ),
         ),
     ]
 
-    with pytest.raises(AgentSdkWrapperError, match="structured output did not match"):
-        [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert [type(event) for event in out] == [Text, Error]
+    assert out[-1].error_type == "provider_protocol_error"
 
 
 @pytest.mark.asyncio
@@ -356,7 +397,7 @@ async def test_codex_stream_maps_command_tool_result():
         )
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [
         ToolCall(id="cmd-1", name="command", input={"command": "pytest"}),
@@ -396,7 +437,7 @@ async def test_codex_stream_maps_reasoning_deltas_and_completed_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [
         Thinking(text="summary\ndetail"),
@@ -427,7 +468,7 @@ async def test_codex_stream_buffers_reasoning_deltas_until_completed_item():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Thinking(text="complete")]
 
@@ -500,7 +541,7 @@ async def test_codex_stream_maps_more_tool_like_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [event.name for event in out if isinstance(event, ToolCall)] == [
         "file_change",
@@ -523,47 +564,96 @@ def test_codex_tool_entry_keeps_source_fallback_for_importable_tool():
     assert "def sample_importable_tool" in entry["source"]
 
 
+def _command_completed(item_id: str = "cmd-1") -> SimpleNamespace:
+    return SimpleNamespace(
+        method="item/completed",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(
+                root=SimpleNamespace(
+                    type="commandExecution",
+                    id=item_id,
+                    command="python -m pytest",
+                    status="completed",
+                    aggregated_output="passed",
+                )
+            )
+        ),
+    )
+
+
+def _usage_update(input_tokens: int, output_tokens: int) -> SimpleNamespace:
+    breakdown = {
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "totalTokens": input_tokens + output_tokens,
+    }
+    return SimpleNamespace(
+        method="thread/tokenUsage/updated",
+        payload=SimpleNamespace(token_usage={"last": breakdown, "total": breakdown}),
+    )
+
+
 @pytest.mark.asyncio
-async def test_codex_max_turns_interrupts_after_action_item():
+async def test_codex_max_turns_drains_the_interrupted_turn():
     req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
     turn = FakeTurn(
         [
             SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(
-                        root=SimpleNamespace(
-                            type="commandExecution",
-                            id="cmd-1",
-                            command="python -m pytest",
-                            status="completed",
-                            aggregated_output="passed",
-                        )
-                    )
-                ),
+                method="item/agentMessage/delta",
+                payload=SimpleNamespace(item_id="msg-1", delta="checking"),
             ),
-            SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(
-                        root=SimpleNamespace(type="agentMessage", text="done")
-                    )
-                ),
-            ),
-            SimpleNamespace(
-                method="turn/completed",
-                payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
-            ),
+            _command_completed(),
+            _usage_update(100, 10),
+            turn_completed("interrupted"),
         ]
     )
 
     out = [event async for event in _stream_turn(turn, req)]
 
     assert turn.interrupt_count == 1
-    assert [type(event) for event in out] == [ToolCall, ToolResult, Error]
-    error = next(event for event in out if isinstance(event, Error))
-    assert error.error_type == "max_turns"
-    assert "max_turns=1" in error.message
+    assert [type(event) for event in out] == [ToolCall, ToolResult, Text, Usage, Error]
+    assert out[2].text == "checking"
+    assert out[3].usage.input_tokens == 100
+    assert out[-1].error_type == "max_turns"
+    assert "max_turns=1" in out[-1].message
+
+
+@pytest.mark.asyncio
+async def test_codex_max_turns_ignores_an_interrupt_after_the_turn_finished():
+    from openai_codex.errors import InvalidRequestError
+
+    class FinishedTurn(FakeTurn):
+        async def interrupt(self):
+            await super().interrupt()
+            raise InvalidRequestError(-32600, "no active turn to interrupt")
+
+    req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
+    turn = FinishedTurn(
+        [
+            _command_completed(),
+            SimpleNamespace(
+                method="item/completed",
+                payload=SimpleNamespace(
+                    item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="done"))
+                ),
+            ),
+            turn_completed(),
+        ]
+    )
+
+    out = [event async for event in _stream_turn(turn, req)]
+
+    assert turn.interrupt_count == 1
+    assert [type(event) for event in out] == [ToolCall, ToolResult, Text]
+
+
+@pytest.mark.asyncio
+async def test_codex_interrupt_the_wrapper_did_not_request_is_cancelled():
+    req = RunRequest(provider="openai", prompt="ignored")
+
+    out = [event async for event in _stream_turn(FakeTurn([turn_completed("interrupted")]), req)]
+
+    assert [(type(event), event.error_type) for event in out] == [(Error, "cancelled")]
 
 
 @pytest.mark.asyncio
@@ -641,7 +731,7 @@ async def test_codex_stream_maps_failed_tool_like_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [event.name for event in out if isinstance(event, ToolCall)] == [
         "command",
@@ -688,7 +778,7 @@ async def test_codex_stream_maps_image_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [event.name for event in out if isinstance(event, ToolCall)] == [
         "view_image",
@@ -1273,28 +1363,150 @@ async def test_codex_usage_of_a_resumed_turn_excludes_thread_history():
 
 
 @pytest.mark.asyncio
-async def test_codex_retried_error_is_a_warning_and_a_final_one_is_an_error():
+async def test_codex_failed_turn_yields_one_classified_error():
     req = RunRequest(provider="openai", prompt="ignored")
+    error = {"codexErrorInfo": "serverOverloaded", "message": "Selected model is at capacity."}
     events = [
-        SimpleNamespace(
-            method="error",
-            payload=SimpleNamespace(
-                error=SimpleNamespace(message="upstream 503"), will_retry=True
-            ),
+        notification(
+            "error",
+            {
+                "error": {"message": "Reconnecting... 1/5", "codexErrorInfo": "other"},
+                "threadId": "t",
+                "turnId": "u",
+                "willRetry": True,
+            },
         ),
-        SimpleNamespace(
-            method="error",
-            payload=SimpleNamespace(
-                error=SimpleNamespace(message="upstream 503"), will_retry=False
-            ),
+        notification(
+            "error", {"error": error, "threadId": "t", "turnId": "u", "willRetry": False}
         ),
+        failed_turn(error),
     ]
 
     out = [event async for event in _stream_turn(FakeTurn(events), req)]
 
     assert [type(event) for event in out] == [WarningEvent, Error]
-    assert out[0].message == "upstream 503"
+    assert out[0].message == "Reconnecting... 1/5"
+    assert out[1].message == "Selected model is at capacity."
+    assert out[1].error_type == "transient_api_error"
     assert out[1].retryable is True
+
+
+@pytest.mark.parametrize(
+    ("message", "transient"),
+    [
+        ("Connection reset by peer", True),
+        ("request timed out", True),
+        ("unexpected status 502 Bad Gateway", True),
+        ("wrote 1500 tokens", False),
+        ("tool_timeout_sec must be positive", False),
+        ("unexpected status 400 Bad Request", False),
+    ],
+)
+def test_codex_transient_exception_patterns_are_word_bounded(message, transient):
+    from agent_sdk_wrapper.providers.openai_provider import _looks_transient
+
+    assert _looks_transient(RuntimeError(message)) is transient
+
+
+# Payloads captured from Codex 0.154 against a mock Responses API.
+@pytest.mark.parametrize(
+    ("error", "error_type"),
+    [
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 401 Unauthorized: Incorrect API key provided: "
+                "sk-x., url: http://127.0.0.1:9/v1/responses",
+            },
+            "authentication_failed",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 403 Forbidden: You are not allowed to sample "
+                "from this model, url: http://127.0.0.1:9/v1/responses",
+            },
+            "permission_denied",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 404 Not Found: The model `gpt-5.9` does not "
+                "exist or you do not have access to it., url: http://127.0.0.1:9/v1/responses",
+            },
+            "model_not_found",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": '{"error": {"message": "Invalid value for \'input\'.", '
+                '"type": "invalid_request_error", "code": null}}',
+            },
+            "invalid_request",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": '{"error": {"message": "Your input exceeds the context window of '
+                'this model.", "type": "invalid_request_error", '
+                '"code": "context_length_exceeded"}}',
+            },
+            "context_window_exceeded",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 503 Service Unavailable: The engine is currently "
+                "overloaded, please try again later., url: http://127.0.0.1:9/v1/responses",
+            },
+            "transient_api_error",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "stream disconnected before completion: stream closed before "
+                "response.completed",
+            },
+            "transient_api_error",
+        ),
+        (
+            {
+                "codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 429}},
+                "message": "exceeded retry limit, last status: 429 Too Many Requests",
+            },
+            "transient_api_error",
+        ),
+        (
+            {"codexErrorInfo": "internalServerError", "message": "We're currently experiencing"},
+            "transient_api_error",
+        ),
+        (
+            {"codexErrorInfo": "contextWindowExceeded", "message": "Codex ran out of room"},
+            "context_window_exceeded",
+        ),
+        (
+            {"codexErrorInfo": "usageLimitExceeded", "message": "Quota exceeded."},
+            "usage_limit_exceeded",
+        ),
+        ({"codexErrorInfo": "sessionBudgetExceeded", "message": "Budget spent."}, "max_budget"),
+        ({"codexErrorInfo": "unauthorized", "message": "Log in again."}, "authentication_failed"),
+        ({"codexErrorInfo": "badRequest", "message": "Bad input."}, "invalid_request"),
+        (
+            {"codexErrorInfo": "other", "message": "Wrote 1500 tokens before timeout_sec."},
+            "provider_exception",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_failed_turns_are_classified(error, error_type):
+    req = RunRequest(provider="openai", prompt="ignored")
+
+    out = [event async for event in _stream_turn(FakeTurn([failed_turn(error)]), req)]
+
+    assert [type(event) for event in out] == [Error]
+    assert out[0].message == error["message"]
+    assert out[0].error_type == error_type
+    assert out[0].retryable is (error_type == "transient_api_error")
 
 
 @pytest.mark.asyncio
@@ -1311,7 +1523,7 @@ async def test_codex_context_compaction_is_surfaced():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [type(event) for event in out] == [ContextCompacted]
     assert out[0].trigger == "codex"
@@ -1334,7 +1546,7 @@ async def test_codex_reasoning_item_without_a_summary_still_emits_thinking():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [type(event) for event in out] == [Thinking]
     assert out[0].text == ""

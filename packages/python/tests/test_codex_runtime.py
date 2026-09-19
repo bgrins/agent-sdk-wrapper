@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,7 +31,9 @@ class MockResponses:
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._server.block_on_close = False
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
 
     @property
     def base_url(self) -> str:
@@ -279,3 +284,66 @@ async def test_structured_output_is_sent_in_strict_form(mock_api, codex_home, tm
     assert detail["required"] == ["note", "score"]
     assert detail["additionalProperties"] is False
     assert "default" not in json.dumps(schema)
+
+
+async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):
+    mock_api.plan = [
+        {
+            "status": 401,
+            "body": {
+                "error": {
+                    "message": "Incorrect API key provided: sk-mock.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }
+            },
+        }
+    ]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+
+    assert not result.ok
+    errors = [e.event for e in result.events if e.event.type == "error"]
+    assert [(e.error_type, e.retryable) for e in errors] == [("authentication_failed", False)]
+    assert "401 Unauthorized" in errors[0].message
+
+
+async def test_max_turns_interrupt_keeps_the_turn_usage(mock_api, codex_home, tmp_path):
+    mock_api.plan = [{"shell": "echo hi", "usage": (120, 12)}, {"hang": 30}]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path, max_turns=1).run("go")
+
+    assert result.ended_reason == "max_turns"
+    assert event_types(result)[-4:] == ["tool_result", "usage", "error", "run_finished"]
+    assert result.usage is not None and result.usage.input_tokens == 120
+
+
+async def test_signal_killed_app_server_raises_process_terminated(
+    mock_api, codex_home, tmp_path
+):
+    from openai_codex import AsyncCodex, CodexConfig
+
+    from agent_sdk_wrapper import ProcessTerminatedError, RunRequest
+    from agent_sdk_wrapper.providers.openai_provider import OpenAIProvider
+
+    mock_api.plan = [{"hang": 30}]
+    config = codex_config(mock_api, codex_home, 'cli_auth_credentials_store="ephemeral"')
+    req = RunRequest(provider="openai", prompt="hi", model=MODEL, cwd=tmp_path)
+
+    async with AsyncCodex(config=CodexConfig(**config)) as codex:
+        await codex.login_api_key("sk-mock-key")
+        pid = codex._client._sync._proc.pid
+
+        async def kill_once_requested() -> None:
+            while not mock_api.posts():
+                await asyncio.sleep(0.05)
+            os.kill(pid, signal.SIGKILL)
+
+        killer = asyncio.create_task(kill_once_requested())
+        with pytest.raises(ProcessTerminatedError) as raised:
+            async with asyncio.timeout(30):
+                async for _ in OpenAIProvider(codex=codex).stream(req):
+                    pass
+        await killer
+
+    assert raised.value.signal == signal.SIGKILL

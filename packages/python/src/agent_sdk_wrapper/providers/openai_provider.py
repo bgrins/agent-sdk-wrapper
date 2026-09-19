@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import json
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import textwrap
@@ -18,7 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import ProviderEventLogger, sdk_dir_for
-from ..errors import AgentSdkWrapperError, ConfigError, ProviderNotAvailableError, TransientError
+from ..errors import (
+    AgentSdkWrapperError,
+    ConfigError,
+    ProcessTerminatedError,
+    ProviderNotAvailableError,
+    TransientError,
+)
 from ..events import (
     AgentEvent,
     ContextCompacted,
@@ -145,7 +153,7 @@ class OpenAIProvider(ProviderAdapter):
         self.validate_request(req)
         self.ensure_available()
 
-        from openai_codex import ApprovalMode, Sandbox, is_retryable_error
+        from openai_codex import is_retryable_error
 
         codex: Any = None
         try:
@@ -163,29 +171,13 @@ class OpenAIProvider(ProviderAdapter):
                         _config_override("cli_auth_credentials_store", value="ephemeral"),
                     )
                 async with self._codex_client(req, config_overrides) as codex:
-                    if api_key:
-                        await codex.login_api_key(api_key)
-
-                    approval_mode = _enum_value(ApprovalMode, self._approval_mode)
-                    sandbox = _enum_value(Sandbox, self._sandbox)
-                    thread_kwargs, turn_kwargs = self._build_options(
-                        req, approval_mode, sandbox
-                    )
-
-                    thread_id = req.session_id or self._thread_id
-                    if thread_id:
-                        _validate_thread_resume_options(thread_kwargs)
-                        thread = await codex.thread_resume(thread_id, **thread_kwargs)
-                    else:
-                        thread = await codex.thread_start(**thread_kwargs)
-                    yield SessionInfo(id=thread.id)
-
-                    for warning in runtime_config.warnings:
-                        yield WarningEvent(message=warning)
-
-                    turn = await thread.turn(req.prompt, **turn_kwargs)
-                    async for event in _stream_turn(turn, req, thread.id):
-                        yield event
+                    process = _codex_process(codex)
+                    try:
+                        async for event in self._run(codex, req, runtime_config, api_key):
+                            yield event
+                    except Exception as exc:
+                        await _raise_if_signaled(process, exc)
+                        raise
         except (ProviderNotAvailableError, ConfigError, AgentSdkWrapperError):
             raise
         except FileNotFoundError as exc:
@@ -196,6 +188,37 @@ class OpenAIProvider(ProviderAdapter):
             raise AgentSdkWrapperError(f"{type(exc).__name__}: {exc}", cause=exc) from exc
         finally:
             _write_sdk_debug_log(codex, req.artifacts_dir, debug=self._debug)
+
+    async def _run(
+        self,
+        codex: Any,
+        req: RunRequest,
+        runtime_config: _RuntimeConfig,
+        api_key: str | None,
+    ) -> AsyncIterator[AgentEvent]:
+        from openai_codex import ApprovalMode, Sandbox
+
+        if api_key:
+            await codex.login_api_key(api_key)
+
+        approval_mode = _enum_value(ApprovalMode, self._approval_mode)
+        sandbox = _enum_value(Sandbox, self._sandbox)
+        thread_kwargs, turn_kwargs = self._build_options(req, approval_mode, sandbox)
+
+        thread_id = req.session_id or self._thread_id
+        if thread_id:
+            _validate_thread_resume_options(thread_kwargs)
+            thread = await codex.thread_resume(thread_id, **thread_kwargs)
+        else:
+            thread = await codex.thread_start(**thread_kwargs)
+        yield SessionInfo(id=thread.id)
+
+        for warning in runtime_config.warnings:
+            yield WarningEvent(message=warning)
+
+        turn = await thread.turn(req.prompt, **turn_kwargs)
+        async for event in _stream_turn(turn, req, thread.id):
+            yield event
 
     @asynccontextmanager
     async def _codex_client(self, req: RunRequest, config_overrides: tuple[str, ...] = ()):
@@ -260,7 +283,7 @@ async def _stream_turn(
     req: RunRequest,
     thread_id: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Normalize one Codex turn."""
+    """Normalize one Codex turn, ending with its terminal state."""
 
     provider_log = ProviderEventLogger(
         "openai",
@@ -271,11 +294,12 @@ async def _stream_turn(
     )
     text_delta_parts: dict[str | None, list[str]] = {}
     thinking_delta_parts: dict[str | None, list[str]] = {}
-    text_parts: list[str] = []
-    completed_texts: list[str] = []
+    texts: list[str] = []
     usage = _TurnUsage()
     completed_action_items = 0
-    max_turns_interrupted = False
+    interrupted_for_max_turns = False
+    # A non-retried error notification precedes the failed turn/completed; emit one Error.
+    reported_error: Error | None = None
 
     async for event in turn.stream():
         provider_log.write(event)
@@ -307,8 +331,7 @@ async def _stream_turn(
                 buffered_text = _pop_delta_buffer(text_delta_parts, item_id)
                 text = getattr(root, "text", "") or buffered_text
                 if text:
-                    completed_texts.append(text)
-                    text_parts.append(text)
+                    texts.append(text)
                     yield Text(text=text, raw=_raw(event) if req.include_raw else None)
                 continue
             if root_type == "reasoning":
@@ -337,19 +360,11 @@ async def _stream_turn(
                 if (
                     req.max_turns is not None
                     and completed_action_items >= req.max_turns
-                    and not max_turns_interrupted
+                    and not interrupted_for_max_turns
                 ):
-                    max_turns_interrupted = True
+                    interrupted_for_max_turns = True
+                    # Keep draining so buffered text and usage still arrive.
                     await _interrupt_for_max_turns(turn, req.max_turns)
-                    yield Error(
-                        message=(
-                            f"Codex max_turns={req.max_turns} reached after "
-                            f"{completed_action_items} completed action item(s); "
-                            "interrupted turn"
-                        ),
-                        error_type="max_turns",
-                    )
-                    return
             continue
 
         if method == "thread/tokenUsage/updated":
@@ -358,18 +373,16 @@ async def _stream_turn(
 
         if method == "error":
             error = getattr(payload, "error", None)
-            text = _error_message(error) or "Codex reported an error"
             # Keep SDK retries as warnings; the terminal state determines success.
             if getattr(payload, "will_retry", False):
-                yield WarningEvent(message=text)
+                yield WarningEvent(message=_error_message(error) or "Codex reported an error")
             else:
-                yield Error(message=text, error_type="codex", retryable=True)
+                reported_error = _error_event(error, _raw(event) if req.include_raw else None)
             continue
 
         if method == "turn/completed":
             for text in _drain_delta_buffers(text_delta_parts):
-                completed_texts.append(text)
-                text_parts.append(text)
+                texts.append(text)
                 yield Text(text=text)
             for text in _drain_delta_buffers(thinking_delta_parts):
                 yield Thinking(text=text)
@@ -377,15 +390,51 @@ async def _stream_turn(
             if usage_event is not None:
                 yield usage_event
             turn_info = getattr(payload, "turn", None)
-            if _turn_failed(turn_info):
-                raise AgentSdkWrapperError(_turn_error_message(turn_info))
+            status = _status_value(getattr(turn_info, "status", None))
+            if status == "failed":
+                error = getattr(turn_info, "error", None)
+                if error is not None:
+                    yield _error_event(error, _raw(event) if req.include_raw else None)
+                else:
+                    yield reported_error or Error(
+                        message="Codex turn failed", error_type="provider_exception"
+                    )
+                return
+            if status == "interrupted":
+                if interrupted_for_max_turns:
+                    yield Error(
+                        message=(
+                            f"Codex max_turns={req.max_turns} reached after "
+                            f"{completed_action_items} completed action item(s); "
+                            "interrupted turn"
+                        ),
+                        error_type="max_turns",
+                    )
+                else:
+                    yield Error(message="Codex turn was interrupted", error_type="cancelled")
+                return
+            if reported_error is not None:
+                yield WarningEvent(message=reported_error.message)
             if req.output_schema is not None:
-                text = completed_texts[-1] if completed_texts else "".join(text_parts)
-                if text:
-                    parsed = _structured_value(req.output_schema, _parse_json(text))
-                    value = validate_output(req.output_schema, parsed)
-                    yield StructuredOutput(value=value)
-            continue
+                yield _structured_output_event(req.output_schema, texts[-1] if texts else "")
+            return
+
+    yield reported_error or Error(
+        message="Codex turn stream ended before turn/completed",
+        error_type="provider_protocol_error",
+    )
+
+
+def _structured_output_event(output_schema: type, text: str) -> AgentEvent:
+    if not text:
+        return Error(
+            message="Codex returned no structured output", error_type="structured_output_failed"
+        )
+    try:
+        parsed = _structured_value(output_schema, _parse_json(text))
+        return StructuredOutput(value=validate_output(output_schema, parsed))
+    except AgentSdkWrapperError as exc:
+        return Error(message=str(exc), error_type="structured_output_failed")
 
 
 def _validate_supported(req: RunRequest) -> None:
@@ -533,12 +582,18 @@ def _buffer_sort_key(item: tuple[str | None, list[str]]) -> str:
 
 
 async def _interrupt_for_max_turns(turn: Any, max_turns: int) -> None:
+    from openai_codex.errors import InvalidRequestError
+
     interrupt = getattr(turn, "interrupt", None)
     if not callable(interrupt):
         raise AgentSdkWrapperError(
             f"Codex max_turns={max_turns} reached, but the SDK turn cannot be interrupted"
         )
-    await interrupt()
+    try:
+        await interrupt()
+    except InvalidRequestError:
+        # The turn finished before the interrupt landed; its turn/completed still follows.
+        pass
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1317,6 +1372,37 @@ def _write_sdk_debug_log(
     return path
 
 
+def _codex_process(codex: Any) -> Any:
+    return getattr(getattr(getattr(codex, "_client", None), "_sync", None), "_proc", None)
+
+
+async def _raise_if_signaled(process: Any, exc: BaseException) -> None:
+    """Raise ProcessTerminatedError when the app-server died from a signal."""
+
+    from openai_codex.errors import TransportClosedError
+
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return
+    returncode = poll()
+    if returncode is None and isinstance(exc, TransportClosedError):
+        # stdout can close a moment before the exit status is reapable.
+        try:
+            returncode = await asyncio.to_thread(process.wait, 2)
+        except Exception:
+            return
+    if not isinstance(returncode, int) or returncode >= 0:
+        return
+    number = -returncode
+    try:
+        name = signal.Signals(number).name
+    except ValueError:
+        name = str(number)
+    raise ProcessTerminatedError(
+        number, message=f"Codex app-server was killed by signal {name}: {exc}", cause=exc
+    ) from exc
+
+
 def _codex_stderr_tail(codex: Any) -> str | None:
     client = getattr(codex, "_client", None)
     sync_client = getattr(client, "_sync", None)
@@ -1605,14 +1691,130 @@ def _parse_json(text: str) -> Any:
         return text
 
 
-def _turn_failed(turn: Any) -> bool:
-    return _status_value(getattr(turn, "status", None)) == "failed"
+_TRANSIENT = "transient_api_error"
+_CODEX_ERROR_TYPES = {
+    "contextWindowExceeded": "context_window_exceeded",
+    "sessionBudgetExceeded": "max_budget",
+    "usageLimitExceeded": "usage_limit_exceeded",
+    "rateLimitExceeded": _TRANSIENT,
+    "serverOverloaded": _TRANSIENT,
+    "internalServerError": _TRANSIENT,
+    "unauthorized": "authentication_failed",
+    "badRequest": "invalid_request",
+    "cyberPolicy": "refused",
+    "misalignmentPolicyViolation": "refused",
+    "sandboxError": "execution_error",
+    "threadRollbackFailed": "execution_error",
+    "activeTurnNotSteerable": "invalid_request",
+}
+# codexErrorInfo variants that carry an optional upstream HTTP status.
+_CODEX_HTTP_ERRORS = {
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts",
+}
+_HTTP_STATUS_RE = re.compile(
+    r"\b(?:status(?: code)?|http)[:\s]+(\d{3})\b"
+    r"|\b(\d{3}) (?:bad request|unauthorized|payment required|forbidden|not found"
+    r"|too many requests|internal server error|bad gateway|service unavailable"
+    r"|gateway timeout)\b",
+    re.IGNORECASE,
+)
+_ERROR_PATTERNS = tuple(
+    (re.compile(pattern, re.IGNORECASE), error_type)
+    for pattern, error_type in (
+        (
+            r"\bcontext[ _-]?window\b|\bcontext_length_exceeded\b"
+            r"|\bmaximum context length\b|\bprompt is too long\b",
+            "context_window_exceeded",
+        ),
+        (
+            r"\binsufficient_quota\b|\bexceeded your current quota\b|\bquota exceeded\b"
+            r"|\busage limit\b",
+            "usage_limit_exceeded",
+        ),
+        (r"\bbilling\b|\bcredit balance\b", "billing_error"),
+        (
+            r"\bunauthorized\b|\bnot logged in\b|\binvalid_api_key\b"
+            r"|\b(?:invalid|incorrect|missing) api key\b",
+            "authentication_failed",
+        ),
+        (r"\bforbidden\b|\bpermission denied\b", "permission_denied"),
+        (
+            r"\bmodel_not_found\b|\bunknown model\b"
+            r"|\bmodel\b.{0,80}?\b(?:does not exist|not found|is not supported)\b",
+            "model_not_found",
+        ),
+        (
+            r"\brate[ _-]?limit|\boverloaded\b|\bserver busy\b|\bat capacity\b"
+            r"|\bstream disconnected\b|\bconnection (?:reset|refused|closed|timed out)\b"
+            r"|\btimed out\b|\btemporarily unavailable\b",
+            _TRANSIENT,
+        ),
+        (r"\binvalid_request_error\b|\bbad request\b|\binvalid prompt\b", "invalid_request"),
+    )
+)
 
 
-def _turn_error_message(turn: Any) -> str:
-    error = getattr(turn, "error", None)
-    message = getattr(error, "message", None)
-    return str(message or "Codex turn failed")
+def _error_event(error: Any, raw: dict[str, Any] | None = None) -> Error:
+    message = _error_message(error) or "Codex reported an error"
+    details = getattr(error, "additional_details", None)
+    if details and details not in message:
+        message = f"{message}: {details}"
+    info = getattr(error, "codex_error_info", None)
+    error_type = _classify_codex_error(info, message)
+    return Error(
+        message=message, error_type=error_type, retryable=error_type == _TRANSIENT, raw=raw
+    )
+
+
+def _classify_codex_error(info: Any, message: str) -> str:
+    """Prefer the structured ``codexErrorInfo``; fall back to the message for ``other``."""
+
+    plain = _to_plain(info)
+    plain = getattr(plain, "value", plain)
+    if isinstance(plain, str) and plain in _CODEX_ERROR_TYPES:
+        return _CODEX_ERROR_TYPES[plain]
+    if isinstance(plain, dict) and plain:
+        kind, detail = next(iter(plain.items()))
+        if kind in _CODEX_ERROR_TYPES:
+            return _CODEX_ERROR_TYPES[kind]
+        if kind in _CODEX_HTTP_ERRORS:
+            status = detail.get("httpStatusCode") if isinstance(detail, dict) else None
+            return _http_error_type(status, message) if status else _TRANSIENT
+    return _message_error_type(message) or "provider_exception"
+
+
+def _message_error_type(message: str) -> str | None:
+    match = _HTTP_STATUS_RE.search(message)
+    if match:
+        return _http_error_type(int(match.group(1) or match.group(2)), message)
+    return _pattern_error_type(message)
+
+
+def _pattern_error_type(message: str) -> str | None:
+    for pattern, error_type in _ERROR_PATTERNS:
+        if pattern.search(message):
+            return error_type
+    return None
+
+
+def _http_error_type(status: int, message: str) -> str:
+    if status in (408, 429) or status >= 500:
+        return _TRANSIENT
+    if status == 401:
+        return "authentication_failed"
+    if status == 402:
+        return "billing_error"
+    if status == 403:
+        return "permission_denied"
+    specific = _pattern_error_type(message)
+    if specific is not None and specific != _TRANSIENT:
+        return specific
+    if status in (400, 422):
+        return "invalid_request"
+    return f"api_error_{status}"
 
 
 def _status_value(status: Any) -> str:
@@ -1662,20 +1864,4 @@ def _as_str(value: Any) -> str | None:
 
 
 def _looks_transient(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    return any(
-        phrase in text
-        for phrase in (
-            "rate limit",
-            "overloaded",
-            "server busy",
-            "stream disconnected",
-            "timeout",
-            "timed out",
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
-        )
-    )
+    return _message_error_type(str(exc)) == _TRANSIENT
