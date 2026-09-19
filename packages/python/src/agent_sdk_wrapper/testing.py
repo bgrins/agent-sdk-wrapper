@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import AsyncIterable, Callable, Iterable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,11 @@ class FakeProvider(ProviderAdapter):
         else:
             source = self.events
 
+        if isinstance(source, AsyncGenerator):
+            async with contextlib.aclosing(source):
+                async for event in source:
+                    yield event
+            return
         if isinstance(source, AsyncIterable):
             async for event in source:
                 yield event
