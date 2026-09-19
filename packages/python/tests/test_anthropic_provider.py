@@ -330,7 +330,9 @@ async def test_anthropic_run_counts_subagent_models_without_adding_main_loop_twi
         yield _result(usage=legacy_usage, model_usage=models, total_cost_usd=1.51)
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
-    result = await Agent(provider="anthropic").run("Count main and subagent usage")
+    result = await Agent(provider="anthropic", include_raw=True).run(
+        "Count main and subagent usage"
+    )
     assert result.status == "success"
     assert result.usage == TokenUsage(
         input_tokens=1410,
@@ -377,7 +379,7 @@ def test_anthropic_refusal_reports_refused():
     assert error.error_type == "refused"
 
 
-@pytest.mark.parametrize("status", [429, 503, 529, None])
+@pytest.mark.parametrize("status", [429, 503, 529])
 def test_anthropic_retryable_api_status_is_marked_retryable(status):
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 
@@ -478,12 +480,12 @@ def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeyp
     async def fake_query(**kwargs):
         yield TaskStartedMessage(
             subtype="task_started",
-            data={},
             task_id="task-1",
             description="review the diff",
             uuid="u1",
             session_id="sess-1",
-            task_type="reviewer",
+            task_type="local_agent",
+            data={"subagent_type": "reviewer"},
         )
         yield AssistantMessage(
             content=[ToolUseBlock(id="tool-1", name="Read", input={"path": "a.py"})],
@@ -536,7 +538,7 @@ def test_anthropic_error_type_ignores_a_normal_stop_reason():
     )
 
     assert error is not None
-    assert error.error_type == "api_error_400"
+    assert error.error_type == "invalid_request"
     assert error.retryable is False
 
 
@@ -548,4 +550,387 @@ def test_anthropic_error_type_falls_back_to_an_error_subtype():
     )
 
     assert error is not None
-    assert error.error_type == "error_during_execution"
+    assert error.error_type == "execution_error"
+
+
+def _stream(monkeypatch, messages, **request):
+    """Run the adapter over scripted SDK messages; return (events, options)."""
+    import claude_agent_sdk
+
+    seen = {}
+
+    async def fake_query(*, prompt, options):
+        seen["options"] = options
+        for message in messages:
+            if isinstance(message, BaseException):
+                raise message
+            yield message
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    async def collect():
+        req = RunRequest(provider="anthropic", prompt="ignored", **request)
+        return [event async for event in AnthropicProvider().stream(req)]
+
+    events = asyncio.run(collect())
+    return events, seen["options"]
+
+
+def _assistant(*blocks, **kwargs):
+    from claude_agent_sdk import AssistantMessage
+
+    model = kwargs.pop("model", "claude-test")
+    return AssistantMessage(content=list(blocks), model=model, **kwargs)
+
+
+def test_anthropic_options_isolate_settings_by_default():
+    options = AnthropicProvider()._build_options(RunRequest(provider="anthropic", prompt="x"))
+    assert options.setting_sources == []
+
+    explicit = AnthropicProvider()._build_options(
+        RunRequest(provider="anthropic", prompt="x", setting_sources=["project"])
+    )
+    assert explicit.setting_sources == ["project"]
+
+    with pytest.raises(ConfigError, match="setting_sources"):
+        AnthropicProvider()._build_options(
+            RunRequest(provider="anthropic", prompt="x", setting_sources=["global"])
+        )
+
+
+def test_anthropic_env_pins_effort_and_disables_background_tasks():
+    options = AnthropicProvider()._build_options(
+        RunRequest(provider="anthropic", prompt="x", effort="high", env={"KEEP": "1"})
+    )
+    assert options.env == {
+        "KEEP": "1",
+        "CLAUDE_CODE_EFFORT_LEVEL": "high",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    }
+
+    caller = AnthropicProvider()._build_options(
+        RunRequest(
+            provider="anthropic",
+            prompt="x",
+            env={"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"},
+        )
+    )
+    assert caller.env == {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}
+
+    with pytest.raises(ConfigError, match="CLAUDE_CODE_EFFORT_LEVEL"):
+        AnthropicProvider()._build_options(
+            RunRequest(
+                provider="anthropic",
+                prompt="x",
+                effort="high",
+                env={"CLAUDE_CODE_EFFORT_LEVEL": "low"},
+            )
+        )
+
+
+def test_anthropic_options_leave_buffer_headroom_unless_overridden():
+    default = AnthropicProvider()._build_options(RunRequest(provider="anthropic", prompt="x"))
+    assert default.max_buffer_size == 16 * 1024 * 1024
+
+    override = AnthropicProvider()._build_options(
+        RunRequest(provider="anthropic", prompt="x", extra_options={"max_buffer_size": 1})
+    )
+    assert override.max_buffer_size == 1
+
+
+@pytest.mark.parametrize(
+    ("request_kwargs", "match"),
+    [
+        ({"max_turns": 0}, "max_turns"),
+        ({"extra_options": {"allowed_tools": ["Bash"]}}, "allowed_tools"),
+        ({"extra_options": {"mcp_servers": {}}}, "mcp_servers"),
+        ({"web_tools": True, "builtin_tools": "none"}, "web_tools"),
+        ({"web_tools": True, "disallowed_tools": ["WebFetch"]}, "WebFetch"),
+    ],
+)
+def test_anthropic_rejects_options_the_sdk_would_ignore_or_override(request_kwargs, match):
+    with pytest.raises(ConfigError, match=match):
+        AnthropicProvider()._build_options(
+            RunRequest(provider="anthropic", prompt="x", **request_kwargs)
+        )
+
+
+def test_anthropic_web_tools_true_and_subagents_extend_a_builtin_allowlist():
+    from agent_sdk_wrapper import SubagentDef
+
+    options = AnthropicProvider()._build_options(
+        RunRequest(
+            provider="anthropic",
+            prompt="x",
+            builtin_tools=["Read"],
+            web_tools=True,
+            subagents={"helper": SubagentDef(description="d", prompt="p")},
+        )
+    )
+    assert options.tools == ["Read", "WebSearch", "WebFetch", "Agent"]
+    assert "Agent" in options.allowed_tools
+
+
+def test_anthropic_session_info_reports_the_resolved_model(monkeypatch):
+    from claude_agent_sdk import SystemMessage
+
+    from agent_sdk_wrapper.events import SessionInfo
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            SystemMessage(
+                subtype="init", data={"session_id": "sess-1", "model": "claude-opus-5"}
+            )
+        ],
+    )
+    assert events == [SessionInfo(id="sess-1", model="claude-opus-5")]
+
+
+def test_anthropic_usage_counts_thinking_tokens_from_either_usage_shape():
+    from agent_sdk_wrapper.providers.anthropic_provider import _usage_event
+
+    by_model = _usage_event(
+        {"input_tokens": 1, "output_tokens": 600},
+        0.01,
+        model_usage={
+            "claude-main": {"inputTokens": 40, "outputTokens": 620, "thinkingTokens": 360},
+            "claude-helper": {"inputTokens": 900, "outputTokens": 17, "thinkingTokens": 0},
+        },
+    )
+    assert by_model.usage.output_tokens == 637
+    assert by_model.usage.reasoning_output_tokens == 360
+    assert by_model.raw is None
+
+    legacy = _usage_event(
+        {
+            "input_tokens": 40,
+            "output_tokens": 620,
+            "output_tokens_details": {"thinking_tokens": 360},
+        },
+        0.01,
+        include_raw=True,
+    )
+    assert legacy.usage.reasoning_output_tokens == 360
+    assert legacy.raw["output_tokens"] == 620
+
+
+def test_anthropic_reports_reasoning_even_without_a_thinking_block(monkeypatch):
+    from agent_sdk_wrapper.events import SessionInfo, Thinking, Usage
+
+    events, _ = _stream(
+        monkeypatch,
+        [_result(model_usage={"m": {"outputTokens": 10, "thinkingTokens": 4}})],
+    )
+    assert [type(event) for event in events] == [SessionInfo, Thinking, Usage]
+
+
+def test_anthropic_synthetic_error_message_is_a_classified_failure_not_text(monkeypatch):
+    from claude_agent_sdk import TextBlock
+
+    from agent_sdk_wrapper.events import Error, Text
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(
+                TextBlock(text="Not logged in · Please run /login"),
+                model="<synthetic>",
+                error="authentication_failed",
+            ),
+            _result(is_error=True, result="Not logged in · Please run /login"),
+        ],
+    )
+    assert not any(isinstance(event, Text) for event in events)
+    error = next(event for event in events if isinstance(event, Error))
+    assert (error.error_type, error.retryable) == ("authentication_failed", False)
+    assert error.message == "Not logged in · Please run /login"
+
+
+@pytest.mark.parametrize(
+    ("result", "error_type", "retryable"),
+    [
+        ({"is_error": True, "result": "API Error: Connection error."}, "transient_api_error", True),
+        ({"is_error": True, "result": "Connection refused"}, "transient_api_error", True),
+        ({"is_error": True, "result": "something odd"}, "execution_error", False),
+        (
+            {"is_error": True, "terminal_reason": "prompt_too_long"},
+            "context_window_exceeded",
+            False,
+        ),
+        ({"subtype": "error_max_budget_usd", "is_error": True}, "max_budget", False),
+        (
+            {"subtype": "error_max_structured_output_retries", "is_error": True},
+            "structured_output_failed",
+            False,
+        ),
+        ({"is_error": True, "terminal_reason": "aborted_tools"}, "cancelled", False),
+        ({"is_error": True, "api_error_status": 401}, "authentication_failed", False),
+    ],
+)
+def test_anthropic_result_errors_use_structured_signals_and_keep_evidence(
+    result, error_type, retryable
+):
+    from agent_sdk_wrapper.providers.anthropic_provider import _result_error
+
+    error = _result_error(_result(**result))
+
+    assert error is not None
+    assert (error.error_type, error.retryable) == (error_type, retryable)
+
+
+def test_anthropic_omits_subagent_scoped_messages(monkeypatch):
+    from claude_agent_sdk import TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
+
+    from agent_sdk_wrapper.events import Text, ToolCall, ToolResult, WarningEvent
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(
+                ToolUseBlock(id="sub-tool", name="Bash", input={}),
+                parent_tool_use_id="agent-1",
+            ),
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="sub-tool", content="x")],
+                parent_tool_use_id="agent-1",
+            ),
+            _assistant(TextBlock(text="done")),
+        ],
+    )
+    assert not any(isinstance(event, (ToolCall, ToolResult)) for event in events)
+    assert [type(event) for event in events] == [WarningEvent, Text]
+
+
+def test_anthropic_subagents_pair_start_with_either_terminal_message(monkeypatch):
+    from claude_agent_sdk import TaskStartedMessage, TaskUpdatedMessage
+
+    from agent_sdk_wrapper.events import SubagentEnded, SubagentStarted
+
+    def started(task_id, task_type):
+        return TaskStartedMessage(
+            subtype="task_started",
+            data={},
+            task_id=task_id,
+            description="work",
+            uuid="u",
+            session_id="s",
+            task_type=task_type,
+        )
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            started("shell", "local_bash"),
+            started("agent", "local_agent"),
+            TaskUpdatedMessage(
+                subtype="task_updated", data={}, task_id="shell", patch={"status": "killed"}
+            ),
+            TaskUpdatedMessage(
+                subtype="task_updated", data={}, task_id="agent", patch={"status": "killed"}
+            ),
+        ],
+    )
+    assert events == [
+        SubagentStarted(task_id="agent", name="local_agent", description="work"),
+        SubagentEnded(task_id="agent", status="killed"),
+    ]
+
+
+def test_anthropic_refusal_retraction_is_a_protocol_error(monkeypatch):
+    from claude_agent_sdk import SystemMessage, TextBlock
+
+    from agent_sdk_wrapper.events import Error
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="partial")),
+            SystemMessage(
+                subtype="model_refusal_fallback", data={"retracted_message_uuids": ["m1"]}
+            ),
+            _assistant(TextBlock(text="fallback answer")),
+        ],
+    )
+    assert isinstance(events[-1], Error)
+    assert events[-1].error_type == "provider_protocol_error"
+
+
+def test_anthropic_process_errors_carry_the_stderr_tail(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import ProcessError
+
+    from agent_sdk_wrapper import TransientError
+
+    async def fake_query(*, prompt, options):
+        options.stderr("API Error: 529 overloaded_error")
+        raise ProcessError("Command failed with exit code 1", exit_code=1)
+        yield  # pragma: no cover - generator marker
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    async def collect():
+        return [
+            event
+            async for event in AnthropicProvider().stream(
+                RunRequest(provider="anthropic", prompt="ignored")
+            )
+        ]
+
+    with pytest.raises(TransientError, match="529 overloaded_error"):
+        asyncio.run(collect())
+
+
+def test_anthropic_chains_a_user_stderr_callback():
+    lines = []
+    options = AnthropicProvider()._build_options(
+        RunRequest(provider="anthropic", prompt="x", extra_options={"stderr": lines.append}),
+        stderr_tail=None,
+    )
+    options.stderr("hello")
+    assert lines == ["hello"]
+
+
+def test_anthropic_joins_text_blocks_and_maps_server_tool_results(monkeypatch):
+    from claude_agent_sdk import ServerToolResultBlock, ServerToolUseBlock, TextBlock
+
+    from agent_sdk_wrapper.events import Text, ToolCall, ToolResult
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(
+                TextBlock(text="Searching."),
+                ServerToolUseBlock(id="srv-1", name="web_search", input={"query": "q"}),
+                ServerToolResultBlock(tool_use_id="srv-1", content={"type": "web_search_result"}),
+                TextBlock(text="The answer "),
+                TextBlock(text="is 42."),
+            )
+        ],
+    )
+    assert [type(event) for event in events] == [Text, ToolCall, ToolResult, Text]
+    assert events[-1].text == "The answer is 42."
+    assert events[2].name == "web_search"
+
+
+def test_anthropic_uses_result_text_when_no_text_block_arrived(monkeypatch):
+    from agent_sdk_wrapper.events import Text
+
+    events, _ = _stream(monkeypatch, [_result(result="final answer")])
+    assert [event.text for event in events if isinstance(event, Text)] == ["final answer"]
+
+
+def test_anthropic_structured_output_mismatch_is_a_typed_failure(monkeypatch):
+    from pydantic import BaseModel
+
+    from agent_sdk_wrapper.events import Error
+
+    class Answer(BaseModel):
+        value: int
+
+    events, _ = _stream(
+        monkeypatch,
+        [_result(structured_output={"value": "not an int"})],
+        output_schema=Answer,
+    )
+    assert events[-1] == Error(message=events[-1].message, error_type="structured_output_failed")
