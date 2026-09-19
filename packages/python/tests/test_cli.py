@@ -388,3 +388,48 @@ def test_run_rejects_unknown_config_field(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "unknown config field(s): unknown" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('timeout = "30"', "config field timeout must be a number"),
+        ('max_turns = "3"', "config field max_turns must be an integer"),
+        ("model = 5", "config field model must be a string"),
+        ("output = 1", "config field output must be a string"),
+    ],
+)
+def test_run_rejects_mistyped_config_values(monkeypatch, tmp_path, capsys, line, message):
+    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_text(f'provider = "openai"\n{line}\n', encoding="utf-8")
+
+    rc = cli.main(["run", "--config", str(config_path), "--prompt", "x"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert message in captured.err
+    assert captured.out == ""
+
+
+def test_run_reports_missing_prompt_file(tmp_path, capsys):
+    missing = tmp_path / "missing.txt"
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt-file", str(missing)])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert f"error: could not read prompt file {missing}" in captured.err
+
+
+def test_run_rejects_empty_prompt_with_prompt_file(tmp_path, capsys):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("real prompt", encoding="utf-8")
+
+    rc = cli.main(
+        ["run", "--provider", "openai", "--prompt", "", "--prompt-file", str(prompt_file)]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "pass only one of --prompt / --prompt-file" in captured.err

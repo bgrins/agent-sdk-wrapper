@@ -162,12 +162,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _read_prompt(args: argparse.Namespace, config: dict[str, Any], base_dir: Path | None) -> str:
-    if args.prompt and args.prompt_file:
-        sys.exit("error: pass only one of --prompt / --prompt-file")
+    if args.prompt is not None and args.prompt_file is not None:
+        raise ConfigError("pass only one of --prompt / --prompt-file")
     if args.prompt is not None:
         return args.prompt
     if args.prompt_file is not None:
-        return args.prompt_file.read_text(encoding="utf-8")
+        return _read_prompt_file(args.prompt_file)
     if "prompt" in config and "prompt_file" in config:
         raise ConfigError("config may contain only one of prompt or prompt_file")
     if "prompt" in config:
@@ -176,11 +176,19 @@ def _read_prompt(args: argparse.Namespace, config: dict[str, Any], base_dir: Pat
             raise ConfigError("config field prompt must be a string")
         return prompt
     if "prompt_file" in config:
-        prompt_file = _path_from_config(config["prompt_file"], base_dir, field="prompt_file")
-        return prompt_file.read_text(encoding="utf-8")
+        return _read_prompt_file(
+            _path_from_config(config["prompt_file"], base_dir, field="prompt_file")
+        )
     if not sys.stdin.isatty():
         return sys.stdin.read()
-    sys.exit("error: provide --prompt, --prompt-file, or pipe one on stdin")
+    raise ConfigError("provide --prompt, --prompt-file, or pipe one on stdin")
+
+
+def _read_prompt_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"could not read prompt file {path}: {exc}") from exc
 
 
 def _setup_logging(verbose: int) -> None:
@@ -197,7 +205,7 @@ async def _run(args: argparse.Namespace) -> int:
     config, config_base_dir = _load_cli_config(args.config)
     prompt = _read_prompt(args, config, config_base_dir)
     stream = args.stream or _config_bool(config, "stream", False)
-    output = args.output or _config_get(config, "output", None) or ("text" if stream else "jsonl")
+    output = args.output or _config_str(config, "output") or ("text" if stream else "jsonl")
     if output not in _OUTPUTS:
         raise ConfigError("config field output must be one of: jsonl, text, json")
     if stream and output == "jsonl":
@@ -215,18 +223,18 @@ async def _run(args: argparse.Namespace) -> int:
         _parse_json_assignments(args.extra_option or [], flag="--extra-option"),
     )
     agent_kwargs: dict[str, Any] = dict(
-        provider=args.provider or _config_get(config, "provider", None),
-        model=args.model or _config_get(config, "model", None),
-        system_prompt=args.system_prompt or _config_get(config, "system_prompt", None),
+        provider=args.provider or _config_str(config, "provider"),
+        model=args.model or _config_str(config, "model"),
+        system_prompt=args.system_prompt or _config_str(config, "system_prompt"),
         cwd=args.cwd or _optional_path(config, "cwd", config_base_dir),
         env=env,
         max_turns=(
             args.max_turns
             if args.max_turns is not None
-            else _config_get(config, "max_turns", None)
+            else _config_optional_int(config, "max_turns")
         ),
-        effort=args.effort or _config_get(config, "effort", None),
-        timeout=args.timeout if args.timeout is not None else _config_get(config, "timeout", None),
+        effort=args.effort or _config_str(config, "effort"),
+        timeout=args.timeout if args.timeout is not None else _config_number(config, "timeout"),
         max_retries=args.max_retries
         if args.max_retries is not None
         else _config_int(config, "max_retries", 2),
@@ -246,13 +254,13 @@ async def _run(args: argparse.Namespace) -> int:
         allowed_tools=_merge_string_lists(config, "allowed_tools", args.allowed_tool),
         disallowed_tools=_merge_string_lists(config, "disallowed_tools", args.disallowed_tool),
         mcp_servers=_parse_mcp_servers(config.get("mcp_servers"), config_base_dir),
-        session_id=args.session_id or _config_get(config, "session_id", None),
+        session_id=args.session_id or _config_str(config, "session_id"),
         continue_session=bool(
             args.continue_session
             if args.continue_session is not None
             else _config_bool(config, "continue_session", False)
         ),
-        permission_mode=args.permission_mode or _config_get(config, "permission_mode", None),
+        permission_mode=args.permission_mode or _config_str(config, "permission_mode"),
         extra_options=extra_options,
         provider_options=provider_options,
         trace_file=args.trace_file or _optional_path(config, "trace_file", config_base_dir),
@@ -382,8 +390,23 @@ def _load_cli_config(path: Path | None) -> tuple[dict[str, Any], Path | None]:
     return config, path.resolve().parent
 
 
-def _config_get(config: dict[str, Any], key: str, default: Any) -> Any:
-    return config.get(key, default)
+def _config_str(config: dict[str, Any], key: str) -> str | None:
+    value = config.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ConfigError(f"config field {key} must be a string")
+    return value
+
+
+def _config_optional_int(config: dict[str, Any], key: str) -> int | None:
+    if key not in config:
+        return None
+    return _config_int(config, key, 0)
+
+
+def _config_number(config: dict[str, Any], key: str) -> float | None:
+    if key not in config:
+        return None
+    return _optional_float(config[key], f"config field {key}")
 
 
 def _config_bool(config: dict[str, Any], key: str, default: bool) -> bool:
