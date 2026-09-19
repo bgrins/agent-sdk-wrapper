@@ -158,6 +158,12 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         choices=["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"],
     )
+    run.add_argument(
+        "--cli-login",
+        default=None,
+        choices=["deny", "require"],
+        help="Whether the runtime may use its stored login (require: Codex only).",
+    )
     run.add_argument("--verbose", "-v", action="count", default=0)
     return p
 
@@ -262,6 +268,7 @@ async def _run(args: argparse.Namespace) -> int:
             else _config_bool(config, "continue_session", False)
         ),
         permission_mode=args.permission_mode or _config_str(config, "permission_mode"),
+        cli_login=args.cli_login or _config_str(config, "cli_login") or "deny",
         extra_options=extra_options,
         provider_options=provider_options,
         trace_file=args.trace_file or _optional_path(config, "trace_file", config_base_dir),
@@ -316,6 +323,7 @@ _CONFIG_KEYS = {
     "allowed_tools",
     "artifacts_dir",
     "builtin_tools",
+    "cli_login",
     "continue_session",
     "cwd",
     "disallowed_tools",

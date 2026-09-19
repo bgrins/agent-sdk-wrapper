@@ -62,6 +62,7 @@ from .request import (
     RunRequest,
     SubagentDef,
     normalize_builtin_tools,
+    normalize_cli_login,
     normalize_effort_for_provider,
     normalize_model_for_provider,
     normalize_subagents_for_provider,
@@ -75,6 +76,7 @@ DEFAULT_CONTEXT_DUMP_PROMPT = (
 
 _ALLOWED_OVERRIDES = frozenset({
     "allowed_tools",
+    "cli_login",
     "artifacts_dir",
     "builtin_tools",
     "continue_session",
@@ -174,6 +176,7 @@ class Agent:
         continue_session: bool = False,
         permission_mode: str | None = None,
         setting_sources: list[str] | None = None,
+        cli_login: str = "deny",
         extra_options: dict[str, Any] | None = None,
         provider_options: dict[str, Any] | None = None,
         trace_file: str | Path | None = None,
@@ -207,6 +210,7 @@ class Agent:
         self.continue_session = continue_session
         self.permission_mode = permission_mode
         self.setting_sources = setting_sources
+        self.cli_login = normalize_cli_login(cli_login)
         self.extra_options = dict(extra_options or {})
         self.trace_file = trace_file
         self.artifacts_dir = artifacts_dir
@@ -224,6 +228,9 @@ class Agent:
         req = self._build_request("", {})
         self._provider.validate_request(req)
         self._provider.ensure_available()
+        problem = self._provider.check_credentials(req)
+        if problem:
+            raise ProviderNotAvailableError(problem)
 
     def stream(self, prompt: str, **overrides: Any) -> AsyncIterator[EventEnvelope]:
         """Stream envelopes for one run. Invalid settings raise ``ConfigError`` here."""
@@ -336,6 +343,7 @@ class Agent:
             continue_session=bool(pick("continue_session", self.continue_session)),
             permission_mode=pick("permission_mode", self.permission_mode),
             setting_sources=pick("setting_sources", self.setting_sources),
+            cli_login=normalize_cli_login(pick("cli_login", self.cli_login)),
             extra_options=dict(pick("extra_options", self.extra_options)),
         )
 

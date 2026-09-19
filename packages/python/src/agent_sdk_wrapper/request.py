@@ -18,6 +18,8 @@ ProviderInput = str | None
 BuiltinTools = Literal["none"] | list[str]
 BuiltinToolsInput = Literal["none"] | Sequence[str] | None
 INHERIT_MODEL = "inherit"
+CliLogin = Literal["deny", "require"]
+_CLI_LOGIN_VALUES = ("deny", "require")
 Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 _PROVIDER_ALIASES: dict[str, Provider] = {
@@ -171,6 +173,12 @@ def normalize_effort_for_provider(provider: Provider, value: str | None) -> Effo
     return cast(Effort, effort)
 
 
+def normalize_cli_login(value: str) -> CliLogin:
+    if value not in _CLI_LOGIN_VALUES:
+        raise ConfigError(f"cli_login must be one of {_CLI_LOGIN_VALUES}, got {value!r}")
+    return cast(CliLogin, value)
+
+
 @dataclass
 class SubagentDef:
     """A delegated agent: Claude ``AgentDefinition`` or Codex multi-agent config.
@@ -258,6 +266,10 @@ class RunRequest:
     setting_sources: list[str] | None = None
     # Escape hatch merged into the backend's native options object.
     extra_options: dict[str, Any] = field(default_factory=dict)
+    # The runtime's stored login (Claude claude.ai/OAuth, Codex auth.json/keyring).
+    # "deny" requires API-key or cloud-provider credentials; "require" (Codex only)
+    # requires the stored ChatGPT login and removes API keys from the child env.
+    cli_login: CliLogin = "deny"
     # Set by Agent for provider-event logs.
     run_id: str | None = None
     attempt: int = 0

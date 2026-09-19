@@ -606,6 +606,7 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
         "KEEP": "1",
         "CLAUDE_CODE_EFFORT_LEVEL": "high",
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_OAUTH_TOKEN": "",
     }
 
     caller = AnthropicProvider()._build_options(
@@ -615,7 +616,7 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
             env={"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"},
         )
     )
-    assert caller.env == {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}
+    assert caller.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "0"
 
     with pytest.raises(ConfigError, match="CLAUDE_CODE_EFFORT_LEVEL"):
         AnthropicProvider()._build_options(
@@ -752,7 +753,12 @@ def test_anthropic_synthetic_error_message_is_a_classified_failure_not_text(monk
     [
         ({"is_error": True, "result": "API Error: Connection error."}, "transient_api_error", True),
         ({"is_error": True, "result": "Connection refused"}, "transient_api_error", True),
-        ({"is_error": True, "result": "something odd"}, "execution_error", False),
+        ({"is_error": True, "result": "something odd"}, "transient_api_error", True),
+        (
+            {"is_error": True, "terminal_reason": "malformed_tool_use_exhausted"},
+            "execution_error",
+            False,
+        ),
         (
             {"is_error": True, "terminal_reason": "prompt_too_long"},
             "context_window_exceeded",
@@ -935,3 +941,92 @@ def test_anthropic_structured_output_mismatch_is_a_typed_failure(monkeypatch):
         output_schema=Answer,
     )
     assert events[-1] == Error(message=events[-1].message, error_type="structured_output_failed")
+
+
+def test_anthropic_joins_text_frames_of_one_message(monkeypatch):
+    from claude_agent_sdk import TextBlock, ThinkingBlock
+
+    from agent_sdk_wrapper.events import Text
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(ThinkingBlock(thinking="plan", signature="s"), message_id="m1"),
+            _assistant(TextBlock(text="The answer "), message_id="m1"),
+            _assistant(TextBlock(text="is 42."), message_id="m1"),
+            _assistant(TextBlock(text="Separate message."), message_id="m2"),
+            _result(result="The answer is 42."),
+        ],
+    )
+    assert [event.text for event in events if isinstance(event, Text)] == [
+        "The answer is 42.",
+        "Separate message.",
+    ]
+
+
+def test_anthropic_auth_failure_with_403_is_permission_denied():
+    from agent_sdk_wrapper.providers.anthropic_provider import _result_error
+
+    error = _result_error(
+        _result(is_error=True, api_error_status=403), ("authentication_failed", "denied")
+    )
+    assert error is not None
+    assert error.error_type == "permission_denied"
+
+
+def test_anthropic_cli_login_require_and_login_tokens_are_rejected():
+    with pytest.raises(ConfigError, match="cli_login='require'"):
+        AnthropicProvider().validate_request(
+            RunRequest(provider="anthropic", prompt="x", cli_login="require")
+        )
+    with pytest.raises(ConfigError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        AnthropicProvider().validate_request(
+            RunRequest(provider="anthropic", prompt="x", env={"CLAUDE_CODE_OAUTH_TOKEN": "t"})
+        )
+
+
+def test_anthropic_blanks_an_inherited_login_token(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited")
+    options = AnthropicProvider()._build_options(RunRequest(provider="anthropic", prompt="x"))
+    assert options.env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"ANTHROPIC_API_KEY": "k"},
+        {"ANTHROPIC_AUTH_TOKEN": "t"},
+        {"CLAUDE_CODE_USE_BEDROCK": "1"},
+    ],
+)
+def test_anthropic_accepts_api_and_cloud_credentials(monkeypatch, env):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    req = RunRequest(provider="anthropic", prompt="x", env=env)
+    assert AnthropicProvider().check_credentials(req) is None
+
+
+def test_anthropic_without_credentials_fails_before_launching(monkeypatch):
+    import claude_agent_sdk
+
+    from agent_sdk_wrapper import Agent, ProviderNotAvailableError
+    from agent_sdk_wrapper.events import Error
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    def fail_query(**kwargs):
+        raise AssertionError("the runtime must not start")
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fail_query)
+    events, _ = [], None
+
+    async def collect():
+        req = RunRequest(provider="anthropic", prompt="x", env={"ANTHROPIC_API_KEY": ""})
+        return [event async for event in AnthropicProvider().stream(req)]
+
+    events = asyncio.run(collect())
+    assert len(events) == 1 and isinstance(events[0], Error)
+    assert events[0].error_type == "authentication_failed"
+
+    with pytest.raises(ProviderNotAvailableError, match="stored claude.ai login"):
+        Agent(provider="anthropic", env={"ANTHROPIC_API_KEY": ""}).check_runtime()

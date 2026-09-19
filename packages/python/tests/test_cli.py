@@ -184,6 +184,29 @@ def test_run_web_tools_flags_map_to_request(monkeypatch, capsys):
     assert [r.web_tools for r in seen_requests] == [False, True, None]
 
 
+def test_run_cli_login_flag_and_config_map_to_request(monkeypatch, tmp_path, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    config = tmp_path / "agent.toml"
+    config.write_text('cli_login = "require"\n', encoding="utf-8")
+
+    base_args = ["run", "--provider", "openai", "--prompt", "x"]
+    assert cli.main(base_args) == 0
+    assert cli.main([*base_args, "--config", str(config)]) == 0
+    assert cli.main([*base_args, "--config", str(config), "--cli-login", "deny"]) == 0
+    capsys.readouterr()
+
+    assert [r.cli_login for r in seen_requests] == ["deny", "require", "deny"]
+
+
 def test_run_rejects_conflicting_web_tools_flags(capsys):
     with pytest.raises(SystemExit) as exc_info:
         cli.main(

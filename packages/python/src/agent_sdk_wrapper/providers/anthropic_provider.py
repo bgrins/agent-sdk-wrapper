@@ -6,6 +6,7 @@ import collections
 import contextlib
 import dataclasses
 import json
+import os
 import platform
 import re
 import shutil
@@ -53,6 +54,16 @@ _STDERR_TAIL_LINES = 50
 _EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 # Background subagents add a follow-up turn and a second result frame.
 _BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+# A claude.ai login token; the CLI treats an empty value as unset.
+_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+# The CLI ranks these above every stored login (claude.ai, OAuth token, Console profile).
+_CREDENTIAL_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
 _SYNTHETIC_MODEL = "<synthetic>"
 _SUBAGENT_TASK_TYPES = frozenset({"local_agent", "remote_agent"})
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
@@ -95,13 +106,14 @@ _TERMINAL_REASON_ERRORS = {
     "prompt_too_long": "context_window_exceeded",
     "aborted_streaming": "cancelled",
     "aborted_tools": "cancelled",
-    "blocking_limit": "usage_limit_exceeded",
-    "rapid_refill_breaker": "usage_limit_exceeded",
+    # The CLI groups these with prompt_too_long as context limits.
+    "blocking_limit": "context_window_exceeded",
+    "rapid_refill_breaker": "context_window_exceeded",
 }
 # AssistantMessage.error values; "unknown" and "invalid_request" defer to other signals.
 _ASSISTANT_ERRORS = {
     "authentication_failed": "authentication_failed",
-    "oauth_org_not_allowed": "authentication_failed",
+    "oauth_org_not_allowed": "permission_denied",
     "verification_required": "authentication_failed",
     "cloud_credential_error": "authentication_failed",
     "account_on_hold": "permission_denied",
@@ -179,9 +191,30 @@ class AnthropicProvider(ProviderAdapter):
             "provider_options={'cli_path': ...}."
         )
 
+    def check_credentials(self, req: RunRequest) -> str | None:
+        env = {**os.environ, **req.env}
+        unset = ("", "0", "false")
+        if any(env.get(name, "").strip().lower() not in unset for name in _CREDENTIAL_ENV):
+            return None
+        return (
+            "no Claude API credentials: set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or a "
+            "cloud-provider flag (CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY). "
+            "cli_login='deny' never uses a stored claude.ai login"
+        )
+
     def validate_request(self, req: RunRequest) -> None:
         effort = normalize_effort_for_provider("anthropic", req.effort)
         validate_tool_names(req.tools)
+        if req.cli_login == "require":
+            raise ConfigError(
+                "cli_login='require' is not supported for Claude; use an API key, "
+                "auth token or cloud-provider credentials"
+            )
+        if req.env.get(_OAUTH_TOKEN_ENV):
+            raise ConfigError(
+                f"env[{_OAUTH_TOKEN_ENV!r}] is a claude.ai login token; "
+                "Claude runs use API-key or cloud-provider credentials"
+            )
         active_mcp_servers = [
             server for server in req.mcp_servers if server.enabled is not False
         ]
@@ -276,6 +309,7 @@ class AnthropicProvider(ProviderAdapter):
         if effort:
             env.setdefault(_EFFORT_ENV, effort)
         env.setdefault(_BACKGROUND_TASKS_ENV, "1")
+        env[_OAUTH_TOKEN_ENV] = ""
 
         extra = dict(req.extra_options)
         user_stderr = extra.pop("stderr", None)
@@ -322,6 +356,10 @@ class AnthropicProvider(ProviderAdapter):
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
         self.validate_request(req)
         self.ensure_available()
+        problem = self.check_credentials(req)
+        if problem:
+            yield Error(message=problem, error_type="authentication_failed")
+            return
 
         from claude_agent_sdk import (
             AssistantMessage,
@@ -347,6 +385,7 @@ class AnthropicProvider(ProviderAdapter):
         seen_session = False
         seen_text = False
         seen_thinking = False
+        pending = _PendingText()
         # The latest error-bearing assistant message: (AssistantMessage.error, its text).
         assistant_error: tuple[str | None, str] | None = None
         # Map tool_use_id to the tool name for result events.
@@ -366,6 +405,11 @@ class AnthropicProvider(ProviderAdapter):
             ) as messages:
                 async for message in messages:
                     provider_log.write(message)
+                    if not pending.continues(message):
+                        text = pending.flush()
+                        if text is not None:
+                            seen_text = True
+                            yield text
                     if isinstance(message, AssistantMessage):
                         if message.parent_tool_use_id:
                             yield WarningEvent(
@@ -379,7 +423,9 @@ class AnthropicProvider(ProviderAdapter):
                             if text:
                                 yield WarningEvent(message=text)
                             continue
-                        for event in _assistant_events(message, tool_names, req.include_raw):
+                        for event in _assistant_events(
+                            message, tool_names, req.include_raw, pending
+                        ):
                             seen_text = seen_text or isinstance(event, Text)
                             seen_thinking = seen_thinking or isinstance(event, Thinking)
                             yield event
@@ -486,6 +532,9 @@ class AnthropicProvider(ProviderAdapter):
                             "agent-sdk-wrapper does not support Claude partial messages. "
                             "Do not enable extra_options['include_partial_messages']."
                         )
+                text = pending.flush()
+                if text is not None:
+                    yield text
         except CLINotFoundError as exc:
             raise ProviderNotAvailableError(str(exc), cause=exc) from exc
         except CLIConnectionError as exc:
@@ -525,10 +574,38 @@ def _message_text(message: Any) -> str:
     return "".join(block.text for block in message.content if isinstance(block, TextBlock))
 
 
+@dataclasses.dataclass
+class _PendingText:
+    """Text blocks of one assistant message, which the CLI emits one frame per block."""
+
+    message_id: str | None = None
+    parts: list[str] = dataclasses.field(default_factory=list)
+
+    def continues(self, message: Any) -> bool:
+        from claude_agent_sdk import AssistantMessage, TextBlock
+
+        return (
+            isinstance(message, AssistantMessage)
+            and message.message_id is not None
+            and message.message_id == self.message_id
+            and not message.parent_tool_use_id
+            and message.error is None
+            and bool(message.content)
+            and isinstance(message.content[0], TextBlock)
+        )
+
+    def flush(self) -> Text | None:
+        if not self.parts:
+            return None
+        text = Text(text="".join(self.parts))
+        self.parts.clear()
+        return text
+
+
 def _assistant_events(
-    message: Any, tool_names: dict[str, str], include_raw: bool
+    message: Any, tool_names: dict[str, str], include_raw: bool, pending: _PendingText
 ) -> list[AgentEvent]:
-    """Map one assistant message; contiguous text blocks form one ``Text``."""
+    """Map one assistant frame; text accumulates in ``pending`` until a non-text block."""
 
     from claude_agent_sdk import (
         ServerToolResultBlock,
@@ -539,18 +616,14 @@ def _assistant_events(
     )
 
     events: list[AgentEvent] = []
-    text_parts: list[str] = []
-
-    def flush_text() -> None:
-        if text_parts:
-            events.append(Text(text="".join(text_parts)))
-            text_parts.clear()
-
     for block in message.content:
         if isinstance(block, TextBlock):
-            text_parts.append(block.text)
+            pending.message_id = message.message_id
+            pending.parts.append(block.text)
             continue
-        flush_text()
+        text = pending.flush()
+        if text is not None:
+            events.append(text)
         if isinstance(block, ThinkingBlock):
             events.append(_thinking_event(block))
         elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
@@ -573,7 +646,6 @@ def _assistant_events(
                     raw=_raw(block) if include_raw else None,
                 )
             )
-    flush_text()
     return events
 
 
@@ -624,15 +696,22 @@ def _result_error(
     )
     if not failed:
         return None
-    error_type = _classify(detail, status=message.api_error_status, assistant_error=error_code)
+    status = message.api_error_status
+    error_type = _classify(detail, status=status, assistant_error=error_code)
+    if error_type is None:
+        # Without an HTTP status, an API-stage failure means no response arrived.
+        dropped = status is None and reason in (None, "api_error", "completed")
+        error_type = "transient_api_error" if dropped else "execution_error"
     return Error(
         message=detail or "run reported an error",
-        error_type=error_type or "execution_error",
+        error_type=error_type,
         retryable=error_type == "transient_api_error",
     )
 
 
 def _classify(text: str, *, status: int | None, assistant_error: str | None) -> str | None:
+    if assistant_error == "authentication_failed" and status == 403:
+        return "permission_denied"
     if assistant_error in _ASSISTANT_ERRORS:
         return _ASSISTANT_ERRORS[assistant_error]
     for pattern, error_type in _TEXT_ERRORS:
