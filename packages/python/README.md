@@ -69,7 +69,8 @@ validates settings, runtime and credentials. `run_sync()` works outside an event
 | Built-in tool filtering | Native controls | Unsupported; `web_tools` sets the `web_search` mode |
 
 Claude `effort` also sets `CLAUDE_CODE_EFFORT_LEVEL`, which the CLI ranks above
-`--effort`. `extra_options` cannot replace keys that first-class options set.
+`--effort`. `extra_options` cannot set a native key that a first-class option also
+sets, nor `env`. The CLI's `--setting-source` selects Claude settings.
 Codex `sandbox` applies per thread; caller `config_overrides` take precedence.
 
 See [examples](examples/) and [API differences](../typescript/PARITY.md).

@@ -537,3 +537,22 @@ def test_run_reports_process_termination(monkeypatch, capsys):
     assert rc == 128 + 9
     assert [event["type"] for event in events] == ["run_started", "error", "run_finished"]
     assert "killed by signal 9" in captured.err
+
+
+def test_run_setting_source_flag_maps_to_request(monkeypatch, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    base_args = ["run", "--provider", "openai", "--prompt", "x"]
+    assert cli.main(base_args) == 0
+    assert cli.main([*base_args, "--setting-source", "project", "--setting-source", "user"]) == 0
+    capsys.readouterr()
+
+    assert [r.setting_sources for r in seen_requests] == [None, ["project", "user"]]

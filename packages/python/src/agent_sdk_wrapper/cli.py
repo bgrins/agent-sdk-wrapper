@@ -159,6 +159,13 @@ def _parser() -> argparse.ArgumentParser:
         choices=["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"],
     )
     run.add_argument(
+        "--setting-source",
+        action="append",
+        default=None,
+        choices=["user", "project", "local"],
+        help="Claude on-disk settings to load. Repeatable; default none.",
+    )
+    run.add_argument(
         "--cli-login",
         default=None,
         choices=["deny", "require"],
@@ -269,6 +276,11 @@ async def _run(args: argparse.Namespace) -> int:
         ),
         permission_mode=args.permission_mode or _config_str(config, "permission_mode"),
         cli_login=args.cli_login or _config_str(config, "cli_login") or "deny",
+        setting_sources=(
+            _merge_string_lists(config, "setting_sources", args.setting_source)
+            if args.setting_source is not None or "setting_sources" in config
+            else None
+        ),
         extra_options=extra_options,
         provider_options=provider_options,
         trace_file=args.trace_file or _optional_path(config, "trace_file", config_base_dir),
@@ -324,6 +336,7 @@ _CONFIG_KEYS = {
     "artifacts_dir",
     "builtin_tools",
     "cli_login",
+    "setting_sources",
     "continue_session",
     "cwd",
     "disallowed_tools",
@@ -694,11 +707,11 @@ def _set_nested_option(target: dict[str, Any], key: str, value: Any, *, flag: st
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     _setup_logging(args.verbose)
-    # Lone surrogates in provider text would otherwise abort output; the
-    # escapes this writes decode back to the same string inside JSON.
+    # JSON output must be UTF-8. Lone surrogates in provider text would otherwise
+    # abort output; the escapes this writes decode back to the same string in JSON.
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if reconfigure is not None:
-        reconfigure(errors="backslashreplace")
+        reconfigure(encoding="utf-8", errors="backslashreplace")
     if args.command == "run":
         try:
             return asyncio.run(_run(args))
