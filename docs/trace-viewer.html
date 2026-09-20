@@ -1374,7 +1374,7 @@
         renderRuns(discoveredRuns);
         if (selectionVersion !== loadVersion) return;
         const scanned = truncated
-          ? ` Showing runs from the ${truncated} most recently modified directories.`
+          ? ` Showing the ${truncated} most recently updated runs.`
           : "";
         if (discoveredRuns.length) {
           setResultsStatus(`Found ${discoveredRuns.length} result run(s).${scanned}`);

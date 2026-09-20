@@ -17,23 +17,17 @@ const viewer = fileURLToPath(
 );
 const urlPath = (path) => path.split("/").map(encodeURIComponent).join("/");
 
-export const MAX_DIRECTORIES = 500;
+export const MAX_RUNS = 500;
+// Bounds one scan; the depth limit normally keeps real scans far below it.
+export const MAX_DIRECTORIES = 5000;
 
 async function listRuns(directory, depth) {
-  // Scan level by level, newest first, so the cap drops the oldest runs and one
-  // run's subtree cannot use up the budget before its siblings are read.
-  const queue = [{ relative: "", level: 0, mtime: Infinity }];
+  // Read every directory within the depth limit, then keep the newest runs, so
+  // neither shallow siblings nor deep runs can crowd out newer ones.
+  const queue = [""];
   const runs = [];
   for (let visited = 0; queue.length && visited < MAX_DIRECTORIES; visited++) {
-    let newest = 0;
-    for (let index = 1; index < queue.length; index++) {
-      const [a, b] = [queue[index], queue[newest]];
-      if (a.level < b.level || (a.level === b.level && a.mtime > b.mtime))
-        newest = index;
-    }
-    const { relative } = queue[newest];
-    queue[newest] = queue.at(-1);
-    queue.pop();
+    const relative = queue.shift();
     let entries;
     try {
       entries = await readdir(resolve(directory, relative), {
@@ -67,12 +61,7 @@ async function listRuns(directory, depth) {
               entry.name.endsWith(".trace.jsonl"));
         if (!isRun && !(descend && entry.isDirectory())) return;
         const info = await lstat(resolve(directory, path)).catch(() => null);
-        if (info?.isDirectory() && !isRun)
-          return queue.push({
-            relative: path,
-            level: path.split("/").length,
-            mtime: info.mtimeMs,
-          });
+        if (info?.isDirectory() && !isRun) return queue.push(path);
         if (!isRun || !info?.isFile() || info.nlink !== 1) return;
         runs.push({
           label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
@@ -83,9 +72,10 @@ async function listRuns(directory, depth) {
       }),
     );
   }
+  runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   return {
-    runs: runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
-    truncated: queue.length > 0,
+    runs: runs.slice(0, MAX_RUNS),
+    truncated: queue.length > 0 || runs.length > MAX_RUNS,
   };
 }
 
@@ -123,8 +113,11 @@ const openFlags =
 
 async function openedElsewhere(handle, file) {
   if (process.platform === "darwin") return false;
-  if (process.platform === "linux")
-    return (await readlink(`/proc/self/fd/${handle.fd}`)) !== file;
+  if (process.platform === "linux") {
+    // Containers can run without /proc; fall back to comparing inodes.
+    const opened = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+    if (opened !== null) return opened !== file;
+  }
   const [opened, current] = await Promise.all([handle.stat(), lstat(file)]);
   return opened.dev !== current.dev || opened.ino !== current.ino;
 }
@@ -174,7 +167,7 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
           200,
           "application/json",
           JSON.stringify(runs),
-          truncated ? { "x-runs-truncated": String(MAX_DIRECTORIES) } : {},
+          truncated ? { "x-runs-truncated": String(MAX_RUNS) } : {},
         );
       }
       if (

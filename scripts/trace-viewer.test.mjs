@@ -21,7 +21,7 @@ import vm from "node:vm";
 import {
   contentSecurityPolicy,
   createTraceServer,
-  MAX_DIRECTORIES,
+  MAX_RUNS,
 } from "./trace-viewer.mjs";
 
 test("server discovers new traces and reads updates without exposing files outside the results directory", async (t) => {
@@ -235,7 +235,7 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
     await rm(root, { recursive: true, force: true });
   });
   const base = await listen(t, root);
-  const count = MAX_DIRECTORIES + 100;
+  const count = MAX_RUNS + 100;
   const stamp = (index) => new Date(Date.UTC(2026, 0, 1) + index * 60_000);
   await Promise.all(
     Array.from({ length: count }, async (_, index) => {
@@ -252,15 +252,14 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
   await chmod(locked, 0);
   const response = await get(base, "/api/runs");
   assert.equal(response.status, 200);
-  assert.equal(response.headers["x-runs-truncated"], String(MAX_DIRECTORIES));
+  assert.equal(response.headers["x-runs-truncated"], String(MAX_RUNS));
   const runs = JSON.parse(response.body);
   const newest = Array.from({ length: count }, (_, age) =>
     stamp(age).toISOString(),
   )
     .reverse()
     .slice(0, runs.length);
-  // The root and the locked directories use part of the directory budget.
-  assert.ok(runs.length >= MAX_DIRECTORIES - 3);
+  assert.equal(runs.length, MAX_RUNS);
   assert.deepEqual(
     runs.map((run) => run.updated_at),
     newest,
@@ -278,7 +277,7 @@ test("a fresh run's large subtree does not hide its older sibling runs", async (
   await utimes(old, hour, hour);
   const fresh = join(root, "run-new");
   await Promise.all(
-    Array.from({ length: MAX_DIRECTORIES + 100 }, (_, index) =>
+    Array.from({ length: 600 }, (_, index) =>
       mkdir(join(fresh, "workspace", `d${index}`), { recursive: true }),
     ),
   );
@@ -286,6 +285,26 @@ test("a fresh run's large subtree does not hide its older sibling runs", async (
   const base = await listen(t, root, { depth: 3 });
   const runs = JSON.parse((await get(base, "/api/runs")).body);
   assert.deepEqual(runs.map((run) => run.label).sort(), ["run-new", "run-old"]);
+});
+
+test("a newer deep run is listed ahead of older shallow runs", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-depth-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const old = new Date(Date.now() - 3_600_000);
+  await Promise.all(
+    Array.from({ length: MAX_RUNS + 20 }, async (_, index) => {
+      const dir = join(root, `old-${index}`);
+      await mkdir(dir);
+      await writeFile(join(dir, "trace.jsonl"), "{}\n");
+      await utimes(join(dir, "trace.jsonl"), old, old);
+    }),
+  );
+  const deep = join(root, "jobs", "a", "b", "fresh");
+  await mkdir(deep, { recursive: true });
+  await writeFile(join(deep, "trace.jsonl"), "{}\n");
+  const base = await listen(t, root, { depth: 5 });
+  const runs = JSON.parse((await get(base, "/api/runs")).body);
+  assert.equal(runs[0].label, "jobs/a/b/fresh");
 });
 
 test("a symlinked ancestor swapped in after path checks is not followed", async (t) => {
@@ -737,7 +756,7 @@ test("the viewer only lists runs from its own origin", async () => {
   assert.match(visibleTrace(context), /local/);
   assert.match(
     vm.runInContext("resultsStatusEl.textContent", context),
-    /500 most recently modified directories/,
+    /500 most recently updated runs/,
   );
 });
 
