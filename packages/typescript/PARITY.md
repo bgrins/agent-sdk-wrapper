@@ -13,6 +13,7 @@ a subset of Python's API.
 | Codex session model | Reported | Not exposed by `codex exec` |
 | Codex key check | Skipped with a custom `model_provider` | Required, including with `baseUrl` |
 | Claude text at a deadline or cancel | A message still receiving frames is dropped | Kept |
+| Claude stop latency | Up to 5 s after a deadline or cancel (SDK close grace); an early close returns before the CLI exits | About 2 s |
 | Session IDs | Automatically updated with `continue_session` | Always recorded per provider; `continueSession` controls reuse |
 | Setup failures | `ConfigError` raises at call; missing runtime or credentials give failed results | `ConfigError`, `RuntimeUnavailableError` and `ProviderError` throw |
 | Deadlines | `timeout` bounds provider waits; timeout status | `AbortSignal`; cancelled status |
@@ -61,6 +62,16 @@ Unsupported options fail validation; native permission policies are not intercha
   its SDK drops `supersedes` and `aborted` frames.
 - Claude custom prompts persist across resume by default. Start a new session to change instructions.
 - Codex defers MCP tools behind its tool search; prompts may need to tell the model to search.
+- Runtimes retry before the wrapper sees an error, and wrapper retries multiply them. By
+  default the Claude CLI retries 429, 5xx, 529 and 401 ten times over about 3 minutes, and
+  each retry becomes a warning; `CLAUDE_CODE_MAX_RETRIES` in `env` sets the count. Codex
+  retries 5xx and dropped streams (`request_max_retries`, `stream_max_retries` on a custom
+  `model_providers` entry), but not HTTP 429.
+- Codex drops the body of an HTTP 429, so an exhausted API quota is reported as a rate
+  limit and retried.
+- When Codex retries a stream after a message completed, both messages are Text events.
+- Claude reports `rate_limit_event` only for claude.ai logins, so API-key runs get no
+  rate-limit warnings.
 
 ## TypeScript limits
 

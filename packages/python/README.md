@@ -56,7 +56,8 @@ Other failures produce failed results; check `result.status`, or use
 then raise `ProcessTerminatedError`. A run retries, with jittered exponential backoff capped at 8 s,
 only for transient errors and retryable error events, only before its first progress
 event (text, thinking, tools, subagents, structured output, compaction, agent
-changes), and never once a resumed session has started. `timeout` is a deadline from
+changes), and never once a resumed session has started. These retries add to the
+runtimes' own ([limits](../typescript/PARITY.md#shared-limits)). `timeout` is a deadline from
 the start of the run: consumer code is never cancelled, but the next provider wait
 after it fails with `timeout`. Concurrent runs on one Agent are allowed; with
 `continue_session` the Agent keeps the last session a run reported. `check_runtime()`
