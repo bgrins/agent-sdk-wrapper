@@ -382,10 +382,7 @@ ECHO_MCP_SERVER = '''
 import os
 import sys
 
-try:
-    from mcp.server.mcpserver import MCPServer as Server
-except ImportError:
-    from mcp.server.fastmcp import FastMCP as Server
+from mcp.server.mcpserver import MCPServer as Server
 
 
 def echo() -> str:

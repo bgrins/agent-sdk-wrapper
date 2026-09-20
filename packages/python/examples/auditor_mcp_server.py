@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-server = FastMCP("auditor_demo")
+server = MCPServer("auditor_demo")
 
 
 @server.tool(structured_output=False)

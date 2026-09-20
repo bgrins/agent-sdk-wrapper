@@ -1208,11 +1208,7 @@ def _tool_server_script() -> str:
         import sys
         from pathlib import Path
 
-        try:
-            # mcp >= 2 renamed FastMCP to MCPServer; add_tool/run are unchanged.
-            from mcp.server.mcpserver import MCPServer as _Server
-        except ImportError:  # mcp < 2
-            from mcp.server.fastmcp import FastMCP as _Server
+        from mcp.server.mcpserver import MCPServer as _Server
 
         manifest = json.loads(Path(__file__).with_name("tools.json").read_text(encoding="utf-8"))
         # Import tools from the same paths the parent process used.
