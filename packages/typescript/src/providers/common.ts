@@ -70,7 +70,7 @@ const statusPatterns = [
 ];
 // "upgrade to Plus" is Codex's text for a ChatGPT plan without Codex access.
 const usageLimit =
-  /\busage limit\b|\bquota exceeded\b|\binsufficient_quota\b|\bexceeded your current quota\b|\bupgrade to (?:Plus|Pro)\b/i;
+  /\busage limits?\b|\bquota exceeded\b|\binsufficient_quota\b|\bexceeded your current quota\b|\bupgrade to (?:Plus|Pro)\b/i;
 const contextWindow =
   /\bprompt is too long\b|\bcontext[_ ]length[_ ]exceeded\b|\bexceeds the context window\b|\bran out of room in the model.s context window\b|\bcontext window exceeded\b/i;
 const billing = /\bcredit balance\b|\bbilling\b/i;

@@ -2219,7 +2219,7 @@ _ERROR_PATTERNS = tuple(
         ),
         (
             r"\binsufficient_quota\b|\bexceeded your current quota\b|\bquota exceeded\b"
-            r"|\busage limit\b",
+            r"|\busage limits?\b",
             "usage_limit_exceeded",
         ),
         (r"\bbilling\b|\bcredit balance\b", "billing_error"),

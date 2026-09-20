@@ -161,6 +161,10 @@ _TEXT_ERRORS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (re.compile(r"\bcredit balance\b|\bbilling\b", re.IGNORECASE), "billing_error"),
     (
+        re.compile(r"\busage limits?\b|\bquota exceeded\b", re.IGNORECASE),
+        "usage_limit_exceeded",
+    ),
+    (
         re.compile(r"\bprompt is too long\b|\bcontext window\b", re.IGNORECASE),
         "context_window_exceeded",
     ),
@@ -533,6 +537,8 @@ class AnthropicProvider(ProviderAdapter):
                                 retracted = True
                                 pending.flush()
                                 continue
+                            if message.subtype == "api_retry":
+                                yield _api_retry_warning(message, include_raw=req.include_raw)
                             compacted = _compaction_event(message)
                             if compacted is not None:
                                 yield compacted
@@ -844,6 +850,21 @@ def _rate_limit_warning(message: Any, *, include_raw: bool) -> WarningEvent:
         message=", ".join(details),
         raw=_raw(message) if include_raw else None,
     )
+
+
+def _api_retry_warning(message: Any, *, include_raw: bool) -> WarningEvent:
+    """Report a retry the Claude runtime makes on its own, before the wrapper sees an error."""
+
+    data = message.data if isinstance(message.data, dict) else {}
+    status = data.get("error_status")
+    delay = data.get("retry_delay_ms")
+    text = f"Claude API error {status}" if status else "Claude API request failed"
+    if data.get("error"):
+        text += f" ({data['error']})"
+    text += f"; runtime retry {data.get('attempt', '?')}/{data.get('max_retries', '?')}"
+    if isinstance(delay, (int, float)):
+        text += f" in {delay / 1000:.1f}s"
+    return WarningEvent(message=text, raw=_raw(message) if include_raw else None)
 
 
 def _looks_transient(text: str) -> bool:

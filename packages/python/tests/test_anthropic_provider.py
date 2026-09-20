@@ -236,6 +236,38 @@ def test_anthropic_stream_maps_rate_limit_events(monkeypatch, tmp_path):
     assert provider_events[0].to_dict() == lines[0]
 
 
+def test_anthropic_runtime_retries_are_warnings(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import SystemMessage
+
+    retry = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 1,
+        "max_retries": 10,
+        "retry_delay_ms": 600,
+        "error_status": 529,
+        "error": "overloaded",
+        "session_id": "sess-retry",
+    }
+
+    async def fake_query(**kwargs):
+        yield SystemMessage(subtype="api_retry", data=retry)
+        yield _result(session_id="sess-retry")
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    async def collect():
+        req = RunRequest(provider="anthropic", prompt="ignored")
+        return [event async for event in AnthropicProvider().stream(req)]
+
+    warnings = [e for e in asyncio.run(collect()) if isinstance(e, WarningEvent)]
+
+    assert [w.message for w in warnings] == [
+        "Claude API error 529 (overloaded); runtime retry 1/10 in 0.6s"
+    ]
+
+
 def test_anthropic_stream_rejects_unexpected_stream_events(monkeypatch):
     import claude_agent_sdk
     from claude_agent_sdk import StreamEvent
@@ -401,6 +433,19 @@ def test_anthropic_client_error_is_not_retryable():
     assert error is not None
     assert error.retryable is False
     assert error.message == "bad request"
+
+
+def test_anthropic_spend_limit_400_is_a_usage_limit():
+    from agent_sdk_wrapper.providers.anthropic_provider import _result_error
+
+    text = "API Error: 400 You have reached your specified API usage limits."
+    error = _result_error(
+        _result(is_error=True, api_error_status=400, terminal_reason="api_error", result=text),
+        ("unknown", text),
+    )
+
+    assert error is not None
+    assert error.error_type == "usage_limit_exceeded"
 
 
 def test_anthropic_successful_result_reports_no_error():

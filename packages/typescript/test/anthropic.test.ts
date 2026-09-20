@@ -739,6 +739,34 @@ test("Claude rate limit events become warnings", async () => {
     ],
   );
 });
+test("Claude runtime retries become warnings", async () => {
+  const run = await harness([
+    {
+      type: "system",
+      subtype: "api_retry",
+      attempt: 1,
+      max_retries: 10,
+      retry_delay_ms: 600,
+      error_status: 529,
+      error: "overloaded",
+      uuid: randomUUID(),
+      session_id: "claude-session",
+    },
+    result(),
+  ]).agent.run("retry");
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "warning")
+      .map((env) => env.event),
+    [
+      {
+        type: "warning",
+        message:
+          "Claude API error 529 (overloaded); runtime retry 1/10 in 0.6s",
+      },
+    ],
+  );
+});
 test("Claude list tool results join their text blocks", async () => {
   const run = await harness([
     assistant([{ type: "tool_use", id: "call", name: "Agent", input: {} }]),

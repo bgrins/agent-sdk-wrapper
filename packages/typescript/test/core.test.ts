@@ -123,6 +123,11 @@ test("message classification uses the canonical vocabulary", () => {
       "invalid_request",
     ],
     ["unexpected status 422 Unprocessable Entity", "invalid_request"],
+    // The Claude API's spend-limit 400.
+    [
+      "API Error: 400 You have reached your specified API usage limits.",
+      "usage_limit_exceeded",
+    ],
     // Refusals need a structured signal and bare numbers are not statuses.
     ["The model refused the request", "fallback"],
     ["Processed 503 files before failing", "fallback"],

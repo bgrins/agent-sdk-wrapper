@@ -440,6 +440,17 @@ export class AnthropicAdapter implements ProviderAdapter {
           else if (!seenText && message.subtype === "success" && message.result)
             yield { type: "text", text: message.result, ...raw };
           return;
+        } else if (
+          message.type === "system" &&
+          message.subtype === "api_retry"
+        ) {
+          // The runtime retries on its own before the wrapper sees an error.
+          let text = message.error_status
+            ? `Claude API error ${message.error_status}`
+            : "Claude API request failed";
+          if (message.error) text += ` (${message.error})`;
+          text += `; runtime retry ${message.attempt}/${message.max_retries} in ${(message.retry_delay_ms / 1000).toFixed(1)}s`;
+          yield { type: "warning", message: text, ...raw };
         } else if (message.type === "rate_limit_event") {
           const info = message.rate_limit_info;
           const details = [`Claude rate limit status: ${info.status}`];
