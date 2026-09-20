@@ -13,7 +13,8 @@ import typing
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, create_model
+from pydantic.fields import FieldInfo
 
 from .errors import ConfigError
 from .events import _jsonable
@@ -81,24 +82,46 @@ def _annotations(fn: Callable[..., Any], params: list[inspect.Parameter]) -> dic
     return hints
 
 
+def _schema_type(annotation: Any) -> Any:
+    """Keep types JSON Schema can describe; pass anything else through unvalidated."""
+
+    if annotation is inspect.Parameter.empty:
+        return Any
+    try:
+        TypeAdapter(annotation).json_schema()
+    except Exception:
+        return Any
+    return annotation
+
+
 def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     params = _parameters(fn)
     hints = _annotations(fn, params)
     # Positional field names with aliases accept any parameter name, including "_x".
     fields: dict[str, Any] = {}
     for index, param in enumerate(params):
-        annotation = hints.get(param.name, param.annotation)
-        if annotation is inspect.Parameter.empty:
-            annotation = Any
-        default = ... if param.default is inspect.Parameter.empty else param.default
-        fields[f"p{index}"] = (annotation, Field(default, alias=param.name))
-    return create_model(f"{tool_name(fn)}_arguments", **fields)
+        annotation = _schema_type(hints.get(param.name, param.annotation))
+        if isinstance(param.default, FieldInfo):
+            field = FieldInfo.merge_field_infos(param.default, Field(alias=param.name))
+        else:
+            default = ... if param.default is inspect.Parameter.empty else param.default
+            field = Field(default, alias=param.name)
+        fields[f"p{index}"] = (annotation, field)
+    return create_model(
+        f"{tool_name(fn)}_arguments",
+        __config__=ConfigDict(arbitrary_types_allowed=True),
+        **fields,
+    )
+
+
+# Keys whose values are data, not schemas; their "title" entries are content.
+_SCHEMA_DATA_KEYS = frozenset({"default", "const", "enum", "examples"})
 
 
 def _strip_titles(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: _strip_titles(item)
+            key: item if key in _SCHEMA_DATA_KEYS else _strip_titles(item)
             for key, item in value.items()
             if not (key == "title" and isinstance(item, str))
         }

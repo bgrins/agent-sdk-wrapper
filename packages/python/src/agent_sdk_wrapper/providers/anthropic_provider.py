@@ -41,7 +41,7 @@ from ..events import (
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
 from ..request import RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
-from ..tools import to_anthropic_tools, validate_tool_names
+from ..tools import json_schema_for, to_anthropic_tools, validate_tool_names
 from .base import ProviderAdapter
 
 _DEFAULT_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
@@ -63,27 +63,36 @@ _CREDENTIAL_ENV = (
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_GATEWAY",
 )
 _SYNTHETIC_MODEL = "<synthetic>"
 _SUBAGENT_TASK_TYPES = frozenset({"local_agent", "remote_agent"})
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
-# First-class options compute these native keys; extra_options must not replace them.
-_WRAPPER_OWNED_OPTIONS = frozenset({
-    "agents",
-    "allowed_tools",
-    "cwd",
-    "disallowed_tools",
-    "effort",
-    "env",
-    "max_turns",
-    "mcp_servers",
-    "model",
-    "output_format",
-    "permission_mode",
-    "resume",
-    "setting_sources",
-    "system_prompt",
-})
+# Native keys first-class options compute; extra_options may set one only when
+# its option is unused. The wrapper always computes env.
+_WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
+    "agents": lambda req: bool(req.subagents),
+    "allowed_tools": lambda req: bool(
+        req.allowed_tools or req.tools or req.mcp_servers or req.subagents
+    ),
+    "cwd": lambda req: req.cwd is not None,
+    "disallowed_tools": lambda req: bool(
+        req.disallowed_tools or req.mcp_servers or req.web_tools is False
+    ),
+    "effort": lambda req: req.effort is not None,
+    "env": lambda req: True,
+    "max_turns": lambda req: req.max_turns is not None,
+    "mcp_servers": lambda req: bool(req.tools or req.mcp_servers),
+    "model": lambda req: req.model is not None,
+    "output_format": lambda req: req.output_schema is not None,
+    "permission_mode": lambda req: req.permission_mode is not None,
+    "resume": lambda req: bool(req.session_id),
+    "setting_sources": lambda req: req.setting_sources is not None,
+    "system_prompt": lambda req: req.system_prompt is not None,
+}
 
 # Retryable statuses reported in errored ResultMessage values.
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
@@ -110,6 +119,15 @@ _TERMINAL_REASON_ERRORS = {
     "blocking_limit": "context_window_exceeded",
     "rapid_refill_breaker": "context_window_exceeded",
 }
+# Other reasons (hook stops, deferred tools) end runs the CLI reports as successful.
+_FAILURE_TERMINAL_REASONS = frozenset({
+    "api_error",
+    "image_error",
+    "malformed_tool_use_exhausted",
+    "model_error",
+    "tool_deferred_unavailable",
+    "turn_setup_failed",
+})
 # AssistantMessage.error values; "unknown" and "invalid_request" defer to other signals.
 _ASSISTANT_ERRORS = {
     "authentication_failed": "authentication_failed",
@@ -205,6 +223,8 @@ class AnthropicProvider(ProviderAdapter):
     def validate_request(self, req: RunRequest) -> None:
         effort = normalize_effort_for_provider("anthropic", req.effort)
         validate_tool_names(req.tools)
+        for fn in req.tools:
+            json_schema_for(fn)
         if req.cli_login == "require":
             raise ConfigError(
                 "cli_login='require' is not supported for Claude; use an API key, "
@@ -228,10 +248,14 @@ class AnthropicProvider(ProviderAdapter):
                     f"unknown setting_sources {invalid}; expected any of "
                     f"{sorted(_SETTING_SOURCES)}"
                 )
-        owned = sorted(_WRAPPER_OWNED_OPTIONS & req.extra_options.keys())
+        owned = sorted(
+            key
+            for key in req.extra_options
+            if key in _WRAPPER_OWNED_OPTIONS and _WRAPPER_OWNED_OPTIONS[key](req)
+        )
         if owned:
             raise ConfigError(
-                f"extra_options {owned} duplicate first-class Agent options; pass those instead"
+                f"extra_options {owned} conflict with first-class Agent options that set them"
             )
         if req.builtin_tools is not None and "tools" in req.extra_options:
             raise ConfigError(
@@ -306,8 +330,8 @@ class AnthropicProvider(ProviderAdapter):
 
         effort = normalize_effort_for_provider("anthropic", req.effort)
         env = dict(req.env)
-        if effort:
-            env.setdefault(_EFFORT_ENV, effort)
+        # An empty value keeps an inherited effort from overriding the CLI default.
+        env.setdefault(_EFFORT_ENV, effort or "")
         env.setdefault(_BACKGROUND_TASKS_ENV, "1")
         env[_OAUTH_TOKEN_ENV] = ""
 
@@ -400,141 +424,156 @@ class AnthropicProvider(ProviderAdapter):
         )
 
         try:
-            async with contextlib.aclosing(
-                query(prompt=req.prompt, options=options)
-            ) as messages:
-                async for message in messages:
-                    provider_log.write(message)
-                    if not pending.continues(message):
-                        text = pending.flush()
-                        if text is not None:
-                            seen_text = True
-                            yield text
-                    if isinstance(message, AssistantMessage):
-                        if message.parent_tool_use_id:
-                            yield WarningEvent(
-                                message="Subagent message omitted from portable output; "
-                                "inspect on_provider_event"
-                            )
-                            continue
-                        if message.error is not None or message.model == _SYNTHETIC_MODEL:
-                            text = _message_text(message)
-                            assistant_error = (message.error, text)
-                            if text:
-                                yield WarningEvent(message=text)
-                            continue
-                        for event in _assistant_events(
-                            message, tool_names, req.include_raw, pending
-                        ):
-                            seen_text = seen_text or isinstance(event, Text)
-                            seen_thinking = seen_thinking or isinstance(event, Thinking)
-                            yield event
-                    elif isinstance(message, UserMessage):
-                        content = message.content
-                        if message.parent_tool_use_id or not isinstance(content, list):
-                            continue
-                        for block in content:
-                            if isinstance(block, ToolResultBlock):
-                                yield ToolResult(
-                                    id=block.tool_use_id,
-                                    name=tool_names.get(block.tool_use_id),
-                                    output=_stringify(block.content),
-                                    is_error=bool(block.is_error),
-                                    raw=_raw(block) if req.include_raw else None,
-                                )
-                    elif isinstance(message, TaskStartedMessage):
-                        data = message.data if isinstance(message.data, dict) else {}
-                        subagent_type = data.get("subagent_type")
-                        if message.task_type in _SUBAGENT_TASK_TYPES or subagent_type:
-                            subagent_tasks.add(message.task_id)
-                            yield SubagentStarted(
-                                task_id=message.task_id,
-                                name=subagent_type or message.task_type or "",
-                                description=message.description,
-                            )
-                    elif isinstance(message, TaskNotificationMessage):
-                        if message.task_id in subagent_tasks:
-                            subagent_tasks.discard(message.task_id)
-                            yield SubagentEnded(
-                                task_id=message.task_id,
-                                status=message.status,
-                                summary=message.summary,
-                            )
-                    elif isinstance(message, TaskUpdatedMessage):
-                        status = message.status or message.patch.get("status")
-                        if (
-                            status in _TERMINAL_TASK_STATUSES
-                            and message.task_id in subagent_tasks
-                        ):
-                            subagent_tasks.discard(message.task_id)
-                            yield SubagentEnded(task_id=message.task_id, status=status)
-                    elif isinstance(message, SystemMessage):
-                        data = message.data if isinstance(message.data, dict) else {}
-                        if message.subtype == "model_refusal_fallback" and data.get(
-                            "retracted_message_uuids"
-                        ):
-                            yield Error(
-                                message="Claude retracted earlier messages after a refusal; "
-                                "the v1 event contract cannot retract emitted output",
-                                error_type="provider_protocol_error",
-                            )
-                            return
-                        compacted = _compaction_event(message)
-                        if compacted is not None:
-                            yield compacted
-                        if not seen_session and data.get("session_id"):
-                            seen_session = True
-                            yield SessionInfo(
-                                id=data["session_id"], model=data.get("model") or None
-                            )
-                    elif isinstance(message, ResultMessage):
-                        if not seen_session and message.session_id:
-                            seen_session = True
-                            yield SessionInfo(id=message.session_id)
-                        if message.model_usage or message.usage:
-                            usage = _usage_event(
-                                message.usage or {},
-                                message.total_cost_usd,
-                                requests=message.num_turns,
-                                model_usage=message.model_usage,
-                                include_raw=req.include_raw,
-                            )
-                            # Reasoning occurred even when no thinking block was shown.
-                            if usage.usage.reasoning_output_tokens and not seen_thinking:
-                                seen_thinking = True
-                                yield Thinking(text="")
-                            yield usage
-                        if (
-                            req.output_schema is not None
-                            and message.structured_output is not None
-                        ):
-                            try:
-                                value = validate_output(
-                                    req.output_schema, message.structured_output
-                                )
-                            except AgentSdkWrapperError as exc:
-                                yield Error(
-                                    message=str(exc), error_type="structured_output_failed"
+            try:
+                async with contextlib.aclosing(
+                    query(prompt=req.prompt, options=options)
+                ) as messages:
+                    async for message in messages:
+                        provider_log.write(message)
+                        if not pending.continues(message):
+                            text = pending.flush()
+                            if text is not None:
+                                seen_text = True
+                                yield text
+                        if isinstance(message, AssistantMessage):
+                            if message.parent_tool_use_id:
+                                yield WarningEvent(
+                                    message="Subagent message omitted from portable output; "
+                                    "inspect on_provider_event"
                                 )
                                 continue
-                            yield StructuredOutput(value=value)
-                        error = _result_error(message, assistant_error)
-                        if error is not None:
-                            yield error
-                        elif not seen_text and message.result:
-                            seen_text = True
-                            yield Text(text=message.result)
-                    elif isinstance(message, RateLimitEvent):
-                        yield _rate_limit_warning(message, include_raw=req.include_raw)
-                    elif isinstance(message, StreamEvent):
-                        raise AgentSdkWrapperError(
-                            "Claude Agent SDK emitted a partial StreamEvent, but "
-                            "agent-sdk-wrapper does not support Claude partial messages. "
-                            "Do not enable extra_options['include_partial_messages']."
-                        )
+                            if message.error is not None or message.model == _SYNTHETIC_MODEL:
+                                text = _message_text(message)
+                                assistant_error = (message.error, text)
+                                if text:
+                                    yield WarningEvent(message=text)
+                                continue
+                            # A later normal message means the earlier API error was recovered.
+                            assistant_error = None
+                            for event in _assistant_events(
+                                message, tool_names, req.include_raw, pending
+                            ):
+                                seen_text = seen_text or isinstance(event, Text)
+                                seen_thinking = seen_thinking or isinstance(event, Thinking)
+                                yield event
+                        elif isinstance(message, UserMessage):
+                            content = message.content
+                            if message.parent_tool_use_id or not isinstance(content, list):
+                                continue
+                            for block in content:
+                                if isinstance(block, ToolResultBlock):
+                                    yield ToolResult(
+                                        id=block.tool_use_id,
+                                        name=tool_names.get(block.tool_use_id),
+                                        output=_stringify(block.content),
+                                        is_error=bool(block.is_error),
+                                        raw=_raw(block) if req.include_raw else None,
+                                    )
+                        elif isinstance(message, TaskStartedMessage):
+                            data = message.data if isinstance(message.data, dict) else {}
+                            subagent_type = data.get("subagent_type")
+                            if message.task_type in _SUBAGENT_TASK_TYPES or subagent_type:
+                                subagent_tasks.add(message.task_id)
+                                yield SubagentStarted(
+                                    task_id=message.task_id,
+                                    name=subagent_type or message.task_type or "",
+                                    description=message.description,
+                                )
+                        elif isinstance(message, TaskNotificationMessage):
+                            if message.task_id in subagent_tasks:
+                                subagent_tasks.discard(message.task_id)
+                                yield SubagentEnded(
+                                    task_id=message.task_id,
+                                    status=message.status,
+                                    summary=message.summary,
+                                )
+                        elif isinstance(message, TaskUpdatedMessage):
+                            status = message.status or message.patch.get("status")
+                            if (
+                                status in _TERMINAL_TASK_STATUSES
+                                and message.task_id in subagent_tasks
+                            ):
+                                subagent_tasks.discard(message.task_id)
+                                yield SubagentEnded(task_id=message.task_id, status=status)
+                        elif isinstance(message, SystemMessage):
+                            data = message.data if isinstance(message.data, dict) else {}
+                            if message.subtype == "model_refusal_fallback" and data.get(
+                                "retracted_message_uuids"
+                            ):
+                                yield Error(
+                                    message="Claude retracted earlier messages after a refusal; "
+                                    "the v1 event contract cannot retract emitted output",
+                                    error_type="provider_protocol_error",
+                                )
+                                return
+                            compacted = _compaction_event(message)
+                            if compacted is not None:
+                                yield compacted
+                            if not seen_session and data.get("session_id"):
+                                seen_session = True
+                                yield SessionInfo(
+                                    id=data["session_id"], model=data.get("model") or None
+                                )
+                        elif isinstance(message, ResultMessage):
+                            if not seen_session and message.session_id:
+                                seen_session = True
+                                yield SessionInfo(id=message.session_id)
+                            if message.model_usage or message.usage:
+                                usage = _usage_event(
+                                    message.usage or {},
+                                    message.total_cost_usd,
+                                    requests=message.num_turns,
+                                    model_usage=message.model_usage,
+                                    include_raw=req.include_raw,
+                                )
+                                # Reasoning occurred even when no thinking block was shown.
+                                if usage.usage.reasoning_output_tokens and not seen_thinking:
+                                    seen_thinking = True
+                                    yield Thinking(text="")
+                                yield usage
+                            if (
+                                req.output_schema is not None
+                                and message.structured_output is not None
+                            ):
+                                try:
+                                    value = validate_output(
+                                        req.output_schema, message.structured_output
+                                    )
+                                except AgentSdkWrapperError as exc:
+                                    yield Error(
+                                        message=str(exc), error_type="structured_output_failed"
+                                    )
+                                    return
+                                yield StructuredOutput(value=value)
+                            error = _result_error(message, assistant_error)
+                            if error is not None:
+                                yield error
+                            elif not seen_text and message.result:
+                                seen_text = True
+                                yield Text(text=message.result)
+                            # The first result ends the run; later frames are not part of it.
+                            return
+                        elif isinstance(message, RateLimitEvent):
+                            yield _rate_limit_warning(message, include_raw=req.include_raw)
+                        elif isinstance(message, StreamEvent):
+                            raise AgentSdkWrapperError(
+                                "Claude Agent SDK emitted a partial StreamEvent, but "
+                                "agent-sdk-wrapper does not support Claude partial messages. "
+                                "Do not enable extra_options['include_partial_messages']."
+                            )
+            except Exception:
+                # Keep a completed answer even when the runtime then fails.
                 text = pending.flush()
                 if text is not None:
                     yield text
+                raise
+            text = pending.flush()
+            if text is not None:
+                yield text
+            yield Error(
+                message="Claude stream ended without a result",
+                error_type="provider_protocol_error",
+            )
         except CLINotFoundError as exc:
             raise ProviderNotAvailableError(str(exc), cause=exc) from exc
         except CLIConnectionError as exc:
@@ -692,7 +731,7 @@ def _result_error(
     failed = (
         message.is_error
         or message.subtype != "success"
-        or reason not in (None, "completed")
+        or reason in _FAILURE_TERMINAL_REASONS
     )
     if not failed:
         return None

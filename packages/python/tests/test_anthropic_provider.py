@@ -200,6 +200,7 @@ def test_anthropic_stream_maps_rate_limit_events(monkeypatch, tmp_path):
             uuid="rate-limit-uuid",
             session_id="sess-rate-limit",
         )
+        yield _result(session_id="")
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
 
@@ -226,12 +227,12 @@ def test_anthropic_stream_maps_rate_limit_events(monkeypatch, tmp_path):
     assert "five_hour" in events[0].message
     path = tmp_path / "provider-events.jsonl"
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert len(lines) == 1
+    assert len(lines) == 2
     assert lines[0]["sequence"] == 0
     assert lines[0]["provider"] == "anthropic"
     assert lines[0]["class"].endswith(".RateLimitEvent")
     assert lines[0]["message"]["rate_limit_info"]["status"] == "allowed_warning"
-    assert len(provider_events) == 1
+    assert len(provider_events) == 2
     assert provider_events[0].to_dict() == lines[0]
 
 
@@ -559,6 +560,12 @@ def _stream(monkeypatch, messages, **request):
 
     seen = {}
 
+    from claude_agent_sdk import ResultMessage
+
+    if not any(isinstance(m, (ResultMessage, BaseException)) for m in messages):
+        # The CLI always ends a run with a result.
+        messages = [*messages, _result(session_id="")]
+
     async def fake_query(*, prompt, options):
         seen["options"] = options
         for message in messages:
@@ -643,8 +650,18 @@ def test_anthropic_options_leave_buffer_headroom_unless_overridden():
     ("request_kwargs", "match"),
     [
         ({"max_turns": 0}, "max_turns"),
-        ({"extra_options": {"allowed_tools": ["Bash"]}}, "allowed_tools"),
-        ({"extra_options": {"mcp_servers": {}}}, "mcp_servers"),
+        (
+            {"allowed_tools": ["Read"], "extra_options": {"allowed_tools": ["Bash"]}},
+            "allowed_tools",
+        ),
+        (
+            {
+                "mcp_servers": [McpHttpServer(name="docs", url="https://example.test")],
+                "extra_options": {"mcp_servers": {}},
+            },
+            "mcp_servers",
+        ),
+        ({"extra_options": {"env": {}}}, "env"),
         ({"web_tools": True, "builtin_tools": "none"}, "web_tools"),
         ({"web_tools": True, "disallowed_tools": ["WebFetch"]}, "WebFetch"),
     ],
@@ -1030,3 +1047,118 @@ def test_anthropic_without_credentials_fails_before_launching(monkeypatch):
 
     with pytest.raises(ProviderNotAvailableError, match="stored claude.ai login"):
         Agent(provider="anthropic", env={"ANTHROPIC_API_KEY": ""}).check_runtime()
+
+
+def test_anthropic_keeps_a_finished_answer_when_the_runtime_then_fails(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import ProcessError, TextBlock
+
+    from agent_sdk_wrapper import Agent
+
+    calls = []
+
+    async def fake_query(*, prompt, options):
+        calls.append(prompt)
+        yield _assistant(TextBlock(text="final answer"), message_id="m1")
+        options.stderr("API Error: 529 overloaded_error")
+        raise ProcessError("Command failed with exit code 1", exit_code=1)
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    result = asyncio.run(Agent(provider="anthropic", max_retries=2).run("x"))
+
+    assert result.final_text == "final answer"
+    assert result.status == "failure"
+    assert len(calls) == 1
+
+
+def test_anthropic_hook_stops_are_successful_runs():
+    from agent_sdk_wrapper.providers.anthropic_provider import _result_error
+
+    for reason in ("hook_stopped", "stop_hook_prevented", "tool_deferred"):
+        message = _result(terminal_reason=reason, result="I updated the billing page.")
+        assert _result_error(message) is None, reason
+
+
+def test_anthropic_a_recovered_api_error_does_not_classify_a_later_failure(monkeypatch):
+    from claude_agent_sdk import TextBlock
+
+    from agent_sdk_wrapper.events import Error
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(
+                TextBlock(text="API Error: Rate limit reached"),
+                model="<synthetic>",
+                error="rate_limit",
+            ),
+            _assistant(TextBlock(text="working"), message_id="m2"),
+            _result(is_error=True, api_error_status=400, result="Credit balance is too low"),
+        ],
+    )
+    error = next(event for event in events if isinstance(event, Error))
+    assert (error.error_type, error.retryable) == ("billing_error", False)
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_GATEWAY",
+    ],
+)
+def test_anthropic_accepts_every_cloud_provider_flag(monkeypatch, flag):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    req = RunRequest(provider="anthropic", prompt="x", env={flag: "1"})
+    assert AnthropicProvider().check_credentials(req) is None
+
+
+def test_anthropic_stops_at_the_first_result(monkeypatch):
+    from agent_sdk_wrapper.events import Usage
+
+    usage = {"input_tokens": 100, "output_tokens": 1}
+    events, _ = _stream(
+        monkeypatch,
+        [_result(usage=usage, session_id=""), _result(usage=usage, session_id="")],
+    )
+    assert len([event for event in events if isinstance(event, Usage)]) == 1
+
+
+def test_anthropic_stream_without_a_result_is_a_protocol_error(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import TextBlock
+
+    from agent_sdk_wrapper.events import Error, Text
+
+    async def fake_query(*, prompt, options):
+        yield _assistant(TextBlock(text="partial"), message_id="m1")
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    async def collect():
+        req = RunRequest(provider="anthropic", prompt="x")
+        return [event async for event in AnthropicProvider().stream(req)]
+
+    events = asyncio.run(collect())
+    assert [type(event) for event in events] == [Text, Error]
+    assert events[-1].error_type == "provider_protocol_error"
+
+
+def test_anthropic_unset_effort_blanks_an_inherited_effort(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "xhigh")
+    options = AnthropicProvider()._build_options(RunRequest(provider="anthropic", prompt="x"))
+    assert options.env["CLAUDE_CODE_EFFORT_LEVEL"] == ""
+
+
+def test_anthropic_extra_options_may_set_keys_whose_options_are_unused():
+    options = AnthropicProvider()._build_options(
+        RunRequest(
+            provider="anthropic",
+            prompt="x",
+            extra_options={"setting_sources": ["project"], "output_format": {"type": "text"}},
+        )
+    )
+    assert options.setting_sources == ["project"]
+    assert options.output_format == {"type": "text"}

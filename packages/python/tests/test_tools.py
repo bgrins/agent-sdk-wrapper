@@ -188,12 +188,20 @@ async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path, mon
         """Add two integers."""
         return a + b
 
+    # In the server, __main__ is the server script, whose globals include `manifest`.
+    def manifest(x: int) -> int:
+        """Double a value."""
+        return x * 2
+
+    manifest.__module__ = "__main__"
+
     server_dir = tmp_path / "server"
     server_dir.mkdir()
     script = server_dir / "server.py"
     script.write_text(_tool_server_script(), encoding="utf-8")
     (server_dir / "tools.json").write_text(
-        json.dumps(_tool_manifest([add, shift]), ensure_ascii=False), encoding="utf-8"
+        json.dumps(_tool_manifest([add, shift, manifest]), ensure_ascii=False),
+        encoding="utf-8",
     )
 
     proc = await asyncio.create_subprocess_exec(
@@ -253,6 +261,7 @@ async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path, mon
             listed = await receive(2)
             added = await call(3, "add", {"a": 2, "b": 3})
             shifted = await call(4, "shift", {"value": 1})
+            doubled = await call(5, "manifest", {"x": 4})
     finally:
         proc.stdin.close()
         try:
@@ -263,6 +272,35 @@ async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path, mon
         stderr = (await stderr_task).decode(errors="replace")
 
     assert proc.returncode == 0, stderr
-    assert [tool["name"] for tool in listed["result"]["tools"]] == ["add", "shift"]
+    assert [tool["name"] for tool in listed["result"]["tools"]] == ["add", "shift", "manifest"]
     assert (added.get("isError"), added["content"][0]["text"]) == (False, "5")
     assert (shifted.get("isError"), shifted["content"][0]["text"]) == (False, "11")
+    assert (doubled.get("isError"), doubled["content"][0]["text"]) == (False, "8")
+
+
+def test_unsupported_parameter_types_fall_back_to_an_open_schema():
+    import sqlite3
+
+    def fn(conn: sqlite3.Connection, n: int) -> str:
+        return f"{type(conn).__name__} {n}"
+
+    schema = json_schema_for(fn)
+    assert schema["properties"]["conn"] == {}
+    assert schema["properties"]["n"] == {"type": "integer"}
+    assert _call(fn, {"conn": "db", "n": "2"})["content"][0]["text"] == "str 2"
+
+
+def test_field_defaults_and_titled_default_values_survive():
+    from pydantic import Field
+
+    def fn(limit: int = Field(5, description="Max rows"), meta: dict = {"title": "x"}) -> str:  # noqa: B006
+        return f"{limit} {meta}"
+
+    schema = json_schema_for(fn)
+    assert schema["properties"]["limit"] == {
+        "default": 5,
+        "description": "Max rows",
+        "type": "integer",
+    }
+    assert schema["properties"]["meta"]["default"] == {"title": "x"}
+    assert _call(fn, {})["content"][0]["text"] == "5 {'title': 'x'}"
