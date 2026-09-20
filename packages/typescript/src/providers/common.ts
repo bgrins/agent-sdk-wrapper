@@ -66,10 +66,11 @@ export async function executable(path: string): Promise<void> {
 // Status codes only count next to an HTTP marker, never as bare numbers.
 const statusPatterns = [
   /\b(?:status(?: code)?|HTTP(?: status)?|API Error)\s*:?\s*(\d{3})\b/i,
-  /\b(\d{3}) (?:Bad Request|Unauthorized|Forbidden|Not Found|Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b/i,
+  /\b(\d{3}) (?:Bad Request|Unauthorized|Payment Required|Forbidden|Not Found|Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b/i,
 ];
+// "upgrade to Plus" is Codex's text for a ChatGPT plan without Codex access.
 const usageLimit =
-  /\busage limit\b|\bquota exceeded\b|\binsufficient_quota\b|\bexceeded your current quota\b/i;
+  /\busage limit\b|\bquota exceeded\b|\binsufficient_quota\b|\bexceeded your current quota\b|\bupgrade to (?:Plus|Pro)\b/i;
 const contextWindow =
   /\bprompt is too long\b|\bcontext[_ ]length[_ ]exceeded\b|\bexceeds the context window\b|\bran out of room in the model.s context window\b|\bcontext window exceeded\b/i;
 const billing = /\bcredit balance\b|\bbilling\b/i;
@@ -78,6 +79,7 @@ const transient =
 const authentication =
   /\bunauthorized\b|\bauthentication\b|\binvalid[_ ](?:x-)?api[_ -]?key\b|\bnot logged in\b|\bmissing api key\b/i;
 const permission = /\bforbidden\b|\bpermission denied\b/i;
+const invalidRequest = /\binvalid_request_error\b|\binvalid prompt\b/i;
 const modelNotFound =
   /\bmodel_not_found\b|\bmodel\b.*\b(?:not found|does not exist)\b|\bunknown model\b/i;
 export function classify(
@@ -104,23 +106,25 @@ export function classify(
           ? "transient_api_error"
           : code === 401
             ? "authentication_failed"
-            : code === 403
-              ? "permission_denied"
-              : modelNotFound.test(message)
-                ? "model_not_found"
-                : code === 400
-                  ? "invalid_request"
-                  : code !== undefined
-                    ? `api_error_${code}`
-                    : transient.test(message)
-                      ? "transient_api_error"
-                      : authentication.test(message)
-                        ? "authentication_failed"
-                        : permission.test(message)
-                          ? "permission_denied"
-                          : /\binvalid_request_error\b/.test(message)
-                            ? "invalid_request"
-                            : fallback;
+            : code === 402
+              ? "billing_error"
+              : code === 403
+                ? "permission_denied"
+                : modelNotFound.test(message)
+                  ? "model_not_found"
+                  : code === 400 || code === 422
+                    ? "invalid_request"
+                    : code !== undefined
+                      ? `api_error_${code}`
+                      : transient.test(message)
+                        ? "transient_api_error"
+                        : authentication.test(message)
+                          ? "authentication_failed"
+                          : permission.test(message)
+                            ? "permission_denied"
+                            : invalidRequest.test(message)
+                              ? "invalid_request"
+                              : fallback;
   return {
     type: "error",
     message,

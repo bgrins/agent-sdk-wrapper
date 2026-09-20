@@ -2311,7 +2311,7 @@ def _http_error_type(status: int, message: str) -> str:
     # A 429 can mean an exhausted quota, which retrying cannot fix.
     if status == 429 and specific in ("usage_limit_exceeded", "billing_error"):
         return specific
-    if status in (408, 429) or status >= 500:
+    if status in (408, 409, 429) or status >= 500:
         return _TRANSIENT
     if status == 401:
         return "authentication_failed"

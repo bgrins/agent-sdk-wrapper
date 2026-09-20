@@ -109,6 +109,20 @@ test("message classification uses the canonical vocabulary", () => {
       "usage_limit_exceeded",
     ],
     ["Your credit balance is too low", "billing_error"],
+    // Codex runtime texts for a 402, a ChatGPT plan without Codex, and a flagged prompt.
+    [
+      "unexpected status 402 Payment Required: Payment required",
+      "billing_error",
+    ],
+    [
+      "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+      "usage_limit_exceeded",
+    ],
+    [
+      "Invalid prompt: your prompt was flagged as potentially violating our usage policy.",
+      "invalid_request",
+    ],
+    ["unexpected status 422 Unprocessable Entity", "invalid_request"],
     // Refusals need a structured signal and bare numbers are not statuses.
     ["The model refused the request", "fallback"],
     ["Processed 503 files before failing", "fallback"],

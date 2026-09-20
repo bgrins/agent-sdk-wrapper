@@ -1902,6 +1902,12 @@ def test_codex_quota_429s_are_not_transient():
     assert _http_error_type(429, "Rate limit reached") == "transient_api_error"
 
 
+def test_codex_409_is_transient_as_for_claude():
+    from agent_sdk_wrapper.providers.openai_provider import _http_error_type
+
+    assert _http_error_type(409, "conflict") == "transient_api_error"
+
+
 def test_codex_web_search_call_waits_for_its_query():
     started = SimpleNamespace(
         method="item/started",

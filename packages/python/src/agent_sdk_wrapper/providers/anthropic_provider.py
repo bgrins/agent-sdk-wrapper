@@ -102,13 +102,14 @@ _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
     "system_prompt": lambda req: req.system_prompt is not None,
 }
 
-# Retryable statuses reported in errored ResultMessage values.
-_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+# Statuses below 500 that are retryable; every 5xx is too.
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 _STATUS_ERRORS = {
     400: "invalid_request",
     401: "authentication_failed",
     402: "billing_error",
     403: "permission_denied",
+    422: "invalid_request",
 }
 _SUBTYPE_ERRORS = {
     "error_max_turns": "max_turns",
@@ -802,7 +803,7 @@ def _classify(text: str, *, status: int | None, assistant_error: str | None) -> 
     for pattern, error_type in _TEXT_ERRORS:
         if pattern.search(text):
             return error_type
-    if status is not None and status in _RETRYABLE_STATUS_CODES:
+    if status is not None and (status in _RETRYABLE_STATUS_CODES or status >= 500):
         return "transient_api_error"
     if status is not None and status in _STATUS_ERRORS:
         return _STATUS_ERRORS[status]

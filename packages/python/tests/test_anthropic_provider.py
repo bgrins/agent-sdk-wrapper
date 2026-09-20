@@ -380,7 +380,7 @@ def test_anthropic_refusal_reports_refused():
     assert error.error_type == "refused"
 
 
-@pytest.mark.parametrize("status", [429, 503, 529])
+@pytest.mark.parametrize("status", [409, 429, 501, 503, 529])
 def test_anthropic_retryable_api_status_is_marked_retryable(status):
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 
