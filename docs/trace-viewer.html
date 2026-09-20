@@ -2380,6 +2380,18 @@
     }
 
     function eventBody(event) {
+      if (event.type === "agent_updated") return textOf(event.name);
+      if (event.type === "subagent_started") return textOf(event.description || event.task_id);
+      if (event.type === "subagent_ended") return textOf(event.summary || event.task_id);
+      if (event.type === "context_compacted") return `trigger: ${textOf(event.trigger) || "unknown"}`;
+      if (event.type === "run_finished") {
+        return [
+          event.ended_reason && event.ended_reason !== event.status
+            ? `reason: ${textOf(event.ended_reason)}`
+            : null,
+          formatDuration(event.duration_ms),
+        ].filter(Boolean).join(" · ");
+      }
       if (event.text) return textOf(event.text);
       if (event.message) return textOf(event.message);
       if (event.prompt) return textOf(event.prompt);

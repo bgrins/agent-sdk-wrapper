@@ -861,6 +861,21 @@ test("the conversation shows every prompt, the session model, run ends and unmat
     assert.ok(conversation.includes(text), text);
 });
 
+test("timeline rows show the content of lifecycle events", async () => {
+  const context = await loadViewer();
+  const events = [
+    { type: "agent_updated", name: "planner" },
+    { type: "subagent_started", task_id: "t1", name: "reviewer", description: "check diff" },
+    { type: "subagent_ended", task_id: "t1", status: "completed", summary: "looks fine" },
+    { type: "context_compacted", trigger: "auto", pre_tokens: 1200 },
+    { type: "run_finished", status: "failed", ended_reason: "timeout", duration_ms: 1500 },
+  ];
+  assert.deepEqual(
+    events.map((event) => evaluate(context, `eventBody(${JSON.stringify(event)})`)),
+    ["planner", "check diff", "looks fine", "trigger: auto", "reason: timeout · 1.5 s"],
+  );
+});
+
 test("polling renders only the active view and appends new lines to it", async () => {
   const context = await loadViewer();
   const limit = vm.runInContext("OUTPUT_LIMIT", context);
