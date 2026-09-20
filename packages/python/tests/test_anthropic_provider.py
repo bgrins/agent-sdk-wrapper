@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 
 import pytest
@@ -13,6 +14,7 @@ from agent_sdk_wrapper import (
     McpHttpServer,
     McpStdioServer,
     RunRequest,
+    SubagentDef,
 )
 from agent_sdk_wrapper.events import WarningEvent
 from agent_sdk_wrapper.providers.anthropic_provider import AnthropicProvider
@@ -161,6 +163,63 @@ def test_anthropic_options_reject_builtin_tools_extra_option_conflict():
 
     with pytest.raises(ConfigError, match="builtin_tools"):
         AnthropicProvider()._build_options(req)
+
+
+def test_every_native_option_a_first_class_field_sets_is_owned(tmp_path):
+    from claude_agent_sdk import ClaudeAgentOptions
+    from pydantic import BaseModel
+
+    from agent_sdk_wrapper.providers.anthropic_provider import (
+        _WRAPPER_OWNED_OPTIONS,
+        _native_option_names,
+    )
+
+    class Answer(BaseModel):
+        text: str
+
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    first_class = {
+        "model": "claude-haiku-4-5",
+        "system_prompt": "be brief",
+        "tools": [add],
+        "subagents": {"reviewer": SubagentDef(description="d", prompt="p")},
+        "mcp_servers": [McpStdioServer(name="local", command="uv")],
+        "output_schema": Answer,
+        "max_turns": 2,
+        "effort": "low",
+        "cwd": tmp_path,
+        "builtin_tools": ["Read"],
+        "web_tools": True,
+        "allowed_tools": ["Read"],
+        "disallowed_tools": ["Bash"],
+        "session_id": "sess-1",
+        "permission_mode": "default",
+        "setting_sources": ["project"],
+    }
+    # Fields that never reach ClaudeAgentOptions, or reach it only through env.
+    not_native = {
+        "provider", "prompt", "env", "timeout", "max_retries", "include_raw",
+        "include_events_in_result", "artifacts_dir", "on_provider_event",
+        "continue_session", "extra_options", "cli_login", "run_id", "attempt",
+    }
+    new_fields = {f.name for f in dataclasses.fields(RunRequest)} - not_native
+    assert new_fields == set(first_class), "classify new RunRequest fields here"
+
+    options = AnthropicProvider()._build_options(
+        RunRequest(provider="anthropic", prompt="x", **first_class)
+    )
+    defaults = ClaudeAgentOptions()
+    changed = {
+        f.name
+        for f in dataclasses.fields(options)
+        if getattr(options, f.name) != getattr(defaults, f.name)
+    }
+    # Wrapper defaults extra_options may replace; builtin_tools guards tools separately.
+    replaceable = {"max_buffer_size", "stderr", "thinking", "tools"}
+    assert changed - replaceable <= set(_WRAPPER_OWNED_OPTIONS)
+    assert set(_WRAPPER_OWNED_OPTIONS) <= _native_option_names()
 
 
 def test_anthropic_options_reject_unsupported_mcp_fields(tmp_path):
