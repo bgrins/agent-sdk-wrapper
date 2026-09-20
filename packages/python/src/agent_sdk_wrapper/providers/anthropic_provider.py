@@ -425,6 +425,8 @@ class AnthropicProvider(ProviderAdapter):
         seen_thinking = False
         # After a retraction only the result's usage is still meaningful.
         retracted = False
+        session_model: str | None = None
+        seen_uuids: set[str] = set()
         pending = _PendingText()
         # The latest error-bearing assistant message: (AssistantMessage.error, its text).
         assistant_error: tuple[str | None, str] | None = None
@@ -454,6 +456,10 @@ class AnthropicProvider(ProviderAdapter):
                                 seen_text = True
                                 yield text
                         if isinstance(message, AssistantMessage):
+                            if message.uuid is not None:
+                                if message.uuid in seen_uuids:
+                                    continue
+                                seen_uuids.add(message.uuid)
                             if message.parent_tool_use_id:
                                 yield WarningEvent(
                                     message="Subagent message omitted from portable output; "
@@ -529,11 +535,13 @@ class AnthropicProvider(ProviderAdapter):
                             compacted = _compaction_event(message)
                             if compacted is not None:
                                 yield compacted
-                            if not seen_session and data.get("session_id"):
+                            model = data.get("model") or None
+                            if data.get("session_id") and (
+                                not seen_session or (model and model != session_model)
+                            ):
                                 seen_session = True
-                                yield SessionInfo(
-                                    id=data["session_id"], model=data.get("model") or None
-                                )
+                                session_model = model or session_model
+                                yield SessionInfo(id=data["session_id"], model=session_model)
                         elif isinstance(message, ResultMessage):
                             if not seen_session and message.session_id:
                                 seen_session = True
@@ -756,6 +764,8 @@ def _result_error(
     reason = message.terminal_reason
     error_code, error_text = assistant_error or (None, "")
     detail = _error_detail(message, error_text)
+    if reason in ("aborted_streaming", "aborted_tools"):
+        return Error(message=detail or reason, error_type="cancelled")
     if message.subtype == "error_max_turns" or reason == "max_turns":
         return Error(message=detail or "reached the configured max turns", error_type="max_turns")
     if message.stop_reason == "refusal":
@@ -846,13 +856,17 @@ def _stringify(content: Any) -> str:
         parts = []
         for item in content:
             if isinstance(item, dict):
-                parts.append(item.get("text", "") or json.dumps(item, ensure_ascii=False))
+                parts.append(item.get("text", "") or _compact_json(item))
             else:
                 parts.append(str(item))
         return "".join(parts)
-    if isinstance(content, dict):
-        return json.dumps(content, ensure_ascii=False)
+    if content is None or isinstance(content, dict):
+        return _compact_json(content)
     return str(content)
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _anthropic_mcp_servers(servers: list[McpServer]) -> dict[str, Any]:

@@ -945,7 +945,7 @@ def test_anthropic_joins_text_blocks_and_maps_server_tool_results(monkeypatch):
     assert [type(event) for event in events] == [Text, ToolCall, ToolResult, Text]
     assert events[-1].text == "The answer is 42."
     assert events[2].name == "web_search"
-    assert events[2].output == '{"type": "web_search_result"}'
+    assert events[2].output == '{"type":"web_search_result"}'
 
 
 def test_anthropic_uses_result_text_when_no_text_block_arrived(monkeypatch):
@@ -1232,3 +1232,26 @@ def test_anthropic_status_frames_do_not_split_a_message(monkeypatch):
         ],
     )
     assert [event.text for event in events if isinstance(event, Text)] == ["The answer is 42."]
+
+
+def test_anthropic_cancellation_outranks_a_refusal_and_duplicates_are_dropped(monkeypatch):
+    from claude_agent_sdk import SystemMessage, TextBlock
+
+    from agent_sdk_wrapper.events import SessionInfo, Text
+    from agent_sdk_wrapper.providers.anthropic_provider import _result_error
+
+    error = _result_error(_result(stop_reason="refusal", terminal_reason="aborted_streaming"))
+    assert error is not None and error.error_type == "cancelled"
+
+    frame = _assistant(TextBlock(text="once"), message_id="m1", uuid="u1")
+    events, _ = _stream(
+        monkeypatch,
+        [
+            SystemMessage(subtype="status", data={"session_id": "s1"}),
+            SystemMessage(subtype="init", data={"session_id": "s1", "model": "claude-x"}),
+            frame,
+            frame,
+        ],
+    )
+    assert [e.text for e in events if isinstance(e, Text)] == ["once"]
+    assert [e.model for e in events if isinstance(e, SessionInfo)] == [None, "claude-x"]

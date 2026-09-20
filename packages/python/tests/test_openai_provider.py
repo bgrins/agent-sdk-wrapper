@@ -570,7 +570,7 @@ async def test_codex_stream_maps_more_tool_like_items():
         False,
     ]
     agent_result = [event for event in out if isinstance(event, ToolResult)][-1]
-    assert '"status": "completed"' in (agent_result.output or "")
+    assert '"status":"completed"' in (agent_result.output or "")
 
 
 def test_codex_tool_entry_keeps_source_fallback_for_importable_tool():
@@ -887,7 +887,7 @@ async def test_codex_stream_maps_image_items():
     assert results[0].is_error is False
     assert results[1].id == "image-2"
     assert results[1].is_error is True
-    assert '"status": "failed"' in (results[1].output or "")
+    assert '"status":"failed"' in (results[1].output or "")
 
 
 def _options_request(**kwargs: Any) -> RunRequest:
@@ -2017,3 +2017,24 @@ def test_codex_tool_manifest_skips_undecodable_sys_path_entries(monkeypatch):
     monkeypatch.setattr(sys, "path", ["/ok", "/bad\udcff"])
     assert json.dumps(_tool_manifest([])["sys_path"]) == '["/ok"]'
 
+
+
+def test_codex_plan_updates_become_one_thinking_checklist():
+    def step(text, status):
+        return SimpleNamespace(step=text, status=status)
+
+    def plan(*steps):
+        payload = SimpleNamespace(plan=list(steps))
+        return SimpleNamespace(method="turn/plan/updated", payload=payload)
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
+        plan(step("read", "inProgress")),
+        plan(step("read", "completed"), step("fix", "pending")),
+        turn_completed(),
+    ]
+
+    async def collect():
+        return [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    thinking = [event.text for event in asyncio.run(collect()) if isinstance(event, Thinking)]
+    assert thinking == ["- [x] read\n- [ ] fix"]

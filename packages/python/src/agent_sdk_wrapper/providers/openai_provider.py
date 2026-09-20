@@ -426,6 +426,7 @@ async def _stream_turn(
     usage = _TurnUsage()
     started_calls: set[str] = set()
     completed_action_items = 0
+    latest_plan: list[Any] | None = None
     interrupted_for_max_turns = False
     # A non-retried error notification precedes the failed turn/completed; emit one Error.
     reported_error: Error | None = None
@@ -517,6 +518,10 @@ async def _stream_turn(
                     await _interrupt_for_max_turns(turn, req.max_turns)
             continue
 
+        if method == "turn/plan/updated":
+            latest_plan = _field(payload, "plan", "plan") or []
+            continue
+
         if method == "thread/tokenUsage/updated":
             usage.add(getattr(payload, "token_usage", None) or getattr(payload, "tokenUsage", None))
             continue
@@ -542,6 +547,9 @@ async def _stream_turn(
             continue
 
         if method == "turn/completed":
+            if latest_plan:
+                yield Thinking(text=_plan_text(latest_plan))
+                latest_plan = None
             for text in _drain_delta_buffers(text_delta_parts):
                 texts.append(text)
                 yield Text(text=text)
@@ -1952,12 +1960,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
             ToolResult(
                 id=item_id,
-                output=_stringify_output(
-                    {
-                        "status": status,
-                        "changes": _to_plain(getattr(root, "changes", [])),
-                    }
-                ),
+                output=_stringify_output(_to_plain(getattr(root, "changes", []))),
                 is_error=status in {"failed", "declined"},
                 raw=_raw(root) if include_raw else None,
             ),
@@ -2143,7 +2146,17 @@ def _stringify_output(value: Any) -> str | None:
         return None
     if isinstance(plain, str):
         return plain
-    return json.dumps(plain)
+    return json.dumps(plain, ensure_ascii=False, separators=(",", ":"))
+
+
+def _plan_text(plan: list[Any]) -> str:
+    """Render a Codex plan as the checklist TypeScript emits for todo lists."""
+
+    lines = []
+    for step in plan:
+        done = _status_value(_field(step, "status", "status")) == "completed"
+        lines.append(f"- [{'x' if done else ' '}] {_field(step, 'step', 'step')}")
+    return "\n".join(lines)
 
 
 def _int_field(data: Any, *keys: str) -> int:
