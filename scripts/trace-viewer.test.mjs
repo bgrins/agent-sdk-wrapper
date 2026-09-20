@@ -267,6 +267,27 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
   );
 });
 
+test("a fresh run's large subtree does not hide its older sibling runs", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-subtree-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const old = join(root, "run-old");
+  await mkdir(old);
+  await writeFile(join(old, "trace.jsonl"), "{}\n");
+  const hour = new Date(Date.now() - 3_600_000);
+  await utimes(join(old, "trace.jsonl"), hour, hour);
+  await utimes(old, hour, hour);
+  const fresh = join(root, "run-new");
+  await Promise.all(
+    Array.from({ length: MAX_DIRECTORIES + 100 }, (_, index) =>
+      mkdir(join(fresh, "workspace", `d${index}`), { recursive: true }),
+    ),
+  );
+  await writeFile(join(fresh, "trace.jsonl"), "{}\n");
+  const base = await listen(t, root, { depth: 3 });
+  const runs = JSON.parse((await get(base, "/api/runs")).body);
+  assert.deepEqual(runs.map((run) => run.label).sort(), ["run-new", "run-old"]);
+});
+
 test("a symlinked ancestor swapped in after path checks is not followed", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ancestor-swap-"));
   t.after(() => rm(root, { recursive: true, force: true }));

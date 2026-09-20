@@ -20,13 +20,17 @@ const urlPath = (path) => path.split("/").map(encodeURIComponent).join("/");
 export const MAX_DIRECTORIES = 500;
 
 async function listRuns(directory, depth) {
-  // Scan recently modified directories first so the cap drops the oldest runs.
-  const queue = [{ relative: "", mtime: Infinity }];
+  // Scan level by level, newest first, so the cap drops the oldest runs and one
+  // run's subtree cannot use up the budget before its siblings are read.
+  const queue = [{ relative: "", level: 0, mtime: Infinity }];
   const runs = [];
   for (let visited = 0; queue.length && visited < MAX_DIRECTORIES; visited++) {
     let newest = 0;
-    for (let index = 1; index < queue.length; index++)
-      if (queue[index].mtime > queue[newest].mtime) newest = index;
+    for (let index = 1; index < queue.length; index++) {
+      const [a, b] = [queue[index], queue[newest]];
+      if (a.level < b.level || (a.level === b.level && a.mtime > b.mtime))
+        newest = index;
+    }
     const { relative } = queue[newest];
     queue[newest] = queue.at(-1);
     queue.pop();
@@ -64,7 +68,11 @@ async function listRuns(directory, depth) {
         if (!isRun && !(descend && entry.isDirectory())) return;
         const info = await lstat(resolve(directory, path)).catch(() => null);
         if (info?.isDirectory() && !isRun)
-          return queue.push({ relative: path, mtime: info.mtimeMs });
+          return queue.push({
+            relative: path,
+            level: path.split("/").length,
+            mtime: info.mtimeMs,
+          });
         if (!isRun || !info?.isFile() || info.nlink !== 1) return;
         runs.push({
           label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
