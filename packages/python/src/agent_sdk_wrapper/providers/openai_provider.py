@@ -61,6 +61,10 @@ _CODEX_NATIVE_TOOL_FILTER_NAMES = {
     "web_search",
 }
 _ACCESS_TOKEN_ENV = "CODEX_ACCESS_TOKEN"
+_API_KEY_ENV = "OPENAI_API_KEY"
+_API_KEY_ENVS = (_API_KEY_ENV, "CODEX_API_KEY")
+_CREDENTIAL_OVERRIDE_KEYS = frozenset({"cli_auth_credentials_store", "forced_login_method"})
+_WEB_SEARCH_OVERRIDE_KEYS = frozenset({"web_search", "tools.web_search"})
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
@@ -137,6 +141,15 @@ class OpenAIProvider(ProviderAdapter):
         else:
             _enum_value(ApprovalMode, self._approval_mode)
             _enum_value(Sandbox, self._sandbox)
+        caller_keys = _override_keys(self._config)
+        controlled = sorted(caller_keys & _CREDENTIAL_OVERRIDE_KEYS)
+        if controlled:
+            raise ConfigError(
+                f"config_overrides {controlled} conflict with cli_login, which controls "
+                "how Codex stores and selects credentials"
+            )
+        if req.web_tools is not None and caller_keys & _WEB_SEARCH_OVERRIDE_KEYS:
+            raise ConfigError("config_overrides for web search conflict with web_tools")
         if req.cli_login == "require" and (self._api_key or self._model_provider):
             raise ConfigError(
                 "cli_login='require' uses the stored ChatGPT login; remove api_key and "
@@ -158,9 +171,13 @@ class OpenAIProvider(ProviderAdapter):
 
     def check_credentials(self, req: RunRequest) -> str | None:
         # require is checked against the runtime's account once it starts.
-        if req.cli_login == "require" or not self._launches_codex() or self._model_provider:
+        if (
+            req.cli_login == "require"
+            or not self._launches_codex()
+            or self._uses_custom_model_provider(req)
+        ):
             return None
-        if self._login_api_key():
+        if self._login_api_key(req):
             return None
         return (
             "no OpenAI API key: set OPENAI_API_KEY or provider_options={'api_key': ...}; "
@@ -170,12 +187,28 @@ class OpenAIProvider(ProviderAdapter):
     def _launches_codex(self) -> bool:
         return self._codex is None and _config_value(self._config, "launch_args_override") is None
 
-    def _login_api_key(self) -> str | None:
+    def _login_api_key(self, req: RunRequest) -> str | None:
         # A pre-built client or custom launch command cannot take the ephemeral
         # credential store override, so logging in would overwrite auth.json.
         if not self._launches_codex():
             return None
-        return self._api_key or os.environ.get("OPENAI_API_KEY") or None
+        if self._api_key:
+            return self._api_key
+        # The run's env is what the child sees; an explicit empty value means no key.
+        if _API_KEY_ENV in req.env:
+            return req.env[_API_KEY_ENV] or None
+        return os.environ.get(_API_KEY_ENV) or None
+
+    def _uses_custom_model_provider(self, req: RunRequest) -> bool:
+        thread_options = {
+            **self._thread_options,
+            **req.extra_options.get("thread_options", {}),
+        }
+        return bool(
+            self._model_provider
+            or thread_options.get("model_provider")
+            or "model_provider" in _override_keys(self._config)
+        )
 
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
         self.validate_request(req)
@@ -189,7 +222,7 @@ class OpenAIProvider(ProviderAdapter):
 
         codex: Any = None
         try:
-            api_key = None if req.cli_login == "require" else self._login_api_key()
+            api_key = None if req.cli_login == "require" else self._login_api_key(req)
             with _runtime_config(req) as runtime_config:
                 config_overrides = runtime_config.config_overrides
                 if req.cli_login != "require" and self._launches_codex():
@@ -266,9 +299,10 @@ class OpenAIProvider(ProviderAdapter):
         from openai_codex import AsyncCodex
 
         env = dict(req.env)
-        if req.cli_login != "require":
-            # An access token is a ChatGPT login; Codex treats an empty value as unset.
-            env[_ACCESS_TOKEN_ENV] = ""
+        # Codex treats an empty value as unset. An access token is a ChatGPT login.
+        removed = _API_KEY_ENVS if req.cli_login == "require" else (_ACCESS_TOKEN_ENV,)
+        for name in removed:
+            env[name] = ""
         config = _codex_config(
             self._config,
             env,
@@ -399,7 +433,11 @@ async def _stream_turn(
 
         if method == "item/started":
             item = getattr(payload, "item", None)
-            tool_events = _tool_events(getattr(item, "root", item), event, req.include_raw)
+            root = getattr(item, "root", item)
+            # A started web search has no query yet; its call is emitted on completion.
+            if getattr(root, "type", "") == "webSearch":
+                continue
+            tool_events = _tool_events(root, event, req.include_raw)
             if tool_events is not None:
                 call = tool_events[0]
                 if call.id is not None:
@@ -1150,6 +1188,8 @@ def _tool_server_script() -> str:
 
         def _resolve(entry):
             try:
+                if entry["module"] in (None, "__main__"):
+                    raise ImportError(entry["module"])
                 obj = importlib.import_module(entry["module"])
                 for part in entry["qualname"].split("."):
                     obj = getattr(obj, part)
@@ -1631,13 +1671,49 @@ def _drop_optional_nulls(value: Any, node: Any, root: dict[str, Any]) -> Any:
         }
     if isinstance(value, list) and isinstance(node.get("items"), dict):
         return [_drop_optional_nulls(item, node["items"], root) for item in value]
-    for branch in node.get("anyOf", ()):
-        resolved = _resolve_ref(root, branch["$ref"]) if "$ref" in branch else branch
-        if (isinstance(value, dict) and "properties" in resolved) or (
-            isinstance(value, list) and "items" in resolved
-        ):
-            return _drop_optional_nulls(value, resolved, root)
+    branches = [
+        _resolve_ref(root, branch["$ref"]) if "$ref" in branch else branch
+        for branch in node.get("anyOf", ())
+    ]
+    if isinstance(value, dict):
+        objects = [branch for branch in branches if "properties" in branch]
+        match = _matching_object_branch(objects, value, root)
+        if match is not None:
+            return _drop_optional_nulls(value, match, root)
+    if isinstance(value, list):
+        for branch in branches:
+            if "items" in branch:
+                return _drop_optional_nulls(value, branch, root)
     return value
+
+
+def _matching_object_branch(
+    branches: list[dict[str, Any]], value: dict[str, Any], root: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Pick the union member whose keys and constants fit ``value``."""
+
+    def fits(branch: dict[str, Any]) -> bool:
+        properties = branch["properties"]
+        if not set(value) <= set(properties):
+            return False
+        for key, item in value.items():
+            field = properties[key]
+            field = _resolve_ref(root, field["$ref"]) if "$ref" in field else field
+            if "const" in field and item != field["const"]:
+                return False
+            if "enum" in field and item not in field["enum"]:
+                return False
+        return True
+
+    exact = [b for b in branches if fits(b) and set(b["properties"]) == set(value)]
+    return next(iter(exact or [b for b in branches if fits(b)] or branches), None)
+
+
+def _override_keys(config: Any) -> set[str]:
+    """Keys the caller sets through ``config_overrides``."""
+
+    overrides = _config_value(config, "config_overrides") or ()
+    return {str(item).split("=", 1)[0].strip() for item in overrides}
 
 
 def _config_has_codex_bin(config: Any) -> bool:
@@ -2162,6 +2238,10 @@ def _pattern_error_type(message: str) -> str | None:
 
 
 def _http_error_type(status: int, message: str) -> str:
+    specific = _pattern_error_type(message)
+    # A 429 can mean an exhausted quota, which retrying cannot fix.
+    if status == 429 and specific in ("usage_limit_exceeded", "billing_error"):
+        return specific
     if status in (408, 429) or status >= 500:
         return _TRANSIENT
     if status == 401:
@@ -2170,7 +2250,6 @@ def _http_error_type(status: int, message: str) -> str:
         return "billing_error"
     if status == 403:
         return "permission_denied"
-    specific = _pattern_error_type(message)
     if specific is not None and specific != _TRANSIENT:
         return specific
     if status in (400, 422):

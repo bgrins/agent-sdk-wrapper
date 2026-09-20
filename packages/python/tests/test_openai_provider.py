@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import (
+    AgentSdkWrapperError,
     ConfigError,
     Error,
     McpHttpServer,
@@ -129,9 +131,10 @@ def test_codex_api_key_requires_a_wrapper_launched_runtime(monkeypatch):
         OpenAIProvider(api_key="sk-test", config=custom_launch).validate_request(req)
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-    assert OpenAIProvider(codex=object())._login_api_key() is None
-    assert OpenAIProvider(config=custom_launch)._login_api_key() is None
-    assert OpenAIProvider()._login_api_key() == "sk-env"
+    plain = RunRequest(provider="openai", prompt="x")
+    assert OpenAIProvider(codex=object())._login_api_key(plain) is None
+    assert OpenAIProvider(config=custom_launch)._login_api_key(plain) is None
+    assert OpenAIProvider()._login_api_key(plain) == "sk-env"
 
 
 def test_codex_sandbox_is_a_thread_mode_not_a_turn_policy():
@@ -1855,3 +1858,116 @@ def test_codex_cli_login_deny_needs_an_api_key_and_require_takes_none(monkeypatc
     assert OpenAIProvider().check_credentials(required) is None
     with pytest.raises(ConfigError, match="cli_login='require'"):
         OpenAIProvider(api_key="sk-test").validate_request(required)
+
+
+def test_codex_api_key_comes_from_the_run_env_first(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    provider = OpenAIProvider()
+
+    run_key = RunRequest(provider="openai", prompt="x", env={"OPENAI_API_KEY": "sk-run"})
+    assert provider._login_api_key(run_key) == "sk-run"
+    no_key = RunRequest(provider="openai", prompt="x", env={"OPENAI_API_KEY": ""})
+    assert provider._login_api_key(no_key) is None
+    assert provider.check_credentials(no_key) is not None
+
+
+@pytest.mark.parametrize(
+    ("override", "request_kwargs"),
+    [
+        ('cli_auth_credentials_store="file"', {}),
+        ('forced_login_method="api"', {}),
+        ('web_search="live"', {"web_tools": False}),
+    ],
+)
+def test_codex_caller_overrides_cannot_undo_wrapper_controls(override, request_kwargs):
+    provider = OpenAIProvider(config={"config_overrides": (override,)})
+    with pytest.raises(ConfigError, match="conflict"):
+        provider.validate_request(RunRequest(provider="openai", prompt="x", **request_kwargs))
+
+
+def test_codex_custom_model_providers_skip_the_openai_key_gate(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    req = RunRequest(provider="openai", prompt="x")
+
+    by_thread = OpenAIProvider(thread_options={"model_provider": "local"})
+    by_override = OpenAIProvider(config={"config_overrides": ('model_provider="local"',)})
+    assert by_thread.check_credentials(req) is None
+    assert by_override.check_credentials(req) is None
+
+
+def test_codex_quota_429s_are_not_transient():
+    from agent_sdk_wrapper.providers.openai_provider import _http_error_type
+
+    assert _http_error_type(429, "You exceeded your current quota") == "usage_limit_exceeded"
+    assert _http_error_type(429, "Rate limit reached") == "transient_api_error"
+
+
+def test_codex_web_search_call_waits_for_its_query():
+    started = SimpleNamespace(
+        method="item/started",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(root=SimpleNamespace(type="webSearch", id="w1", query=""))
+        ),
+    )
+    completed = SimpleNamespace(
+        method="item/completed",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(
+                root=SimpleNamespace(type="webSearch", id="w1", query="codex sdk", action=None)
+            )
+        ),
+    )
+    req = RunRequest(provider="openai", prompt="ignored")
+
+    async def collect():
+        return [event async for event in _stream_turn(FakeTurn([started, completed]), req)]
+
+    events = asyncio.run(collect())
+    calls = [event for event in events if isinstance(event, ToolCall)]
+    assert [call.input["query"] for call in calls] == ["codex sdk"]
+
+
+def test_codex_optional_nulls_follow_the_matching_union_member():
+    from agent_sdk_wrapper.providers.openai_provider import _structured_value
+
+    class Cat(BaseModel):
+        kind: Literal["cat"]
+        lives: int = 9
+
+    class Dog(BaseModel):
+        kind: Literal["dog"]
+        breed: str = "mutt"
+        lives: int | None
+
+    class Owner(BaseModel):
+        pet: Cat | Dog
+
+    value = {"pet": {"kind": "dog", "breed": None, "lives": None}}
+    cleaned = _structured_value(Owner, value)
+    assert Owner.model_validate(cleaned).pet == Dog(kind="dog", lives=None)
+
+
+def test_codex_require_blanks_api_keys_in_the_runtime_env(monkeypatch):
+    import openai_codex
+
+    seen = {}
+
+    class CapturingCodex:
+        def __init__(self, config=None):
+            seen["env"] = dict(config.env or {})
+
+        async def __aenter__(self):
+            raise RuntimeError("stop after capturing config")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(openai_codex, "AsyncCodex", CapturingCodex)
+    req = RunRequest(provider="openai", prompt="x", cli_login="require")
+
+    async def collect():
+        return [event async for event in OpenAIProvider().stream(req)]
+
+    with pytest.raises(AgentSdkWrapperError):
+        asyncio.run(collect())
+    assert (seen["env"]["OPENAI_API_KEY"], seen["env"]["CODEX_API_KEY"]) == ("", "")
