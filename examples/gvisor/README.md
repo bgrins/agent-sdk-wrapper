@@ -57,6 +57,7 @@ so a later job cannot resume it. Cloud deployment is not included.
 
 ```sh
 bash examples/gvisor/scripts/test.sh  # offline; builds test images; requires Node
+# Run from the checkout whose results/gvisor-output the VM mounts (see macOS setup).
 AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 \
   bash examples/gvisor/scripts/test.sh --live
 bash examples/gvisor/workload/run.sh cleanup  # remove leftover example resources

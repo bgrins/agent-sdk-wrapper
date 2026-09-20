@@ -39,7 +39,8 @@
 - Keep runs isolated from the host: Claude `setting_sources` defaults to `[]`,
   `effort` is pinned through the child env, `cli_login` defaults to `deny`, and
   credentials are never persisted.
-- `final_text` is the last `Text`; adapters emit one `Text` per assistant message.
+- `final_text` is the last `Text`; adapters emit one `Text` per contiguous text run of
+  an assistant message, even across frames.
 - Changes to Python `_tool_server_script()` or `mcp` require the real offline
   MCP handshake test. The generated server supports `FastMCP` and `MCPServer`.
 - Fault tests use local mock endpoints: Claude `ANTHROPIC_BASE_URL` via `env`;

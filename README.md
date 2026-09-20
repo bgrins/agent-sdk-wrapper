@@ -35,6 +35,6 @@ docker compose up --build --abort-on-container-failure python-verify typescript-
 ## View traces
 
 Run `npm run trace-viewer -- results` and open the printed URL. It lists the 500
-most recently modified run directories, and `?index=` must be same-origin.
+most recently updated runs, and `?index=` must be same-origin.
 For the [gVisor example](examples/gvisor/README.md), use
 `npm run trace-viewer -- results/gvisor-output --depth 1`.

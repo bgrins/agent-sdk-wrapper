@@ -8,8 +8,11 @@ a subset of Python's API.
 |---|---|---|
 | Requests | Keyword overrides; snake_case | Prompt or request object; camelCase; whole-field replacement |
 | Provider selection | Fixed per Agent; explicit provider takes precedence | Per-run selection; conflicting model/provider rejected |
-| Retries | Default 2; `run`, `stream` and CLI; stop after a progress event | Default 0; stop after a progress event |
-| Concurrency | Concurrent runs allowed except with `continue_session` | One active run per Agent |
+| Retries | Default 2, jittered backoff capped at 8 s; `run`, `stream` and CLI | Default 0, `retryDelayMs` doubling to 30 s |
+| Concurrency | Concurrent runs allowed; `continue_session` keeps the last reported session | One active run per Agent |
+| Codex session model | Reported | Not exposed by `codex exec` |
+| Codex key check | Skipped with a custom `model_provider` | Required, including with `baseUrl` |
+| Claude text at a deadline or cancel | A message still receiving frames is dropped | Kept |
 | Session IDs | Automatically updated with `continue_session` | Always recorded per provider; `continueSession` controls reuse |
 | Setup failures | `ConfigError` raises at call; missing runtime or credentials give failed results | `ConfigError`, `RuntimeUnavailableError` and `ProviderError` throw |
 | Deadlines | `timeout` bounds provider waits; timeout status | `AbortSignal`; cancelled status |
@@ -23,7 +26,8 @@ a subset of Python's API.
 | Redacted thinking | Size from the thinking signature | Size from `redacted_thinking` blocks |
 | `cli_login="require"` check | Codex account type after startup | `codex login status` before startup |
 
-Progress events are text, thinking, tool calls and results, plus Python's
+Both stop retrying after a progress event, and never retry a resumed session that has
+started. Progress events are text, thinking, tool calls and results, plus Python's
 subagent, structured-output, compaction and agent events. Retryable error events
 are held back and become warnings when retried. Signal-killed runtimes record a
 `process_terminated` error, then raise; they are never retried.
@@ -38,12 +42,12 @@ Unsupported options fail validation; native permission policies are not intercha
 
 | `error_type` | Meaning |
 |---|---|
-| `transient_api_error` | 429, 5xx, overload or dropped connection; the only retryable type |
+| `transient_api_error` | 408, 409, 429, 5xx, overload, high demand or dropped connection; the only retryable type |
 | `authentication_failed`, `permission_denied` | Missing or rejected credentials; access denied |
 | `invalid_request`, `model_not_found`, `context_window_exceeded` | Request rejected |
 | `billing_error`, `usage_limit_exceeded`, `max_budget` | Spending or quota limits |
 | `max_turns`, `refused`, `cancelled`, `timeout` | Run limits, structured refusals, cancellation, Python deadline |
-| `structured_output_failed`, `execution_error` | Structured output or Claude execution failures |
+| `structured_output_failed`, `execution_error` | Structured output or runtime execution failures |
 | `provider_protocol_error`, `runtime_unavailable`, `process_terminated`, `provider_exception` | Wrapper-level failures |
 | `api_error_<status>` | Other HTTP statuses |
 
@@ -52,9 +56,11 @@ Unsupported options fail validation; native permission policies are not intercha
 - Text events are completed assistant messages, not token deltas.
 - Claude subagent messages are omitted with a warning; their tokens are included in totals.
 - Claude background subagents are disabled, so a run has one result.
-- Claude retractions fail with `provider_protocol_error`; prior text remains partial output.
+- Claude retractions fail with `provider_protocol_error`; prior text remains partial output
+  and usage is still reported. Python sees only `model_refusal_fallback` notices, because
+  its SDK drops `supersedes` and `aborted` frames.
 - Claude custom prompts persist across resume by default. Start a new session to change instructions.
-- Codex MCP tools are discoverable through Codex tool search, not listed up front.
+- Codex defers MCP tools behind its tool search; prompts may need to tell the model to search.
 
 ## TypeScript limits
 
@@ -68,7 +74,7 @@ Input totals include cache; output totals include reasoning. Both Claude adapter
 prefer per-model totals, including subagents, fall back to main-loop usage, and
 report thinking tokens and `num_turns` requests. Dollar cost is Claude-only.
 
-Codex output already includes reasoning and cache-write tokens are reported.
+Codex output includes reasoning; cache-write tokens are reported.
 Python computes each turn from the runtime's per-request usage, so resumed threads
 exclude history. TypeScript diffs cumulative snapshots per session and warns when
 a resumed thread has no baseline; it reports zero requests.

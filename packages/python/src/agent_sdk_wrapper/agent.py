@@ -221,7 +221,7 @@ class Agent:
         self._provider = build_provider(self.provider, **(provider_options or {}))
 
     def check_runtime(self) -> None:
-        """Validate the request before checking runtime availability."""
+        """Validate settings, then runtime availability and credentials."""
 
         req = self._build_request("", {})
         self._provider.validate_request(req)
