@@ -609,11 +609,18 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
     options = AnthropicProvider()._build_options(
         RunRequest(provider="anthropic", prompt="x", effort="high", env={"KEEP": "1"})
     )
+    blanked_logins = {
+        "CLAUDE_CODE_OAUTH_TOKEN": "",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR": "",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "",
+        "CLAUDE_CODE_SESSION_ACCESS_TOKEN": "",
+    }
+    # The SDK layers options.env over os.environ, so these values beat inherited ones.
     assert options.env == {
         "KEEP": "1",
         "CLAUDE_CODE_EFFORT_LEVEL": "high",
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-        "CLAUDE_CODE_OAUTH_TOKEN": "",
+        **blanked_logins,
     }
 
     caller = AnthropicProvider()._build_options(
@@ -623,7 +630,11 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
             env={"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"},
         )
     )
-    assert caller.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "0"
+    assert caller.env == {
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+        "CLAUDE_CODE_EFFORT_LEVEL": "",
+        **blanked_logins,
+    }
 
     with pytest.raises(ConfigError, match="CLAUDE_CODE_EFFORT_LEVEL"):
         AnthropicProvider()._build_options(
@@ -947,7 +958,6 @@ def test_anthropic_uses_result_text_when_no_text_block_arrived(monkeypatch):
 def test_anthropic_structured_output_mismatch_is_a_typed_failure(monkeypatch):
     from pydantic import BaseModel
 
-    from agent_sdk_wrapper.events import Error
 
     class Answer(BaseModel):
         value: int
@@ -957,7 +967,8 @@ def test_anthropic_structured_output_mismatch_is_a_typed_failure(monkeypatch):
         [_result(structured_output={"value": "not an int"})],
         output_schema=Answer,
     )
-    assert events[-1] == Error(message=events[-1].message, error_type="structured_output_failed")
+    assert events[-1].error_type == "structured_output_failed"
+    assert "value" in events[-1].message
 
 
 def test_anthropic_joins_text_frames_of_one_message(monkeypatch):
@@ -1000,12 +1011,6 @@ def test_anthropic_cli_login_require_and_login_tokens_are_rejected():
         AnthropicProvider().validate_request(
             RunRequest(provider="anthropic", prompt="x", env={"CLAUDE_CODE_OAUTH_TOKEN": "t"})
         )
-
-
-def test_anthropic_blanks_an_inherited_login_token(monkeypatch):
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited")
-    options = AnthropicProvider()._build_options(RunRequest(provider="anthropic", prompt="x"))
-    assert options.env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
 
 
 @pytest.mark.parametrize(
@@ -1146,12 +1151,6 @@ def test_anthropic_stream_without_a_result_is_a_protocol_error(monkeypatch):
     assert events[-1].error_type == "provider_protocol_error"
 
 
-def test_anthropic_unset_effort_blanks_an_inherited_effort(monkeypatch):
-    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "xhigh")
-    options = AnthropicProvider()._build_options(RunRequest(provider="anthropic", prompt="x"))
-    assert options.env["CLAUDE_CODE_EFFORT_LEVEL"] == ""
-
-
 def test_anthropic_extra_options_may_set_keys_whose_options_are_unused():
     options = AnthropicProvider()._build_options(
         RunRequest(
@@ -1162,3 +1161,73 @@ def test_anthropic_extra_options_may_set_keys_whose_options_are_unused():
     )
     assert options.setting_sources == ["project"]
     assert options.output_format == {"type": "text"}
+
+
+@pytest.mark.parametrize(("value", "accepted"), [("1", True), ("on", True), ("no", False)])
+def test_anthropic_provider_flags_count_only_when_the_cli_enables_them(
+    monkeypatch, value, accepted
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    req = RunRequest(provider="anthropic", prompt="x", env={"CLAUDE_CODE_USE_VERTEX": value})
+    assert (AnthropicProvider().check_credentials(req) is None) is accepted
+
+
+def test_anthropic_rejects_unknown_extra_options_before_running():
+    with pytest.raises(ConfigError, match="not Claude Agent SDK options"):
+        AnthropicProvider().validate_request(
+            RunRequest(provider="anthropic", prompt="x", extra_options={"max_budget": 1})
+        )
+
+
+def test_anthropic_stderr_reaches_the_terminal_without_a_user_callback(capsys):
+    import collections
+
+    tail = collections.deque()
+    options = AnthropicProvider()._build_options(
+        RunRequest(provider="anthropic", prompt="x"), tail
+    )
+    options.stderr("MCP server failed to start")
+    assert list(tail) == ["MCP server failed to start"]
+    assert "MCP server failed to start" in capsys.readouterr().err
+
+
+def test_anthropic_retraction_still_reports_usage(monkeypatch):
+    from claude_agent_sdk import SystemMessage, TextBlock
+
+    from agent_sdk_wrapper.events import Error, Usage
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="partial"), message_id="m1"),
+            SystemMessage(
+                subtype="model_refusal_fallback", data={"retracted_message_uuids": ["m1"]}
+            ),
+            _assistant(TextBlock(text="fallback"), message_id="m2"),
+            _result(
+                usage={"input_tokens": 5, "output_tokens": 1}, total_cost_usd=0.5, session_id=""
+            ),
+        ],
+    )
+    assert [type(event) for event in events][-2:] == [Error, Usage]
+    assert events[-1].cost_usd == 0.5
+
+
+def test_anthropic_status_frames_do_not_split_a_message(monkeypatch):
+    from claude_agent_sdk import RateLimitEvent, RateLimitInfo, TextBlock
+
+    from agent_sdk_wrapper.events import Text
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="The answer "), message_id="m1"),
+            RateLimitEvent(
+                rate_limit_info=RateLimitInfo(status="allowed_warning"),
+                uuid="r",
+                session_id="s",
+            ),
+            _assistant(TextBlock(text="is 42."), message_id="m1"),
+        ],
+    )
+    assert [event.text for event in events if isinstance(event, Text)] == ["The answer is 42."]

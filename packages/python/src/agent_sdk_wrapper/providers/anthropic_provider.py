@@ -5,11 +5,13 @@ from __future__ import annotations
 import collections
 import contextlib
 import dataclasses
+import functools
 import json
 import os
 import platform
 import re
 import shutil
+import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -54,12 +56,18 @@ _STDERR_TAIL_LINES = 50
 _EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 # Background subagents add a follow-up turn and a second result frame.
 _BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
-# A claude.ai login token; the CLI treats an empty value as unset.
-_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+# claude.ai login tokens the CLI reads from the env; it treats empty values as unset.
+_LOGIN_TOKEN_ENV = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+)
+_API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# The CLI enables CLAUDE_CODE_USE_* provider flags only for these values.
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 # The CLI ranks these above every stored login (claude.ai, OAuth token, Console profile).
-_CREDENTIAL_ENV = (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
+_PROVIDER_FLAG_ENV = (
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
@@ -211,8 +219,9 @@ class AnthropicProvider(ProviderAdapter):
 
     def check_credentials(self, req: RunRequest) -> str | None:
         env = {**os.environ, **req.env}
-        unset = ("", "0", "false")
-        if any(env.get(name, "").strip().lower() not in unset for name in _CREDENTIAL_ENV):
+        if any(env.get(name, "").strip() for name in _API_KEY_ENV):
+            return None
+        if any(env.get(name, "").strip().lower() in _TRUE_VALUES for name in _PROVIDER_FLAG_ENV):
             return None
         return (
             "no Claude API credentials: set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or a "
@@ -230,11 +239,15 @@ class AnthropicProvider(ProviderAdapter):
                 "cli_login='require' is not supported for Claude; use an API key, "
                 "auth token or cloud-provider credentials"
             )
-        if req.env.get(_OAUTH_TOKEN_ENV):
+        login_tokens = [name for name in _LOGIN_TOKEN_ENV if req.env.get(name)]
+        if login_tokens:
             raise ConfigError(
-                f"env[{_OAUTH_TOKEN_ENV!r}] is a claude.ai login token; "
+                f"env {login_tokens} carry claude.ai login tokens; "
                 "Claude runs use API-key or cloud-provider credentials"
             )
+        unknown = sorted(set(req.extra_options) - _native_option_names())
+        if unknown:
+            raise ConfigError(f"extra_options {unknown} are not Claude Agent SDK options")
         active_mcp_servers = [
             server for server in req.mcp_servers if server.enabled is not False
         ]
@@ -333,7 +346,8 @@ class AnthropicProvider(ProviderAdapter):
         # An empty value keeps an inherited effort from overriding the CLI default.
         env.setdefault(_EFFORT_ENV, effort or "")
         env.setdefault(_BACKGROUND_TASKS_ENV, "1")
-        env[_OAUTH_TOKEN_ENV] = ""
+        for name in _LOGIN_TOKEN_ENV:
+            env[name] = ""
 
         extra = dict(req.extra_options)
         user_stderr = extra.pop("stderr", None)
@@ -409,6 +423,8 @@ class AnthropicProvider(ProviderAdapter):
         seen_session = False
         seen_text = False
         seen_thinking = False
+        # After a retraction only the result's usage is still meaningful.
+        retracted = False
         pending = _PendingText()
         # The latest error-bearing assistant message: (AssistantMessage.error, its text).
         assistant_error: tuple[str | None, str] | None = None
@@ -430,6 +446,8 @@ class AnthropicProvider(ProviderAdapter):
                 ) as messages:
                     async for message in messages:
                         provider_log.write(message)
+                        if retracted and not isinstance(message, ResultMessage):
+                            continue
                         if not pending.continues(message):
                             text = pending.flush()
                             if text is not None:
@@ -505,7 +523,9 @@ class AnthropicProvider(ProviderAdapter):
                                     "the v1 event contract cannot retract emitted output",
                                     error_type="provider_protocol_error",
                                 )
-                                return
+                                retracted = True
+                                pending.flush()
+                                continue
                             compacted = _compaction_event(message)
                             if compacted is not None:
                                 yield compacted
@@ -531,6 +551,8 @@ class AnthropicProvider(ProviderAdapter):
                                     seen_thinking = True
                                     yield Thinking(text="")
                                 yield usage
+                            if retracted:
+                                return
                             if (
                                 req.output_schema is not None
                                 and message.structured_output is not None
@@ -598,13 +620,24 @@ class AnthropicProvider(ProviderAdapter):
 def _stderr_callback(
     tail: collections.deque[str] | None, user: Callable[[str], None] | None
 ) -> Callable[[str], None]:
+    """Keep a tail for error reports; without a user callback, still show CLI stderr."""
+
     def callback(line: str) -> None:
         if tail is not None:
             tail.append(line)
         if user is not None:
             user(line)
+        else:
+            print(line, file=sys.stderr)
 
     return callback
+
+
+@functools.cache
+def _native_option_names() -> frozenset[str]:
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    return frozenset(field.name for field in dataclasses.fields(ClaudeAgentOptions))
 
 
 def _message_text(message: Any) -> str:
@@ -621,8 +654,11 @@ class _PendingText:
     parts: list[str] = dataclasses.field(default_factory=list)
 
     def continues(self, message: Any) -> bool:
-        from claude_agent_sdk import AssistantMessage, TextBlock
+        from claude_agent_sdk import AssistantMessage, RateLimitEvent, SystemMessage, TextBlock
 
+        # Status frames can arrive between the frames of one message.
+        if isinstance(message, (SystemMessage, RateLimitEvent)):
+            return True
         return (
             isinstance(message, AssistantMessage)
             and message.message_id is not None
