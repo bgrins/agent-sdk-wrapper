@@ -196,6 +196,11 @@ def codex_config(api: MockResponses, home: Path, *overrides: str) -> dict[str, A
             "HTTPS_PROXY": dead_proxy,
             "HTTP_PROXY": dead_proxy,
             "ALL_PROXY": dead_proxy,
+            # git (run by Codex for plugin checks) prefers the lowercase names.
+            "https_proxy": dead_proxy,
+            "http_proxy": dead_proxy,
+            "all_proxy": dead_proxy,
+            "CODEX_ACCESS_TOKEN": "",
             "NO_PROXY": "127.0.0.1,localhost",
             "OPENAI_API_KEY": "",
             "CODEX_API_KEY": "",
@@ -423,6 +428,8 @@ async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_pat
                 args=[str(script), UNICODE_TEXT],
                 env={"GREETING": UNICODE_TEXT},
                 default_tools_approval_mode="approve",
+                # Codex only waits for required servers before the first model request.
+                required=True,
             )
         ],
         subagents={"fox": SubagentDef(description=UNICODE_TEXT, prompt=UNICODE_TEXT)},
@@ -597,3 +604,32 @@ async def test_cli_login_deny_refuses_a_chatgpt_logged_in_client_before_any_requ
         ("error", "authentication_failed")
     ]
     assert mock_api.posts() == []
+
+
+async def test_cli_login_deny_accepts_a_per_thread_provider_without_openai_auth(
+    mock_api, codex_home, tmp_path
+):
+    config = codex_config(mock_api, codex_home)
+    config["config_overrides"] = (
+        *(
+            item
+            for item in config["config_overrides"]
+            if not item.startswith(("model_provider=", "model_providers.mock.requires_openai_auth"))
+        ),
+        "model_providers.mock.requires_openai_auth=false",
+    )
+    mock_api.plan = [{"text": "hello"}]
+    agent = Agent(
+        provider="codex",
+        model=MODEL,
+        cwd=tmp_path,
+        max_retries=0,
+        timeout=60,
+        provider_options={"config": config, "model_provider": "mock"},
+    )
+
+    result = await agent.run("hi")
+
+    assert result.ok, result.error
+    assert len(mock_api.posts()) == 1
+

@@ -1947,7 +1947,11 @@ def test_codex_optional_nulls_follow_the_matching_union_member():
     assert Owner.model_validate(cleaned).pet == Dog(kind="dog", lives=None)
 
 
-def test_codex_require_blanks_api_keys_in_the_runtime_env(monkeypatch):
+@pytest.mark.parametrize(
+    ("cli_login", "blanked"),
+    [("deny", ("CODEX_ACCESS_TOKEN",)), ("require", ("OPENAI_API_KEY", "CODEX_API_KEY"))],
+)
+def test_codex_login_policy_blanks_credential_env(monkeypatch, cli_login, blanked):
     import openai_codex
 
     seen = {}
@@ -1963,11 +1967,53 @@ def test_codex_require_blanks_api_keys_in_the_runtime_env(monkeypatch):
             return False
 
     monkeypatch.setattr(openai_codex, "AsyncCodex", CapturingCodex)
-    req = RunRequest(provider="openai", prompt="x", cli_login="require")
+    req = RunRequest(provider="openai", prompt="x", cli_login=cli_login)
 
     async def collect():
-        return [event async for event in OpenAIProvider().stream(req)]
+        provider = OpenAIProvider(api_key="sk-test" if cli_login == "deny" else None)
+        return [event async for event in provider.stream(req)]
 
     with pytest.raises(AgentSdkWrapperError):
         asyncio.run(collect())
-    assert (seen["env"]["OPENAI_API_KEY"], seen["env"]["CODEX_API_KEY"]) == ("", "")
+    assert {name: seen["env"].get(name) for name in blanked} == dict.fromkeys(blanked, "")
+
+
+def test_codex_recursive_output_schemas_terminate():
+    from agent_sdk_wrapper.providers.openai_provider import _codex_output_schema
+
+    class Node(BaseModel):
+        name: str
+        parent: Node = Field(default=None, description="parent")
+
+    Node.model_rebuild()
+    schema = _codex_output_schema(Node)
+    assert schema["required"] == ["name", "parent"]
+
+
+@pytest.mark.parametrize(
+    ("thread_config", "request_kwargs"),
+    [
+        ({"web_search": "live"}, {"web_tools": False}),
+        ({"tools": {"web_search": True}}, {"web_tools": False}),
+        ({"cli_auth_credentials_store": "file"}, {}),
+    ],
+)
+def test_codex_thread_config_cannot_undo_wrapper_controls(thread_config, request_kwargs):
+    req = RunRequest(
+        provider="openai",
+        prompt="x",
+        extra_options={"thread_options": {"config": thread_config}},
+        **request_kwargs,
+    )
+    with pytest.raises(ConfigError, match="config"):
+        OpenAIProvider().validate_request(req)
+
+
+def test_codex_tool_manifest_skips_undecodable_sys_path_entries(monkeypatch):
+    import sys
+
+    from agent_sdk_wrapper.providers.openai_provider import _tool_manifest
+
+    monkeypatch.setattr(sys, "path", ["/ok", "/bad\udcff"])
+    assert json.dumps(_tool_manifest([])["sys_path"]) == '["/ok"]'
+

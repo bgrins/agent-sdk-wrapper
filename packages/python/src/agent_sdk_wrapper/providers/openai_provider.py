@@ -150,6 +150,11 @@ class OpenAIProvider(ProviderAdapter):
             )
         if req.web_tools is not None and caller_keys & _WEB_SEARCH_OVERRIDE_KEYS:
             raise ConfigError("config_overrides for web search conflict with web_tools")
+        thread_config_keys = self._native_config_keys(req)
+        if thread_config_keys & _CREDENTIAL_OVERRIDE_KEYS:
+            raise ConfigError("thread or turn config cannot change how Codex stores credentials")
+        if req.web_tools is not None and thread_config_keys & _WEB_SEARCH_OVERRIDE_KEYS:
+            raise ConfigError("thread or turn config for web search conflicts with web_tools")
         if req.cli_login == "require" and (self._api_key or self._model_provider):
             raise ConfigError(
                 "cli_login='require' uses the stored ChatGPT login; remove api_key and "
@@ -198,6 +203,21 @@ class OpenAIProvider(ProviderAdapter):
         if _API_KEY_ENV in req.env:
             return req.env[_API_KEY_ENV] or None
         return os.environ.get(_API_KEY_ENV) or None
+
+    def _native_config_keys(self, req: RunRequest) -> set[str]:
+        """Dotted keys of any per-thread or per-turn ``config`` the caller passes."""
+
+        keys: set[str] = set()
+        for options in (
+            self._thread_options,
+            self._turn_options,
+            req.extra_options.get("thread_options", {}),
+            req.extra_options.get("turn_options", {}),
+        ):
+            config = options.get("config") if isinstance(options, dict) else None
+            if isinstance(config, dict):
+                keys |= _dotted_keys(config)
+        return keys
 
     def _uses_custom_model_provider(self, req: RunRequest) -> bool:
         thread_options = {
@@ -260,7 +280,10 @@ class OpenAIProvider(ProviderAdapter):
 
         if api_key:
             await codex.login_api_key(api_key)
-        problem = _account_problem(await codex.account(), req.cli_login)
+        # Under deny, a custom provider may not use OpenAI auth, and the ephemeral store
+        # still keeps auth.json out. require always needs the stored ChatGPT login.
+        skip_account = req.cli_login != "require" and self._uses_custom_model_provider(req)
+        problem = None if skip_account else _account_problem(await codex.account(), req.cli_login)
         if problem:
             yield Error(message=problem, error_type="authentication_failed")
             return
@@ -1026,7 +1049,10 @@ def _tool_manifest(callables: list[Any]) -> dict[str, Any]:
     """Describe the tool server: the parent's import path and one entry per tool."""
 
     return {
-        "sys_path": [os.path.abspath(path or os.curdir) for path in sys.path],
+        # JSON cannot carry lone surrogates, which undecodable path bytes become.
+        "sys_path": [
+            os.path.abspath(path or os.curdir) for path in sys.path if _utf8_encodable(path)
+        ],
         "tools": [_tool_entry(fn) for fn in callables],
     }
 
@@ -1560,23 +1586,32 @@ def _strict_schema(tp: type) -> dict[str, Any]:
     return root
 
 
-def _make_strict(node: Any, root: dict[str, Any], where: str) -> None:
+def _make_strict(
+    node: Any, root: dict[str, Any], where: str, inlining: frozenset[str] = frozenset()
+) -> None:
     if not isinstance(node, dict):
         return
     if "$ref" in node:
         if len(node) == 1:
             return
+        ref = node["$ref"]
+        if ref in inlining:
+            # Inlining a recursive reference never ends; its annotations are optional.
+            node.clear()
+            node["$ref"] = ref
+            return
         siblings = {key: value for key, value in node.items() if key != "$ref"}
-        resolved = deepcopy(_resolve_ref(root, node["$ref"]))
+        resolved = deepcopy(_resolve_ref(root, ref))
         node.clear()
         node.update({**resolved, **siblings})
+        inlining = inlining | {ref}
     node.pop("default", None)
     if "oneOf" in node:
         node["anyOf"] = [*node.get("anyOf", []), *node.pop("oneOf")]
         node.pop("discriminator", None)
     if isinstance(node.get("allOf"), list) and len(node["allOf"]) == 1:
         node.update({**node.pop("allOf")[0], **node})
-        _make_strict(node, root, where)
+        _make_strict(node, root, where, inlining)
         return
     if not any(key in node for key in ("type", "enum", "const", "anyOf", "allOf", "$ref")):
         raise ConfigError(
@@ -1585,15 +1620,17 @@ def _make_strict(node: Any, root: dict[str, Any], where: str) -> None:
         )
     for key in ("anyOf", "allOf", "prefixItems"):
         for index, branch in enumerate(node.get(key, [])):
-            _make_strict(branch, root, f"{where}[{index}]")
+            _make_strict(branch, root, f"{where}[{index}]", inlining)
     if isinstance(node.get("items"), dict):
-        _make_strict(node["items"], root, f"{where}[]")
+        _make_strict(node["items"], root, f"{where}[]", inlining)
     types = node.get("type")
     if types == "object" or (isinstance(types, list) and "object" in types):
-        _make_object_strict(node, root, where)
+        _make_object_strict(node, root, where, inlining)
 
 
-def _make_object_strict(node: dict[str, Any], root: dict[str, Any], where: str) -> None:
+def _make_object_strict(
+    node: dict[str, Any], root: dict[str, Any], where: str, inlining: frozenset[str]
+) -> None:
     if (
         "properties" not in node
         or "patternProperties" in node
@@ -1607,7 +1644,7 @@ def _make_object_strict(node: dict[str, Any], root: dict[str, Any], where: str) 
     required = set(node.get("required", []))
     optional: list[str] = []
     for name, prop in properties.items():
-        _make_strict(prop, root, f"{where}.{name}")
+        _make_strict(prop, root, f"{where}.{name}", inlining)
         if name not in required and not _schema_nullable(prop, root):
             properties[name] = {"anyOf": [prop, {"type": "null"}]}
             optional.append(name)
@@ -1617,11 +1654,12 @@ def _make_object_strict(node: dict[str, Any], root: dict[str, Any], where: str) 
         node[_OPTIONAL_MARKER] = optional
 
 
-def _schema_nullable(node: Any, root: dict[str, Any]) -> bool:
+def _schema_nullable(node: Any, root: dict[str, Any], seen: frozenset[str] = frozenset()) -> bool:
     if not isinstance(node, dict):
         return False
     if "$ref" in node:
-        return _schema_nullable(_resolve_ref(root, node["$ref"]), root)
+        ref = node["$ref"]
+        return ref not in seen and _schema_nullable(_resolve_ref(root, ref), root, seen | {ref})
     types = node.get("type")
     if types == "null" or (isinstance(types, list) and "null" in types):
         return True
@@ -1629,7 +1667,7 @@ def _schema_nullable(node: Any, root: dict[str, Any]) -> bool:
         return True
     if None in node.get("enum", ()):
         return True
-    return any(_schema_nullable(branch, root) for branch in node.get("anyOf", ()))
+    return any(_schema_nullable(branch, root, seen) for branch in node.get("anyOf", ()))
 
 
 def _resolve_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
@@ -1707,6 +1745,24 @@ def _matching_object_branch(
 
     exact = [b for b in branches if fits(b) and set(b["properties"]) == set(value)]
     return next(iter(exact or [b for b in branches if fits(b)] or branches), None)
+
+
+def _utf8_encodable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _dotted_keys(config: dict[str, Any], prefix: str = "") -> set[str]:
+    keys: set[str] = set()
+    for key, value in config.items():
+        name = f"{prefix}{key}"
+        keys.add(name)
+        if isinstance(value, dict):
+            keys |= _dotted_keys(value, f"{name}.")
+    return keys
 
 
 def _override_keys(config: Any) -> set[str]:
