@@ -352,10 +352,10 @@ for (const progress of ["normalized", "terminal"] as const)
       assert.equal(result.ended_reason, "max_turns");
     }
   });
-test("retryable error events retry after non-progress frames from the original session", async () => {
+test("retryable error events retry after non-progress frames of a new session", async () => {
   const seen: (string | undefined)[] = [];
   const agent = new Agent(
-    { provider: "openai", maxRetries: 1, retryDelayMs: 0, sessionId: "orig" },
+    { provider: "openai", maxRetries: 1, retryDelayMs: 0 },
     {
       openai: fake(async function* (req, context) {
         seen.push(req.sessionId);
@@ -380,7 +380,7 @@ test("retryable error events retry after non-progress frames from the original s
     },
   );
   const result = await agent.run("retry");
-  assert.deepEqual(seen, ["orig", "orig"]);
+  assert.deepEqual(seen, [undefined, undefined]);
   assert.equal(result.status, "success");
   assert.equal(result.usage?.input_tokens, 5);
   assert.deepEqual(
@@ -675,5 +675,33 @@ test("a later error shows a held retryable error and prevents a retry", async ()
       .filter((event): event is ErrorEvent => event.type === "error")
       .map((event) => event.error_type),
     ["transient_api_error", "permission_denied"],
+  );
+});
+test("a resumed session is not retried once it has started", async () => {
+  let calls = 0;
+  const agent = new Agent(
+    { provider: "openai", maxRetries: 2, retryDelayMs: 0, sessionId: "orig" },
+    {
+      openai: fake(async function* () {
+        calls++;
+        yield { type: "session_info", id: "orig" };
+        yield {
+          type: "error",
+          message: "overloaded",
+          error_type: "transient_api_error",
+          retryable: true,
+        };
+      }),
+    },
+  );
+  const run = await agent.run("resume");
+  assert.equal(calls, 1);
+  assert.equal(run.error, "overloaded");
+});
+test("any upper-case signal name marks a runtime as terminated", () => {
+  assert.ok(
+    nativeError(
+      new Error("Codex Exec exited with signal SIGXFSZ: stream disconnected"),
+    ) instanceof ProcessTerminatedError,
   );
 });

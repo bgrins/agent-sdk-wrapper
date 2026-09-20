@@ -20,6 +20,7 @@ export type {
 } from "./providers/options.js";
 export type {
   AgentDefaults,
+  CliLogin,
   Effort,
   ProviderInput,
   ResolvedRequest,

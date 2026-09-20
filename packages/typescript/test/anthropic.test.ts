@@ -411,11 +411,12 @@ test("Claude retractions fail explicitly through either native notification", as
     assert.equal(run.status, "failure");
     assert.equal(run.ended_reason, "error");
     assert.match(run.error ?? "", /retractions are not implemented/);
-    const error = run.events.at(-2)?.event;
-    assert.equal(
-      error?.type === "error" && error.error_type,
-      "provider_protocol_error",
+    assert.deepEqual(
+      errorsOf(run).map((event) => event.error_type),
+      ["provider_protocol_error"],
     );
+    // The retracted run was still billed; its usage stays.
+    assert.ok(run.usage);
     assert.ok(raw.length >= 2);
     assert.equal(captured.length, 1);
     assert.equal(closed(), 1);
@@ -887,4 +888,88 @@ test("Claude max_output_tokens is not retried as a dropped connection", async ()
     errorsOf(run).map((event) => [event.error_type, event.retryable]),
     [["execution_error", false]],
   );
+});
+test("Claude status frames do not split one message's text", async () => {
+  const limit: SDKMessage = {
+    type: "rate_limit_event",
+    rate_limit_info: { status: "allowed_warning" },
+    uuid: randomUUID(),
+    session_id: "claude-session",
+  };
+  const run = await harness([
+    assistant([textBlock("The answer ")], {}, { id: "m1" }),
+    limit,
+    assistant([textBlock("is 42.")], {}, { id: "m1" }),
+    result(),
+  ]).agent.run("split");
+  assert.equal(run.final_text, "The answer is 42.");
+});
+test("Claude provider flags count only when the CLI enables them", async () => {
+  const env = (value: string): AgentDefaults => ({
+    providerOptions: {
+      provider: "anthropic",
+      options: { env: { CLAUDE_CODE_USE_VERTEX: value } },
+    },
+  });
+  assert.equal(
+    (await harness([result()], env("on")).agent.run("on")).status,
+    "success",
+  );
+  await assert.rejects(
+    harness([result()], env("no")).agent.run("no"),
+    (error) =>
+      error instanceof ProviderError &&
+      error.errorType === "authentication_failed",
+  );
+});
+test("Claude keeps synthetic API-error text as a warning", async () => {
+  const run = await harness([
+    assistant(
+      [textBlock("API Error: Rate limit reached")],
+      { error: "rate_limit" },
+      { model: "<synthetic>" },
+    ),
+    assistant([textBlock("recovered")], {}, { id: "m2" }),
+    result(),
+  ]).agent.run("recover");
+  assert.equal(run.final_text, "recovered");
+  assert.ok(
+    run.events.some(
+      (env) =>
+        env.event.type === "warning" &&
+        env.event.message === "API Error: Rate limit reached",
+    ),
+  );
+});
+test("Claude strips and rejects every login-token variable", async () => {
+  const tokens = [
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+  ];
+  for (const name of tokens) process.env[name] = "inherited";
+  try {
+    const inherited = harness([result()]);
+    await inherited.agent.run("inherited");
+    const env = inherited.captured[0]?.env ?? {};
+    assert.deepEqual(
+      tokens.filter((name) => name in env),
+      [],
+    );
+    assert.equal(inherited.captured[0]?.settingSources?.length, 0);
+  } finally {
+    for (const name of tokens) delete process.env[name];
+  }
+  for (const name of tokens)
+    assert.throws(
+      () =>
+        harness([], {
+          providerOptions: {
+            provider: "anthropic",
+            options: { env: { ANTHROPIC_API_KEY: "k", [name]: "t" } },
+          },
+        }),
+      ConfigError,
+    );
 });

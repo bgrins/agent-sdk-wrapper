@@ -30,9 +30,10 @@ import {
 } from "./common.js";
 
 // The CLI ranks these above every stored login (claude.ai, OAuth token, Console profile).
-const credentialEnv = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
+const apiKeyEnv = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+// The CLI enables CLAUDE_CODE_USE_* provider flags only for these values.
+const trueValues = new Set(["1", "true", "yes", "on"]);
+const providerFlagEnv = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
@@ -41,11 +42,18 @@ const credentialEnv = [
   "CLAUDE_CODE_USE_MANTLE",
   "CLAUDE_CODE_USE_GATEWAY",
 ];
-const oauthTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN";
+// claude.ai login tokens the CLI reads from the env.
+const loginTokenEnv = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+];
 function withoutLoginToken(
   env: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
-  const { [oauthTokenEnv]: _login, ...rest } = env;
+  const rest = { ...env };
+  for (const name of loginTokenEnv) delete rest[name];
   return rest;
 }
 type NativeQuery = AsyncIterable<SDKMessage> & { close(): void };
@@ -169,9 +177,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       throw new ConfigError(
         "cliLogin 'require' is not supported for Claude; use an API key, auth token or cloud-provider credentials",
       );
-    if (opts?.env?.[oauthTokenEnv])
+    const loginTokens = loginTokenEnv.filter((name) => opts?.env?.[name]);
+    if (loginTokens.length)
       throw new ConfigError(
-        `anthropic env ${oauthTokenEnv} is a claude.ai login token; Claude runs use API-key or cloud-provider credentials`,
+        `anthropic env ${loginTokens.join(", ")} carry claude.ai login tokens; Claude runs use API-key or cloud-provider credentials`,
       );
   }
   async ensureAvailable(req: ResolvedRequest): Promise<void> {
@@ -180,9 +189,9 @@ export class AnthropicAdapter implements ProviderAdapter {
         ? req.providerOptions.options?.env
         : undefined) ?? process.env;
     if (
-      !credentialEnv.some(
-        (name) =>
-          !["", "0", "false"].includes((env[name] ?? "").trim().toLowerCase()),
+      !apiKeyEnv.some((name) => (env[name] ?? "").trim()) &&
+      !providerFlagEnv.some((name) =>
+        trueValues.has((env[name] ?? "").trim().toLowerCase()),
       )
     )
       throw new ProviderError(
@@ -246,6 +255,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     let seenText = false;
     let seenThinking = false;
     let interrupted = false;
+    let retracted = false;
     let assistantError: SDKAssistantMessageError | undefined;
     let session: string | undefined;
     let sessionModel: string | undefined;
@@ -285,18 +295,32 @@ export class AnthropicAdapter implements ProviderAdapter {
         const raw = req.includeRaw
           ? { raw: message as unknown as Record<string, unknown> }
           : {};
+        // After a retraction only the result's usage is still meaningful.
+        if (retracted && message.type !== "result") continue;
         // The v1 contract cannot retract emitted text or tool events.
         if (
           (message.type === "assistant" && message.supersedes?.length) ||
           (message.type === "system" &&
             message.subtype === "model_refusal_fallback" &&
             message.retracted_message_uuids?.length)
-        )
-          throw new ProviderProtocolError(
-            "Claude message retractions are not implemented in the v1 event contract; partial output must not be treated as a completed answer",
-          );
+        ) {
+          retracted = true;
+          pending = undefined;
+          yield {
+            type: "error",
+            message:
+              "Claude message retractions are not implemented in the v1 event contract; partial output must not be treated as a completed answer",
+            error_type: "provider_protocol_error",
+            retryable: false,
+            ...raw,
+          };
+          continue;
+        }
+        // Status frames can arrive between the frames of one message.
         if (
           pending &&
+          message.type !== "system" &&
+          message.type !== "rate_limit_event" &&
           (message.type !== "assistant" ||
             message.parent_tool_use_id ||
             message.message.id !== pending.id)
@@ -342,6 +366,10 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (message.error || message.message.model === "<synthetic>") {
             assistantError = message.error;
             yield* flush();
+            const text = message.message.content
+              .map((block) => (block.type === "text" ? block.text : ""))
+              .join("");
+            if (text) yield { type: "warning", message: text, ...raw };
             continue;
           }
           assistantError = undefined;
@@ -404,6 +432,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (usage.usage.reasoning_output_tokens > 0 && !seenThinking)
             yield { type: "thinking", text: "", ...raw };
           yield usage;
+          if (retracted) return;
           const error = interrupted
             ? cancelled()
             : resultError(message, assistantError);

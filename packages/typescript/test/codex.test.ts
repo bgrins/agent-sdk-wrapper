@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -459,8 +459,10 @@ test("Codex cliLogin require keeps API keys out of the child and skips the ephem
   assert.deepEqual(clients[0]?.env, { HOME: "/h" });
   assert.deepEqual(clients[0]?.config, { model_reasoning_summary: "auto" });
 });
-test("Codex cliLogin require accepts only a stored ChatGPT login", async () => {
-  const script = join(mkdtempSync(join(tmpdir(), "codex-login-")), "codex");
+test("Codex cliLogin require accepts only a stored ChatGPT login", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-login-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const script = join(dir, "codex");
   writeFileSync(
     script,
     '#!/bin/sh\n[ "$1 $2" = "login status" ] && echo "$FAKE_LOGIN" >&2\n',
@@ -483,4 +485,14 @@ test("Codex cliLogin require accepts only a stored ChatGPT login", async () => {
         error instanceof ProviderError &&
         error.errorType === "authentication_failed",
     );
+});
+test("Codex cliLogin deny keeps an access-token login out of the child", async () => {
+  const { agent, clients } = harness([completed], {
+    providerOptions: {
+      provider: "openai",
+      client: { apiKey: "k", env: { CODEX_ACCESS_TOKEN: "token", HOME: "/h" } },
+    },
+  });
+  await agent.run("deny");
+  assert.deepEqual(clients[0]?.env, { HOME: "/h" });
 });

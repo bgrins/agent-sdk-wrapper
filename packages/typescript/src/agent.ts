@@ -162,12 +162,17 @@ export class Agent {
       let failure: ErrorEvent | undefined;
       for (let attempt = 0; ; attempt++) {
         let progressed = false;
+        let sessionSeen = false;
         let held: ErrorEvent | undefined;
         let threw = false;
         let thrown: unknown;
         failure = undefined;
+        // A resumed session already holds this prompt; retrying would repeat it.
         const canRetry = () =>
-          !progressed && attempt < req.maxRetries && !req.signal?.aborted;
+          !progressed &&
+          !(req.sessionId && sessionSeen) &&
+          attempt < req.maxRetries &&
+          !req.signal?.aborted;
         try {
           req.signal?.throwIfAborted();
           for await (const event of adapter.stream(req, {
@@ -191,6 +196,7 @@ export class Agent {
               failure ??= event;
             }
             if (event.type === "session_info") {
+              sessionSeen = true;
               this.sessions.set(req.provider, event.id);
               this.latestSession = event.id;
             }
