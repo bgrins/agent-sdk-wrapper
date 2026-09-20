@@ -302,6 +302,11 @@ class Agent:
             or not (timeout > 0 and math.isfinite(timeout))
         ):
             raise ConfigError(f"timeout must be a positive number of seconds, got {timeout!r}")
+        max_turns = pick("max_turns", self.max_turns)
+        if max_turns is not None and (
+            isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns < 1
+        ):
+            raise ConfigError(f"max_turns must be a positive integer, got {max_turns!r}")
         max_retries = pick("max_retries", self.max_retries)
         if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
             raise ConfigError(f"max_retries must be a non-negative integer, got {max_retries!r}")
@@ -317,7 +322,7 @@ class Agent:
             ),
             mcp_servers=list(pick("mcp_servers", self.mcp_servers)),
             output_schema=pick("output_schema", self.output_schema),
-            max_turns=pick("max_turns", self.max_turns),
+            max_turns=max_turns,
             effort=normalize_effort_for_provider(
                 self.provider, pick("effort", self.effort)
             ),

@@ -107,10 +107,18 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
             default = ... if param.default is inspect.Parameter.empty else param.default
             field = Field(default, alias=param.name)
         fields[f"p{index}"] = (annotation, field)
+    # A **kwargs tool receives the keys it doesn't name, as calling it directly would.
+    extra = "allow" if _takes_extra_keywords(fn) else "ignore"
     return create_model(
         f"{tool_name(fn)}_arguments",
-        __config__=ConfigDict(arbitrary_types_allowed=True),
+        __config__=ConfigDict(arbitrary_types_allowed=True, extra=extra),
         **fields,
+    )
+
+
+def _takes_extra_keywords(fn: Callable[..., Any]) -> bool:
+    return any(
+        param.kind is param.VAR_KEYWORD for param in inspect.signature(fn).parameters.values()
     )
 
 
@@ -152,6 +160,7 @@ def _make_anthropic_handler(fn: Callable[..., Any]):
         try:
             validated = model.model_validate(args)
             kwargs = {name: getattr(validated, f"p{i}") for i, name in enumerate(names)}
+            kwargs.update(validated.model_extra or {})
         except ValidationError as exc:
             return {
                 "content": [{"type": "text", "text": f"Error: invalid arguments: {exc}"}],

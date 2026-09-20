@@ -1223,3 +1223,10 @@ def test_artifact_json_files_are_replaced_atomically(tmp_path):
 
     assert torn_reads == []
     assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
+
+
+@pytest.mark.parametrize("max_turns", [0, True, 2.5, float("nan")])
+def test_run_rejects_non_positive_integer_max_turns(max_turns):
+    with pytest.raises(ConfigError, match="max_turns"):
+        Agent(provider="openai").stream("x", max_turns=max_turns)
+

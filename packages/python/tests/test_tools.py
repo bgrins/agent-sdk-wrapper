@@ -304,3 +304,13 @@ def test_field_defaults_and_titled_default_values_survive():
     }
     assert schema["properties"]["meta"]["default"] == {"title": "x"}
     assert _call(fn, {})["content"][0]["text"] == "5 {'title': 'x'}"
+
+
+def test_keyword_catch_all_tools_receive_unnamed_arguments():
+    def search(query: str, **filters: str) -> str:
+        return f"{query} {filters}"
+
+    assert json_schema_for(search)["additionalProperties"] is True
+    out = _call(search, {"query": "q", "lang": "en"})
+    assert out["content"][0]["text"] == "q {'lang': 'en'}"
+
