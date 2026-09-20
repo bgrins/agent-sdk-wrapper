@@ -982,14 +982,15 @@ def test_stream_timeout_does_not_cancel_consumer(monkeypatch, tmp_path):
 
     install_fake_providers(monkeypatch, events=slow)
     trace_file = tmp_path / "trace.jsonl"
-    agent = Agent(provider="openai", timeout=0.05, trace_file=trace_file)
+    # Margins leave room for a loaded machine: startup < deadline < consumer sleep.
+    agent = Agent(provider="openai", timeout=0.5, trace_file=trace_file)
 
     async def consume() -> tuple[list[str], int]:
         seen = []
         async for env in agent.stream("hi"):
             seen.append(env.event.type)
             if env.event.type == "text":
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1.0)
                 seen.append("consumer done")
         return seen, asyncio.current_task().cancelling()
 

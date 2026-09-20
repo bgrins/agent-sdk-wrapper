@@ -307,6 +307,9 @@ async def _run(args: argparse.Namespace) -> int:
             if _stream_event_failed(env.event):
                 rc = 1
             if isinstance(env.event, Text):
+                # Each Text is a whole assistant message; keep them apart.
+                if final_text_parts:
+                    sys.stdout.write("\n")
                 sys.stdout.write(env.event.text)
                 sys.stdout.flush()
                 final_text_parts.append(env.event.text)
@@ -420,7 +423,7 @@ def _config_str(config: dict[str, Any], key: str) -> str | None:
 
 
 def _config_optional_int(config: dict[str, Any], key: str) -> int | None:
-    if key not in config:
+    if config.get(key) is None:
         return None
     return _config_int(config, key, 0)
 

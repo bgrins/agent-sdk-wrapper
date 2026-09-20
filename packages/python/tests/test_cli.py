@@ -556,3 +556,36 @@ def test_run_setting_source_flag_maps_to_request(monkeypatch, capsys):
     capsys.readouterr()
 
     assert [r.setting_sources for r in seen_requests] == [None, ["project", "user"]]
+
+
+def test_stream_separates_assistant_messages(monkeypatch, capsys):
+    class TwoMessages(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            yield Text(text="Checking the shell.")
+            yield Text(text="49")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", TwoMessages)
+
+    assert cli.main(["run", "--provider", "openai", "--prompt", "x", "--stream"]) == 0
+    assert capsys.readouterr().out == "Checking the shell.\n49\n"
+
+
+def test_run_treats_a_null_max_turns_config_as_no_limit(monkeypatch, tmp_path, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    config = tmp_path / "agent.json"
+    config.write_text('{"provider": "codex", "max_turns": null}', encoding="utf-8")
+
+    assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 0
+    capsys.readouterr()
+    assert seen_requests[0].max_turns is None

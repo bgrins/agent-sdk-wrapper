@@ -1032,9 +1032,10 @@ def test_anthropic_without_credentials_fails_before_launching(monkeypatch):
 
     from agent_sdk_wrapper import Agent, ProviderNotAvailableError
     from agent_sdk_wrapper.events import Error
+    from agent_sdk_wrapper.providers.anthropic_provider import _API_KEY_ENV, _PROVIDER_FLAG_ENV
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    for name in (*_API_KEY_ENV, *_PROVIDER_FLAG_ENV):
+        monkeypatch.delenv(name, raising=False)
 
     def fail_query(**kwargs):
         raise AssertionError("the runtime must not start")

@@ -139,27 +139,24 @@ def test_invalid_arguments_return_a_tool_error_without_calling():
 
 async def test_sync_tool_runs_off_the_event_loop():
     import asyncio
-    import time
+    import threading
 
     from agent_sdk_wrapper.tools import _make_anthropic_handler
 
-    def slow() -> str:
-        time.sleep(0.3)
-        return "done"
+    loop_ran = threading.Event()
 
-    ticks = 0
+    def blocks_until_the_loop_runs() -> str:
+        # On the event loop thread this would deadlock: the loop could never set the event.
+        return "done" if loop_ran.wait(timeout=5) else "loop blocked"
 
-    async def tick():
-        nonlocal ticks
-        while True:
-            await asyncio.sleep(0.01)
-            ticks += 1
+    async def mark_loop_running():
+        await asyncio.sleep(0)
+        loop_ran.set()
 
-    ticker = asyncio.create_task(tick())
-    out = await _make_anthropic_handler(slow)({})
-    ticker.cancel()
+    marker = asyncio.create_task(mark_loop_running())
+    out = await _make_anthropic_handler(blocks_until_the_loop_runs)({})
+    await marker
     assert out["content"][0]["text"] == "done"
-    assert ticks >= 10
 
 
 async def test_codex_tool_server_script_completes_an_mcp_handshake(tmp_path, monkeypatch):

@@ -81,7 +81,7 @@ class FlakyProvider(base.ProviderAdapter):
         yield Text(text="ok")
 
 
-def test_run_retries_transient_then_succeeds(monkeypatch):
+def test_run_retries_transient_then_succeeds(monkeypatch, no_backoff):
     monkeypatch.setattr(op_mod, "OpenAIProvider", FlakyProvider)
     FlakyProvider.calls = 0
     FlakyProvider.fail_n = 2
@@ -94,7 +94,7 @@ def test_run_retries_transient_then_succeeds(monkeypatch):
     assert result.final_text == "ok"
 
 
-def test_run_gives_up_after_max_retries(monkeypatch):
+def test_run_gives_up_after_max_retries(monkeypatch, no_backoff):
     monkeypatch.setattr(op_mod, "OpenAIProvider", FlakyProvider)
     FlakyProvider.calls = 0
     FlakyProvider.fail_n = 99
@@ -312,19 +312,26 @@ def test_process_terminated_is_recorded_then_raised(monkeypatch, tmp_path, mode)
         assert isinstance(streamed[-1].event, RunFinished)
 
 
-async def test_provider_cleanup_error_at_a_deadline_is_logged_not_escaped(monkeypatch):
+async def test_provider_cleanup_error_at_a_deadline_is_logged_not_escaped(
+    monkeypatch, caplog
+):
+    answered = asyncio.Event()
+
     async def play(req):
         try:
             yield Text(text="answer")
+            answered.set()
             await asyncio.sleep(10)
         finally:
             raise RuntimeError("cleanup broke")
 
     install_fake_providers(monkeypatch, events=play)
-    result = await Agent(provider="openai", timeout=0.05).run("x")
+    result = await Agent(provider="openai", timeout=0.5).run("x")
 
+    assert answered.is_set(), "the deadline must fall after the first event"
     assert result.status == RunStatus.TIMEOUT
-    assert [env.event.type for env in result.events][-2:] == ["error", "run_finished"]
+    assert [env.event.type for env in result.events][-3:] == ["text", "error", "run_finished"]
+    assert "cleanup broke" in caplog.text
 
 
 async def test_closing_a_stream_with_a_held_retryable_error_is_cancelled(
