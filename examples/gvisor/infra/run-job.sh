@@ -63,7 +63,8 @@ trap 'echo "Job deadline exceeded" >&2; exit 124' USR1
 wait "$cli"
 cli=
 # Sandboxed processes can write to worker output: pass only printable ASCII to the terminal.
-printable() { LC_ALL=C tr -cd '\11\12\40-\176'; }
+# Line-buffered, so output survives if a timeout kills the job before it exits.
+printable() { LC_ALL=C perl -pe 'BEGIN { $| = 1 } s/[^\t\n\x20-\x7e]//g'; }
 "${compose[@]}" --progress plain run --rm -T --no-deps --name "$COMPOSE_PROJECT_NAME-agent" "$@" \
   > >(printable) 2> >(printable >&2) & cli=$!
 wait "$cli"
