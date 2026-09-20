@@ -219,8 +219,6 @@ class Agent:
         self.raise_on_error = raise_on_error
 
         self._provider = build_provider(self.provider, **(provider_options or {}))
-        self._active_runs = 0
-        self._continuing_run_active = False
 
     def check_runtime(self) -> None:
         """Validate the request before checking runtime availability."""
@@ -349,7 +347,6 @@ class Agent:
 
     async def _events(self, run: _Run) -> AsyncIterator[EventEnvelope]:
         req = run.req
-        self._acquire(req)
         run_id = uuid.uuid4().hex
         req.run_id = run_id
         if not run.session_overridden:
@@ -372,13 +369,6 @@ class Agent:
         writer: TraceWriter | None = None
         artifacts_dir: Path | None = None
         trace_path = run.trace_path
-        released = False
-
-        def release() -> None:
-            nonlocal released
-            if not released:
-                released = True
-                self._release(req)
 
         def record(event: AgentEvent) -> EventEnvelope:
             nonlocal status, ended_reason, error_msg
@@ -413,8 +403,6 @@ class Agent:
                 RunFinished(status=status, duration_ms=duration_ms, ended_reason=ended_reason)
             )
             finished = True
-            # The run is over even if the consumer never closes the stream.
-            release()
             return env
 
         def hold_as_warnings() -> None:
@@ -452,9 +440,9 @@ class Agent:
                 while True:
                     req.attempt = attempt
                     req.session_id = original_session_id
-                    progressed = failed = False
+                    progressed = failed = reported = session_seen = False
                     error: Exception | None = None
-                    native = self._provider.stream(req)
+                    native = _provider_events(self._provider, req)
                     try:
                         while True:
                             try:
@@ -466,8 +454,11 @@ class Agent:
                                 break
                             if ev is _END:
                                 break
-                            if isinstance(ev, Error) and ev.retryable and not (
-                                progressed or failed
+                            if (
+                                isinstance(ev, Error)
+                                and ev.retryable
+                                and not (progressed or failed)
+                                and attempt < req.max_retries
                             ):
                                 held.append(ev)
                                 continue
@@ -477,6 +468,8 @@ class Agent:
                                     yield env
                             progressed = progressed or isinstance(ev, _PROGRESS_EVENTS)
                             failed = failed or isinstance(ev, Error)
+                            reported = reported or isinstance(ev, Error)
+                            session_seen = session_seen or isinstance(ev, SessionInfo)
                             yield record(ev)
                     except BaseException:
                         # The original failure wins; never yield while being closed.
@@ -488,8 +481,15 @@ class Agent:
                     if error is None:
                         error = cleanup_error
 
-                    retryable = bool(held) or isinstance(error, TransientError)
-                    if retryable and not (progressed or failed) and attempt < req.max_retries:
+                    transient = isinstance(error, TransientError)
+                    retryable = (bool(held) or transient) and (error is None or transient)
+                    # A resumed session already holds this prompt; retrying would repeat it.
+                    resumed = original_session_id is not None and session_seen
+                    if (
+                        retryable
+                        and not (progressed or failed or resumed)
+                        and attempt < req.max_retries
+                    ):
                         reason = held[0].message if held else str(error)
                         held.clear()
                         delay = _backoff(attempt)
@@ -506,10 +506,10 @@ class Agent:
                         continue
 
                     if held:
-                        failed = True
                         for env in flush_held():
                             yield env
-                    if error is not None and not failed:
+                    # The provider's own terminal error wins over a later exception.
+                    if error is not None and not reported:
                         yield record(_error_event(error))
                     break
             except _DeadlineExceeded:
@@ -546,53 +546,35 @@ class Agent:
                 finish()
             raise
         finally:
-            try:
-                if writer is not None:
-                    writer.close()
-                    if not finished:
-                        duration_ms = _elapsed_ms(start)
-                    run.result = state.to_result(
+            if writer is not None:
+                writer.close()
+                if not finished:
+                    duration_ms = _elapsed_ms(start)
+                run.result = state.to_result(
+                    run_id=run_id,
+                    provider=req.provider,
+                    model=req.model,
+                    status=status,
+                    ended_reason=ended_reason,
+                    events=result_events,
+                    duration_ms=duration_ms,
+                    artifacts_dir=_as_str(artifacts_dir),
+                    error_msg=error_msg,
+                )
+                if artifacts_dir is not None:
+                    result_path = write_result_artifact(artifacts_dir, run.result)
+                    write_manifest(
+                        artifacts_dir,
                         run_id=run_id,
                         provider=req.provider,
                         model=req.model,
-                        status=status,
-                        ended_reason=ended_reason,
-                        events=result_events,
+                        status=status.value,
+                        trace_file=trace_path,
+                        result_file=result_path,
                         duration_ms=duration_ms,
-                        artifacts_dir=_as_str(artifacts_dir),
-                        error_msg=error_msg,
+                        error=error_msg,
+                        extra_files=collect_side_files(artifacts_dir),
                     )
-                    if artifacts_dir is not None:
-                        result_path = write_result_artifact(artifacts_dir, run.result)
-                        write_manifest(
-                            artifacts_dir,
-                            run_id=run_id,
-                            provider=req.provider,
-                            model=req.model,
-                            status=status.value,
-                            trace_file=trace_path,
-                            result_file=result_path,
-                            duration_ms=duration_ms,
-                            error=error_msg,
-                            extra_files=collect_side_files(artifacts_dir),
-                        )
-            finally:
-                release()
-
-    def _acquire(self, req: RunRequest) -> None:
-        # continue_session runs read and write self.session_id.
-        if self._active_runs and (req.continue_session or self._continuing_run_active):
-            raise ConfigError(
-                "continue_session allows one active run per Agent; finish or aclose() "
-                "the previous stream, or use separate Agent instances for concurrent runs"
-            )
-        self._active_runs += 1
-        self._continuing_run_active = req.continue_session
-
-    def _release(self, req: RunRequest) -> None:
-        self._active_runs -= 1
-        if req.continue_session:
-            self._continuing_run_active = False
 
 
 class _SeqGen:
@@ -614,6 +596,19 @@ def _backoff(attempt: int, *, base: float = 0.5, cap: float = 8.0) -> float:
 
 def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+async def _provider_events(provider: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
+    """Iterate an adapter so errors raised by ``stream()`` itself become run failures."""
+
+    stream = provider.stream(req)
+    try:
+        async for event in stream:
+            yield event
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 async def _close_provider(

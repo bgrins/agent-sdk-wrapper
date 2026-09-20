@@ -1077,31 +1077,20 @@ def test_late_config_error_is_recorded_then_raised(monkeypatch, tmp_path):
     assert events[-2]["error_type"] == "invalid_request"
 
 
-def test_concurrent_continue_session_runs_are_rejected(monkeypatch):
+def test_an_abandoned_stream_does_not_block_the_next_run(monkeypatch):
     import asyncio
 
-    release = asyncio.Event()
-
-    async def waits(req):
-        yield SessionInfo(id="s1")
-        await release.wait()
-        yield Text(text="done")
-
-    install_fake_providers(monkeypatch, events=waits)
+    install_fake_providers(monkeypatch, events=[SessionInfo(id="s1"), Text(text="done")])
     agent = Agent(provider="openai", continue_session=True)
 
-    async def scenario() -> list[str]:
-        first = asyncio.create_task(agent.run("one"))
-        await asyncio.sleep(0.01)
-        with pytest.raises(ConfigError, match="continue_session"):
-            await asyncio.wait_for(agent.run("two"), 1)
-        with pytest.raises(ConfigError, match="continue_session"):
-            await asyncio.wait_for(agent.run("three", continue_session=False), 1)
-        release.set()
-        results = [await first, await agent.run("four")]
-        return [result.final_text for result in results]
+    async def scenario():
+        stream = agent.stream("one")
+        async for _ in stream:
+            break
+        return await agent.run("two")
 
-    assert asyncio.run(scenario()) == ["done", "done"]
+    result = asyncio.run(scenario())
+    assert result.ok and result.final_text == "done"
 
 
 def test_concurrent_runs_without_continue_session_are_allowed(monkeypatch):

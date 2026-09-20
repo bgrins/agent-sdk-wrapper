@@ -142,12 +142,12 @@ def test_retryable_error_event_is_replaced_by_warning(monkeypatch, no_backoff):
         [SessionInfo(id="good-thread"), Text(text="ok")],
     )
     install_fake_providers(monkeypatch, events=play)
-    agent = Agent(provider="openai", session_id="original", continue_session=True)
+    agent = Agent(provider="openai", continue_session=True)
 
     result = asyncio.run(agent.run("hi"))
 
     assert result.ok
-    assert seen == [(0, "original"), (1, "original")]
+    assert seen == [(0, None), (1, None)]
     assert event_types(result.events) == [
         "run_started",
         "session_info",
@@ -161,6 +161,45 @@ def test_retryable_error_event_is_replaced_by_warning(monkeypatch, no_backoff):
     assert result.usage is not None and result.usage.input_tokens == 5
     assert result.cost_usd == pytest.approx(0.01)
     assert result.session_id == agent.session_id == "good-thread"
+
+
+def test_a_resumed_session_is_not_retried_once_it_started(monkeypatch, no_backoff):
+    overloaded = Error(message="overloaded", error_type="transient_api_error", retryable=True)
+    play, seen = attempts([SessionInfo(id="original"), overloaded], [Text(text="again")])
+    install_fake_providers(monkeypatch, events=play)
+
+    result = asyncio.run(Agent(provider="openai", session_id="original").run("hi"))
+
+    assert len(seen) == 1
+    assert result.error == "overloaded"
+
+
+def test_a_fatal_exception_after_a_held_error_is_recorded_not_retried(monkeypatch, no_backoff):
+    from agent_sdk_wrapper import ProviderNotAvailableError
+
+    overloaded = Error(message="overloaded", error_type="transient_api_error", retryable=True)
+    play, seen = attempts([overloaded, ProviderNotAvailableError("runtime crashed")], [])
+    install_fake_providers(monkeypatch, events=play)
+
+    result = asyncio.run(Agent(provider="openai", max_retries=2).run("hi"))
+
+    assert len(seen) == 1
+    errors = [env.event for env in result.events if isinstance(env.event, Error)]
+    assert [e.error_type for e in errors] == ["transient_api_error", "runtime_unavailable"]
+
+
+def test_a_stream_method_that_raises_is_a_failed_run(monkeypatch):
+    from agent_sdk_wrapper import FakeProvider
+
+    class Broken(FakeProvider):
+        def stream(self, req):
+            raise RuntimeError("adapter bug")
+
+    install_fake_providers(monkeypatch, fake=Broken())
+    result = asyncio.run(Agent(provider="openai").run("hi"))
+
+    assert result.status == RunStatus.FAILURE
+    assert "adapter bug" in (result.error or "")
 
 
 def test_retryable_error_is_emitted_when_retries_are_exhausted(monkeypatch, no_backoff):
@@ -286,16 +325,6 @@ async def test_provider_cleanup_error_at_a_deadline_is_logged_not_escaped(monkey
 
     assert result.status == RunStatus.TIMEOUT
     assert [env.event.type for env in result.events][-2:] == ["error", "run_finished"]
-
-
-async def test_finished_stream_releases_continue_session_without_aclose(monkeypatch):
-    install_fake_providers(monkeypatch, events=[SessionInfo(id="s1"), Text(text="hi")])
-    agent = Agent(provider="openai", continue_session=True)
-
-    async for env in agent.stream("first"):
-        if env.event.type == "run_finished":
-            break
-    assert (await agent.run("second")).ok
 
 
 async def test_closing_a_stream_with_a_held_retryable_error_is_cancelled(
