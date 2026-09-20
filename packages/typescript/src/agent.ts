@@ -173,6 +173,14 @@ export class Agent {
           for await (const event of adapter.stream(req, {
             onNativeEvent: (native) => req.onProviderEvent?.(native),
           })) {
+            // Progress or another error rules out a retry; show the held error first.
+            if (
+              held &&
+              (progressEvents.has(event.type) || event.type === "error")
+            ) {
+              yield frame(held);
+              held = undefined;
+            }
             if (progressEvents.has(event.type)) progressed = true;
             if (event.type === "error") {
               // Hold a retryable error until the attempt ends; a retry replaces it with a warning.

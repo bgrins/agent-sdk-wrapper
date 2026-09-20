@@ -12,8 +12,14 @@ import {
   ConfigError,
   ProviderError,
   RuntimeUnavailableError,
+  TransientError,
 } from "../src/index.js";
-import type { AgentDefaults, AnthropicNativeOptions } from "../src/index.js";
+import type {
+  AgentDefaults,
+  AnthropicNativeOptions,
+  ErrorEvent,
+  RunResult,
+} from "../src/index.js";
 import { AnthropicAdapter } from "../src/providers/anthropic.js";
 
 // Adapters refuse to launch without API credentials; these tests fake the runtime.
@@ -670,6 +676,7 @@ test("Claude child env disables background tasks and pins effort without replaci
   assert.deepEqual(explicit.captured[0]?.env, {
     ANTHROPIC_API_KEY: "k",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+    CLAUDE_CODE_EFFORT_LEVEL: "",
   });
   const same = harness([result()], {
     effort: "high",
@@ -812,4 +819,72 @@ test("Claude never uses a stored login: require and login tokens are rejected, a
   } finally {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   }
+});
+const errorsOf = (run: RunResult) =>
+  run.events
+    .map((env) => env.event)
+    .filter((event): event is ErrorEvent => event.type === "error");
+test("Claude keeps a finished answer when the runtime then fails, and does not retry it", async () => {
+  const { agent, captured } = harness(
+    [assistant([textBlock("final answer")])],
+    { maxRetries: 2, retryDelayMs: 0 },
+    new TransientError("overloaded"),
+  );
+  const run = await agent.run("answer");
+  assert.equal(run.final_text, "final answer");
+  assert.equal(captured.length, 1);
+});
+test("Claude hook stops and deferred tools end successful runs", async () => {
+  for (const reason of [
+    "hook_stopped",
+    "stop_hook_prevented",
+    "tool_deferred",
+  ] as const) {
+    const run = await harness([
+      result({
+        terminal_reason: reason,
+        result: "I updated the billing page.",
+      }),
+    ]).agent.run("hook");
+    assert.equal(run.status, "success", reason);
+  }
+});
+test("Claude accepts every cloud-provider flag as credentials", async () => {
+  for (const flag of [
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_GATEWAY",
+  ]) {
+    const run = await harness([result()], {
+      providerOptions: {
+        provider: "anthropic",
+        options: { env: { [flag]: "1" } },
+      },
+    }).agent.run("cloud");
+    assert.equal(run.status, "success", flag);
+  }
+});
+test("Claude max_output_tokens is not retried as a dropped connection", async () => {
+  const { agent, captured } = harness(
+    [
+      assistant(
+        [textBlock("Output limit reached")],
+        { error: "max_output_tokens" },
+        { model: "<synthetic>" },
+      ),
+      result({
+        is_error: true,
+        terminal_reason: "completed",
+        result: "Output limit reached",
+      }),
+    ],
+    { maxRetries: 2, retryDelayMs: 0 },
+  );
+  const run = await agent.run("limit");
+  assert.equal(captured.length, 1);
+  assert.deepEqual(
+    errorsOf(run).map((event) => [event.error_type, event.retryable]),
+    [["execution_error", false]],
+  );
 });

@@ -131,7 +131,10 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
   const data = object(cause);
   if (
     data?.signal ||
-    /(?:killed|exited|terminated).*\bSIG[A-Z]+\b/i.test(message)
+    // Signal names are upper case; /i would match words like "sign" and "signal".
+    /\b(?:[Kk]illed|[Ee]xited|[Tt]erminated)\b.*\bSIG(?:KILL|TERM|INT|HUP|QUIT|ABRT|SEGV|BUS|PIPE)\b/.test(
+      message,
+    )
   )
     return new ProcessTerminatedError(message, { cause });
   if (

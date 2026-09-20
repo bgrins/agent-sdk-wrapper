@@ -36,6 +36,10 @@ const credentialEnv = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_GATEWAY",
 ];
 const oauthTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN";
 function withoutLoginToken(
@@ -227,7 +231,10 @@ export class AnthropicAdapter implements ProviderAdapter {
         ? req.providerOptions.options
         : undefined;
     const additions: Record<string, string> = {};
+    // An empty value keeps an inherited effort from overriding the CLI default.
     if (req.effort) additions.CLAUDE_CODE_EFFORT_LEVEL = req.effort;
+    else if (native?.env?.CLAUDE_CODE_EFFORT_LEVEL === undefined)
+      additions.CLAUDE_CODE_EFFORT_LEVEL = "";
     // Background subagents make the CLI emit an extra turn and a second result.
     if (native?.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === undefined)
       additions.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
@@ -421,6 +428,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       yield* flush();
       throw new ProviderProtocolError("Claude stream ended without a result");
     } catch (cause) {
+      // Keep a completed answer even when the runtime then fails.
+      yield* flush();
       throw nativeError(cause);
     } finally {
       req.signal?.removeEventListener("abort", onAbort);
@@ -448,7 +457,17 @@ const assistantErrorTypes: Partial<Record<SDKAssistantMessageError, string>> = {
   server_error: "transient_api_error",
   invalid_request: "invalid_request",
   model_not_found: "model_not_found",
+  max_output_tokens: "execution_error",
 };
+// Other terminal reasons (hook stops, deferred tools) end successful runs.
+const failureReasons = new Set([
+  "api_error",
+  "image_error",
+  "malformed_tool_use_exhausted",
+  "model_error",
+  "tool_deferred_unavailable",
+  "turn_setup_failed",
+]);
 /** Prefer subtype, terminal_reason and the assistant error over HTTP status and text. */
 function resultError(
   message: SDKResultMessage,
@@ -482,7 +501,6 @@ function resultError(
   if (message.stop_reason === "refusal") return error("refused");
   if (message.subtype === "error_during_execution")
     return error("execution_error");
-  if (!message.is_error && (!reason || reason === "completed")) return;
   // The CLI groups these as context limits.
   if (
     reason === "prompt_too_long" ||
@@ -490,6 +508,12 @@ function resultError(
     reason === "rapid_refill_breaker"
   )
     return error("context_window_exceeded");
+  if (
+    !message.is_error &&
+    message.subtype === "success" &&
+    !(reason && failureReasons.has(reason))
+  )
+    return;
   const status =
     message.subtype === "success"
       ? (message.api_error_status ?? undefined)

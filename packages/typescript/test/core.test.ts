@@ -20,7 +20,8 @@ import type {
   ResolvedRequest,
   RunResult,
 } from "../src/index.js";
-import { emptyUsage } from "../src/events.js";
+import { emptyUsage, type ErrorEvent } from "../src/events.js";
+import { nativeError } from "../src/providers/common.js";
 import { classify } from "../src/providers/common.js";
 
 function fake(
@@ -629,4 +630,50 @@ test("shared v1 fixtures produce the same result in Python and TypeScript", asyn
       expected,
     );
   }
+});
+test("only real signal names mark a runtime as terminated", () => {
+  for (const message of [
+    "Codex Exec exited with code 1: 401 Unauthorized. Please log out and sign in again.",
+    "Claude Code process exited: The request signature we calculated does not match",
+  ])
+    assert.ok(
+      !(nativeError(new Error(message)) instanceof ProcessTerminatedError),
+    );
+  assert.ok(
+    nativeError(
+      new Error("Claude Code process terminated by signal SIGKILL"),
+    ) instanceof ProcessTerminatedError,
+  );
+});
+test("a later error shows a held retryable error and prevents a retry", async () => {
+  let calls = 0;
+  const agent = new Agent(
+    { provider: "openai", maxRetries: 2, retryDelayMs: 0 },
+    {
+      openai: fake(async function* () {
+        calls++;
+        yield {
+          type: "error",
+          message: "busy",
+          error_type: "transient_api_error",
+          retryable: true,
+        };
+        yield {
+          type: "error",
+          message: "denied",
+          error_type: "permission_denied",
+          retryable: false,
+        };
+      }),
+    },
+  );
+  const run = await agent.run("held");
+  assert.equal(calls, 1);
+  assert.deepEqual(
+    run.events
+      .map((env) => env.event)
+      .filter((event): event is ErrorEvent => event.type === "error")
+      .map((event) => event.error_type),
+    ["transient_api_error", "permission_denied"],
+  );
 });
