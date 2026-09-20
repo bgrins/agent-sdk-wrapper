@@ -372,6 +372,13 @@ class Agent:
         writer: TraceWriter | None = None
         artifacts_dir: Path | None = None
         trace_path = run.trace_path
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                self._release(req)
 
         def record(event: AgentEvent) -> EventEnvelope:
             nonlocal status, ended_reason, error_msg
@@ -406,7 +413,14 @@ class Agent:
                 RunFinished(status=status, duration_ms=duration_ms, ended_reason=ended_reason)
             )
             finished = True
+            # The run is over even if the consumer never closes the stream.
+            release()
             return env
+
+        def hold_as_warnings() -> None:
+            for event in held:
+                record(WarningEvent(message=event.message))
+            held.clear()
 
         try:
             artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
@@ -440,7 +454,8 @@ class Agent:
                     req.session_id = original_session_id
                     progressed = failed = False
                     error: Exception | None = None
-                    async with contextlib.aclosing(self._provider.stream(req)) as native:
+                    native = self._provider.stream(req)
+                    try:
                         while True:
                             try:
                                 ev = await _next_event(native, deadline)
@@ -463,6 +478,15 @@ class Agent:
                             progressed = progressed or isinstance(ev, _PROGRESS_EVENTS)
                             failed = failed or isinstance(ev, Error)
                             yield record(ev)
+                    except BaseException:
+                        # The original failure wins; never yield while being closed.
+                        await _close_provider(native, log_errors=True)
+                        raise
+                    cleanup_error = await _close_provider(native)
+                    if isinstance(cleanup_error, (ProcessTerminatedError, ConfigError)):
+                        raise cleanup_error
+                    if error is None:
+                        error = cleanup_error
 
                     retryable = bool(held) or isinstance(error, TransientError)
                     if retryable and not (progressed or failed) and attempt < req.max_retries:
@@ -507,14 +531,14 @@ class Agent:
             yield finish()
         except GeneratorExit:
             if writer is not None and not finished:
-                flush_held()
+                hold_as_warnings()
                 if error_msg is None:
                     record(Error(message="stream closed before completion", error_type="cancelled"))
                 finish()
             raise
         except asyncio.CancelledError:
             if writer is not None and not finished:
-                flush_held()
+                hold_as_warnings()
                 record(Error(message="run cancelled", error_type="cancelled"))
                 status = RunStatus.CANCELLED
                 ended_reason = RunEndedReason.CANCELLED
@@ -553,14 +577,14 @@ class Agent:
                             extra_files=collect_side_files(artifacts_dir),
                         )
             finally:
-                self._release(req)
+                release()
 
     def _acquire(self, req: RunRequest) -> None:
         # continue_session runs read and write self.session_id.
         if self._active_runs and (req.continue_session or self._continuing_run_active):
             raise ConfigError(
-                "continue_session allows one active run per Agent; "
-                "use separate Agent instances for concurrent runs"
+                "continue_session allows one active run per Agent; finish or aclose() "
+                "the previous stream, or use separate Agent instances for concurrent runs"
             )
         self._active_runs += 1
         self._continuing_run_active = req.continue_session
@@ -592,6 +616,24 @@ def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
 
 
+async def _close_provider(
+    native: AsyncIterator[AgentEvent], *, log_errors: bool = False
+) -> Exception | None:
+    """Close a provider stream; return (or log) an exception its cleanup raised."""
+
+    aclose = getattr(native, "aclose", None)
+    if aclose is None:
+        return None
+    try:
+        await aclose()
+    except Exception as exc:
+        if log_errors:
+            get_logger().warning("provider stream cleanup failed: %s", exc)
+            return None
+        return exc
+    return None
+
+
 async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None) -> Any:
     """Await the next provider event, applying the run deadline to this wait only."""
 
@@ -605,9 +647,17 @@ async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None)
         try:
             async with scope:
                 return await anext(native)
+        except StopAsyncIteration:
+            raise
         except TimeoutError:
             if scope.expired():
                 raise _DeadlineExceeded from None
+            raise
+        except Exception as exc:
+            # Cleanup that fails while the deadline cancels the provider hides the timeout.
+            if scope.expired():
+                get_logger().warning("provider failed while stopping at the deadline: %s", exc)
+                raise _DeadlineExceeded from exc
             raise
     except StopAsyncIteration:
         return _END

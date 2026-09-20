@@ -271,3 +271,57 @@ def test_process_terminated_is_recorded_then_raised(monkeypatch, tmp_path, mode)
     if mode == "stream":
         assert [env.event.type for env in streamed] == ["run_started", "error", "run_finished"]
         assert isinstance(streamed[-1].event, RunFinished)
+
+
+async def test_provider_cleanup_error_at_a_deadline_is_logged_not_escaped(monkeypatch):
+    async def play(req):
+        try:
+            yield Text(text="answer")
+            await asyncio.sleep(10)
+        finally:
+            raise RuntimeError("cleanup broke")
+
+    install_fake_providers(monkeypatch, events=play)
+    result = await Agent(provider="openai", timeout=0.05).run("x")
+
+    assert result.status == RunStatus.TIMEOUT
+    assert [env.event.type for env in result.events][-2:] == ["error", "run_finished"]
+
+
+async def test_finished_stream_releases_continue_session_without_aclose(monkeypatch):
+    install_fake_providers(monkeypatch, events=[SessionInfo(id="s1"), Text(text="hi")])
+    agent = Agent(provider="openai", continue_session=True)
+
+    async for env in agent.stream("first"):
+        if env.event.type == "run_finished":
+            break
+    assert (await agent.run("second")).ok
+
+
+async def test_closing_a_stream_with_a_held_retryable_error_is_cancelled(
+    monkeypatch, tmp_path
+):
+    gate = asyncio.Event()
+
+    async def play(req):
+        yield Error(message="overloaded", error_type="transient_api_error", retryable=True)
+        yield Usage(usage=TokenUsage(input_tokens=1, total_tokens=1))
+        await gate.wait()
+
+    install_fake_providers(monkeypatch, events=play)
+    trace = tmp_path / "trace.jsonl"
+    stream = Agent(provider="openai", max_retries=1, trace_file=trace).stream("x")
+    async for env in stream:
+        if env.event.type == "usage":
+            break
+    await stream.aclose()
+
+    events = [json.loads(line)["event"] for line in trace.read_text().splitlines()]
+    assert [(e["type"], e.get("error_type")) for e in events] == [
+        ("run_started", None),
+        ("usage", None),
+        ("warning", None),
+        ("error", "cancelled"),
+        ("run_finished", None),
+    ]
+    assert events[-1]["status"] == "cancelled"
