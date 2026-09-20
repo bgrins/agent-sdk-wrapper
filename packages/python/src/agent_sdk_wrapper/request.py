@@ -241,7 +241,7 @@ class RunRequest:
 
     # Run-level controls.
     timeout: float | None = None  # seconds, wall-clock for the whole run
-    max_retries: int = 2  # whole-run retries on transient errors (backoff)
+    max_retries: int = 0  # whole-run retries on transient errors (backoff)
     include_raw: bool = False
     include_events_in_result: bool = True
     artifacts_dir: str | Path | None = None

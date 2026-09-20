@@ -46,18 +46,18 @@ Constructor keywords are defaults; `run()` and `stream()` accept per-call overri
 | `tools`, `mcp_servers`, `subagents` | Callable tools, external MCP and subagents |
 | `output_schema` | Validated structured output |
 | `session_id`, `continue_session` | Explicit resume or automatic continuation |
-| `max_retries`, `timeout`, `max_turns` | Retries (default 2), provider-wait deadline and action limit |
+| `max_retries`, `timeout`, `max_turns` | Wrapper retries (default 0), provider-wait deadline and action limit |
 | `cli_login`, `setting_sources` | Stored-login policy; Claude on-disk settings (default none) |
 | `provider_options`, `extra_options` | Provider-specific settings; unsupported combinations fail |
 
 `run()` and `stream()` raise `ConfigError` for invalid settings before any event.
 Other failures produce failed results; check `result.status`, or use
 `raise_on_error=True` for `RunFailedError`. Signal-killed runtimes are recorded,
-then raise `ProcessTerminatedError`. A run retries, with jittered exponential backoff capped at 8 s,
-only for transient errors and retryable error events, only before its first progress
+then raise `ProcessTerminatedError`. With `max_retries`, a run retries, with jittered
+exponential backoff capped at 8 s, only for transient errors and retryable error events, only before its first progress
 event (text, thinking, tools, subagents, structured output, compaction, agent
-changes), and never once a resumed session has started. These retries add to the
-runtimes' own ([limits](../typescript/PARITY.md#shared-limits)). `timeout` is a deadline from
+changes), and never once a resumed session has started. The runtimes already retry
+API errors, and these retries repeat theirs ([limits](../typescript/PARITY.md#shared-limits)). `timeout` is a deadline from
 the start of the run: consumer code is never cancelled, but the next provider wait
 after it fails with `timeout`. Concurrent runs on one Agent are allowed; with
 `continue_session` the Agent keeps the last session a run reported. `check_runtime()`

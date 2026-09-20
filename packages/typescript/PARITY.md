@@ -8,7 +8,7 @@ a subset of Python's API.
 |---|---|---|
 | Requests | Keyword overrides; snake_case | Prompt or request object; camelCase; whole-field replacement |
 | Provider selection | Fixed per Agent; explicit provider takes precedence | Per-run selection; conflicting model/provider rejected |
-| Retries | Default 2, jittered backoff capped at 8 s; `run`, `stream` and CLI | Default 0, `retryDelayMs` doubling to 30 s |
+| Wrapper retries | Default 0, jittered backoff capped at 8 s; `run`, `stream` and CLI | Default 0, `retryDelayMs` doubling to 30 s |
 | Concurrency | Concurrent runs allowed; `continue_session` keeps the last reported session | One active run per Agent |
 | Codex session model | Reported | Not exposed by `codex exec` |
 | Codex key check | Skipped with a custom `model_provider` | Required, including with `baseUrl` |
@@ -62,7 +62,7 @@ Unsupported options fail validation; native permission policies are not intercha
   its SDK drops `supersedes` and `aborted` frames.
 - Claude custom prompts persist across resume by default. Start a new session to change instructions.
 - Codex defers MCP tools behind its tool search; prompts may need to tell the model to search.
-- Runtimes retry before the wrapper sees an error, and wrapper retries multiply them. By
+- Runtimes retry before the wrapper sees an error, and wrapper retries repeat theirs. By
   default the Claude CLI retries 429, 5xx, 529 and 401 ten times over about 3 minutes, and
   each retry becomes a warning; `CLAUDE_CODE_MAX_RETRIES` in `env` sets the count. Codex
   retries 5xx and dropped streams (`request_max_retries`, `stream_max_retries` on a custom

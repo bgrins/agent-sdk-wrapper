@@ -165,7 +165,7 @@ class Agent:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
-        max_retries: int = 2,
+        max_retries: int = 0,
         include_raw: bool = False,
         include_events_in_result: bool = True,
         builtin_tools: Sequence[str] | str | None = None,

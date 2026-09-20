@@ -251,7 +251,7 @@ async def _run(args: argparse.Namespace) -> int:
         timeout=args.timeout if args.timeout is not None else _config_number(config, "timeout"),
         max_retries=args.max_retries
         if args.max_retries is not None
-        else _config_int(config, "max_retries", 2),
+        else _config_int(config, "max_retries", 0),
         include_raw=bool(
             args.include_raw
             if args.include_raw is not None

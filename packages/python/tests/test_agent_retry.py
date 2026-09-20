@@ -142,7 +142,7 @@ def test_retryable_error_event_is_replaced_by_warning(monkeypatch, no_backoff):
         [SessionInfo(id="good-thread"), Text(text="ok")],
     )
     install_fake_providers(monkeypatch, events=play)
-    agent = Agent(provider="openai", continue_session=True)
+    agent = Agent(provider="openai", continue_session=True, max_retries=2)
 
     result = asyncio.run(agent.run("hi"))
 
@@ -168,7 +168,7 @@ def test_a_resumed_session_is_not_retried_once_it_started(monkeypatch, no_backof
     play, seen = attempts([SessionInfo(id="original"), overloaded], [Text(text="again")])
     install_fake_providers(monkeypatch, events=play)
 
-    result = asyncio.run(Agent(provider="openai", session_id="original").run("hi"))
+    result = asyncio.run(Agent(provider="openai", session_id="original", max_retries=2).run("hi"))
 
     assert len(seen) == 1
     assert result.error == "overloaded"
@@ -200,6 +200,17 @@ def test_a_stream_method_that_raises_is_a_failed_run(monkeypatch):
 
     assert result.status == RunStatus.FAILURE
     assert "adapter bug" in (result.error or "")
+
+
+def test_runs_leave_retries_to_the_runtime_by_default(monkeypatch, no_backoff):
+    overloaded = Error(message="overloaded", error_type="transient_api_error", retryable=True)
+    play, seen = attempts([overloaded], [Text(text="again")])
+    install_fake_providers(monkeypatch, events=play)
+
+    result = asyncio.run(Agent(provider="openai").run("hi"))
+
+    assert len(seen) == 1
+    assert result.error == "overloaded"
 
 
 def test_retryable_error_is_emitted_when_retries_are_exhausted(monkeypatch, no_backoff):
