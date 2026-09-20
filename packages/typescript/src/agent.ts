@@ -203,18 +203,20 @@ export class Agent {
             yield frame(event);
           }
         } catch (cause) {
-          if (cause instanceof TraceWriteError || cause instanceof ConfigError)
-            throw cause;
+          if (cause instanceof TraceWriteError) throw cause;
           // A runtime killed by the caller's abort was cancelled, not terminated.
-          if (cause instanceof ProcessTerminatedError && !req.signal?.aborted) {
+          const terminated =
+            cause instanceof ProcessTerminatedError && !req.signal?.aborted;
+          if (terminated || cause instanceof ConfigError) {
+            if (held) yield frame(held);
             const error: ErrorEvent = {
               type: "error",
               message: cause.message,
-              error_type: "process_terminated",
+              error_type: terminated ? "process_terminated" : "invalid_request",
               retryable: false,
             };
             yield frame(error);
-            yield finished(error);
+            yield finished(held ?? error);
             throw cause;
           }
           threw = true;
@@ -242,6 +244,9 @@ export class Agent {
             /* cancellation is normalized below */
           }
           if (!req.signal?.aborted) continue;
+          error = cancelledError();
+        } else if (held && req.signal?.aborted) {
+          yield frame({ type: "warning", message: held.message });
           error = cancelledError();
         } else if (held) error = held;
         else if (!failure && threw)

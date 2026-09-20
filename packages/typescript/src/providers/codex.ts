@@ -218,11 +218,20 @@ export class CodexAdapter implements ProviderAdapter {
       const frames = {
         [Symbol.asyncIterator]: () => ({ next: () => source.next() }),
       };
+      // A fatal failure repeats its error notice in turn.failed; hold the notice
+      // one event so it isn't reported twice.
+      let notice: ProviderEvent | undefined;
       for await (const event of frames) {
         context.onNativeEvent(event);
         const raw = req.includeRaw
           ? { raw: event as unknown as Record<string, unknown> }
           : {};
+        const repeated =
+          event.type === "turn.failed" &&
+          notice?.type === "warning" &&
+          notice.message === event.error.message;
+        if (notice && !repeated) yield notice;
+        notice = undefined;
         if (event.type === "thread.started") {
           session = event.thread_id;
           yield { type: "session_info", id: session };
@@ -278,9 +287,8 @@ export class CodexAdapter implements ProviderAdapter {
           };
           return;
         } else if (event.type === "error") {
-          // Top-level errors include recoverable "Reconnecting... N/5" notices;
-          // a fatal failure repeats its message in turn.failed.
-          yield { type: "warning", message: event.message, ...raw };
+          // Top-level errors include recoverable "Reconnecting... N/5" notices.
+          notice = { type: "warning", message: event.message, ...raw };
         } else if (
           event.type === "item.started" ||
           event.type === "item.updated" ||
@@ -288,7 +296,10 @@ export class CodexAdapter implements ProviderAdapter {
         ) {
           const item = event.item;
           const tool = toolInfo(item);
-          if (tool && !started.has(item.id)) {
+          // A started web search has no query yet; emit its call on completion.
+          const early =
+            item.type === "web_search" && event.type !== "item.completed";
+          if (tool && !early && !started.has(item.id)) {
             started.add(item.id);
             yield { type: "tool_call", id: item.id, ...tool, ...raw };
           }
@@ -326,6 +337,7 @@ export class CodexAdapter implements ProviderAdapter {
             };
         }
       }
+      if (notice) yield notice;
       throw new ProviderProtocolError(
         "Codex stream ended without turn.completed or turn.failed",
       );

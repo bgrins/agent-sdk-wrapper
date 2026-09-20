@@ -973,3 +973,26 @@ test("Claude strips and rejects every login-token variable", async () => {
       ConfigError,
     );
 });
+test("Claude classifies context limits, API errors and empty failures like Python", async () => {
+  const typeOf = async (overrides: Partial<SDKResultSuccess>) =>
+    errorsOf(await harness([result(overrides)]).agent.run("x")).map((e) => [
+      e.error_type,
+      e.message,
+    ]);
+  assert.deepEqual(
+    await typeOf({
+      is_error: true,
+      terminal_reason: "prompt_too_long",
+      result: "",
+    }),
+    [["context_window_exceeded", "run reported an error"]],
+  );
+  assert.deepEqual(
+    await typeOf({ is_error: false, terminal_reason: "api_error", result: "" }),
+    [["transient_api_error", "run reported an error"]],
+  );
+  const run = await harness([
+    result({ modelUsage: undefined as never }),
+  ]).agent.run("x");
+  assert.equal(run.status, "success");
+});

@@ -506,30 +506,23 @@ function resultError(
   const text =
     (message.subtype === "success"
       ? message.result
-      : message.errors.join("\n")) || message.subtype;
+      : message.errors.join("\n")) ||
+    (message.subtype === "success" ? "run reported an error" : message.subtype);
   const error = (error_type: string): ErrorEvent => ({
     type: "error",
     message: text,
     error_type,
     retryable: error_type === "transient_api_error",
   });
+  // Same order as Python: cancellation, turn limit, refusal, terminal reason, subtype.
   if (reason === "aborted_streaming" || reason === "aborted_tools")
     return cancelled();
   if (message.subtype === "error_max_turns" || reason === "max_turns")
     return error("max_turns");
-  if (
-    message.subtype === "error_max_budget_usd" ||
-    reason === "budget_exhausted"
-  )
-    return error("max_budget");
-  if (
-    message.subtype === "error_max_structured_output_retries" ||
-    reason === "structured_output_retry_exhausted"
-  )
-    return error("structured_output_failed");
   if (message.stop_reason === "refusal") return error("refused");
-  if (message.subtype === "error_during_execution")
-    return error("execution_error");
+  if (reason === "budget_exhausted") return error("max_budget");
+  if (reason === "structured_output_retry_exhausted")
+    return error("structured_output_failed");
   // The CLI groups these as context limits.
   if (
     reason === "prompt_too_long" ||
@@ -537,6 +530,11 @@ function resultError(
     reason === "rapid_refill_breaker"
   )
     return error("context_window_exceeded");
+  if (message.subtype === "error_max_budget_usd") return error("max_budget");
+  if (message.subtype === "error_max_structured_output_retries")
+    return error("structured_output_failed");
+  if (message.subtype === "error_during_execution")
+    return error("execution_error");
   if (
     !message.is_error &&
     message.subtype === "success" &&
@@ -554,7 +552,6 @@ function resultError(
         ? "permission_denied"
         : structured,
     );
-  if (!message.is_error) return error("execution_error");
   const classified = classify(text, "execution_error", status);
   // An API error without an HTTP status or a recognizable message is a dropped connection.
   return status === undefined &&
@@ -579,7 +576,7 @@ function usageEvent(
   raw: Raw,
 ): Extract<ProviderEvent, { type: "usage" }> {
   const usage = emptyUsage();
-  const models = Object.values(message.modelUsage);
+  const models = Object.values(message.modelUsage ?? {});
   if (models.length) {
     for (const model of models) {
       usage.input_tokens +=

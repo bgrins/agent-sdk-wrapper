@@ -227,7 +227,7 @@ test("Codex subtracts cumulative thread usage on resume", async () => {
   assert.deepEqual(first.usage, second.usage);
   assert.equal(second.session_id, "saved");
 });
-test("Codex turn.failed is the one terminal typed failure; error events warn", async () => {
+test("Codex turn.failed is the one terminal typed failure, not also a warning", async () => {
   const message = "401 Unauthorized";
   const { agent } = harness(
     [
@@ -257,7 +257,7 @@ test("Codex turn.failed is the one terminal typed failure; error events warn", a
     run.events
       .filter((env) => env.event.type === "warning")
       .map((env) => env.event),
-    [{ type: "warning", message }],
+    [],
   );
 });
 test("Codex stops reading at its terminal event", async () => {
@@ -495,4 +495,23 @@ test("Codex cliLogin deny keeps an access-token login out of the child", async (
   });
   await agent.run("deny");
   assert.deepEqual(clients[0]?.env, { HOME: "/h" });
+});
+test("Codex web search calls wait for their query", async () => {
+  const { agent } = harness([
+    { type: "thread.started", thread_id: "t" },
+    { type: "item.started", item: { type: "web_search", id: "w", query: "" } },
+    {
+      type: "item.completed",
+      item: { type: "web_search", id: "w", query: "codex sdk" },
+    },
+    completed,
+  ]);
+  const run = await agent.run("search");
+  const calls = run.events
+    .map((env) => env.event)
+    .filter((event) => event.type === "tool_call");
+  assert.deepEqual(
+    calls.map((event) => event.type === "tool_call" && event.input),
+    [{ query: "codex sdk" }],
+  );
 });

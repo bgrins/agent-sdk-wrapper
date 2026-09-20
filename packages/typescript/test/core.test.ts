@@ -705,3 +705,89 @@ test("any upper-case signal name marks a runtime as terminated", () => {
     ) instanceof ProcessTerminatedError,
   );
 });
+test("high demand, 408 and 409 are transient; exit codes 130/137/143 are kills", () => {
+  for (const [message, status] of [
+    [
+      "We're currently experiencing high demand, which may cause temporary errors.",
+      undefined,
+    ],
+    ["request failed", 408],
+    ["request failed", 409],
+  ] as const)
+    assert.equal(
+      classify(message, "provider_exception", status).error_type,
+      "transient_api_error",
+    );
+  assert.ok(
+    nativeError(new Error("Codex Exec exited with code 137")) instanceof
+      ProcessTerminatedError,
+  );
+});
+test("a kill after a held retryable error keeps the held error", async () => {
+  const agent = new Agent(
+    { provider: "openai", maxRetries: 2, retryDelayMs: 0 },
+    {
+      openai: fake(async function* () {
+        yield {
+          type: "error",
+          message: "overloaded",
+          error_type: "transient_api_error",
+          retryable: true,
+        };
+        throw new ProcessTerminatedError("killed by SIGKILL");
+      }),
+    },
+  );
+  const errors: string[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("kill"), (env) => {
+      if (env.event.type === "error") errors.push(env.event.error_type);
+    }),
+    ProcessTerminatedError,
+  );
+  assert.deepEqual(errors, ["transient_api_error", "process_terminated"]);
+});
+test("a mid-stream ConfigError is recorded and finishes the run before it throws", async () => {
+  const agent = new Agent(
+    { provider: "openai" },
+    {
+      openai: fake(async function* () {
+        yield { type: "session_info", id: "s" };
+        throw new ConfigError("late invalid setting");
+      }),
+    },
+  );
+  const types: string[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("late"), (env) => {
+      types.push(env.event.type);
+    }),
+    ConfigError,
+  );
+  assert.deepEqual(types.slice(-2), ["error", "run_finished"]);
+});
+test("an abort while a retryable error is held is a cancelled run", async () => {
+  const controller = new AbortController();
+  const agent = new Agent(
+    {
+      provider: "openai",
+      maxRetries: 1,
+      retryDelayMs: 0,
+      signal: controller.signal,
+    },
+    {
+      openai: fake(async function* () {
+        yield {
+          type: "error",
+          message: "overloaded",
+          error_type: "transient_api_error",
+          retryable: true,
+        };
+        controller.abort();
+      }),
+    },
+  );
+  const run = await agent.run("abort");
+  assert.equal(run.status, "cancelled");
+  assert.ok(run.events.some((env) => env.event.type === "warning"));
+});

@@ -74,7 +74,7 @@ const contextWindow =
   /\bprompt is too long\b|\bcontext[_ ]length[_ ]exceeded\b|\bexceeds the context window\b|\bran out of room in the model.s context window\b|\bcontext window exceeded\b/i;
 const billing = /\bcredit balance\b|\bbilling\b/i;
 const transient =
-  /\brate[_ ]?limit|\boverloaded\b|\btemporarily unavailable\b|\bat capacity\b|\bserver (?:is )?busy\b|\bstream disconnected\b|\b(?:connection|request) timed out\b|\bconnection (?:refused|reset)\b|\bConnectionRefused\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b/i;
+  /\brate[_ ]?limit|\boverloaded\b|\bhigh (?:demand|load)\b|\btemporarily unavailable\b|\bat capacity\b|\bserver (?:is )?busy\b|\bstream disconnected\b|\b(?:connection|request) timed out\b|\bconnection (?:refused|reset)\b|\bConnectionRefused\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b/i;
 const authentication =
   /\bunauthorized\b|\bauthentication\b|\binvalid[_ ](?:x-)?api[_ -]?key\b|\bnot logged in\b|\bmissing api key\b/i;
 const permission = /\bforbidden\b|\bpermission denied\b/i;
@@ -97,7 +97,10 @@ export function classify(
       ? "context_window_exceeded"
       : billing.test(message)
         ? "billing_error"
-        : code === 429 || (code !== undefined && code >= 500)
+        : code === 408 ||
+            code === 409 ||
+            code === 429 ||
+            (code !== undefined && code >= 500)
           ? "transient_api_error"
           : code === 401
             ? "authentication_failed"
@@ -131,6 +134,8 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
   const data = object(cause);
   if (
     data?.signal ||
+    // 128 + SIGINT/SIGKILL/SIGTERM when a wrapper script reports the exit.
+    /\bexited with (?:exit )?code (?:130|137|143)\b/i.test(message) ||
     // Signal names are upper case; /i would match words like "sign" and "signal".
     /\b(?:[Kk]illed|[Ee]xited|[Tt]erminated)\b.*\bSIG[A-Z]{2,}\b/.test(message)
   )
