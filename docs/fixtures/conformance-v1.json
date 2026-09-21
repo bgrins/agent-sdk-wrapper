@@ -19,7 +19,7 @@
     {
       "id": "anthropic.effort",
       "provider": "anthropic",
-      "options": { "model": "claude-haiku-4-5", "effort": "low" },
+      "options": { "model": "claude-sonnet-4-6", "effort": "low" },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": {

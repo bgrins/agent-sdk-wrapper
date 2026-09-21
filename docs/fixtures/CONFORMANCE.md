@@ -21,9 +21,11 @@ checks.
 | `languages` | Per-language overrides: `{"typescript": "unsupported: <reason>"}`, or an object with `options`/`expect` to replace (options stay Python-named), or `{"expect": {"config_error": true}}`. A string or `config_error` override also skips the live run |
 | `live` | Optional live section: `prompt`, `options` merged over the case options, `expect`, and `runs` (merged by index) |
 
-Live runs use the model from `AGENT_SDK_WRAPPER_ANTHROPIC_MODEL` / `AGENT_SDK_WRAPPER_OPENAI_MODEL`,
-else `live.options.model`, else `claude-haiku-4-5` / `gpt-5.6-luna`; the offline model is never
-used live.
+Live runs use the model from the package's own variables (Python
+`AGENT_SDK_WRAPPER_ANTHROPIC_MODEL` / `AGENT_SDK_WRAPPER_OPENAI_MODEL`, TypeScript
+`AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL` / `AGENT_SDK_WRAPPER_TS_OPENAI_MODEL`), else
+`live.options.model`, else `claude-haiku-4-5` / `gpt-5.6-luna`; the offline model is never used
+live.
 
 ### Option values
 
