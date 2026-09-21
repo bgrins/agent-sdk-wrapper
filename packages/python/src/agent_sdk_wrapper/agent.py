@@ -7,7 +7,7 @@ import contextlib
 import math
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -402,7 +402,6 @@ class Agent:
 
             native = _provider_events(self._provider, req)
             error: Exception | None = None
-            reported = False
             try:
                 try:
                     while True:
@@ -415,19 +414,13 @@ class Agent:
                             break
                         if ev is _END:
                             break
-                        reported = reported or isinstance(ev, Error)
                         yield record(ev)
                 except BaseException:
                     # The original failure wins; never yield while being closed.
-                    await _close_provider(native, log_errors=True)
+                    await _close_provider(native)
                     raise
-                cleanup_error = await _close_provider(native)
-                if isinstance(cleanup_error, (ProcessTerminatedError, ConfigError)):
-                    raise cleanup_error
-                if error is None:
-                    error = cleanup_error
                 # The provider's own terminal error wins over a later exception.
-                if error is not None and not reported:
+                if error is not None and error_msg is None:
                     yield record(_error_event(error))
             except _DeadlineExceeded:
                 if error_msg is None:
@@ -501,7 +494,7 @@ def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
 
 
-async def _provider_events(provider: Any, req: RunRequest) -> AsyncIterator[AgentEvent]:
+async def _provider_events(provider: Any, req: RunRequest) -> AsyncGenerator[AgentEvent]:
     """Iterate an adapter so errors raised by ``stream()`` itself become run failures."""
 
     stream = provider.stream(req)
@@ -514,22 +507,13 @@ async def _provider_events(provider: Any, req: RunRequest) -> AsyncIterator[Agen
             await aclose()
 
 
-async def _close_provider(
-    native: AsyncIterator[AgentEvent], *, log_errors: bool = False
-) -> Exception | None:
-    """Close a provider stream; return (or log) an exception its cleanup raised."""
+async def _close_provider(native: AsyncGenerator[AgentEvent]) -> None:
+    """Close a provider stream, logging an exception its cleanup raises."""
 
-    aclose = getattr(native, "aclose", None)
-    if aclose is None:
-        return None
     try:
-        await aclose()
+        await native.aclose()
     except Exception as exc:
-        if log_errors:
-            get_logger().warning("provider stream cleanup failed: %s", exc)
-            return None
-        return exc
-    return None
+        get_logger().warning("provider stream cleanup failed: %s", exc)
 
 
 async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None) -> Any:
