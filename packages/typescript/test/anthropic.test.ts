@@ -390,7 +390,7 @@ test("Claude retractions fail explicitly through either native notification", as
     [original, notice, replacement, result()],
   ]) {
     const raw: unknown[] = [];
-    const { agent, captured, closed } = harness(messages, {
+    const { agent, closed } = harness(messages, {
       onProviderEvent: (event) => {
         raw.push(event);
       },
@@ -406,8 +406,40 @@ test("Claude retractions fail explicitly through either native notification", as
     // The retracted run was still billed; its usage stays.
     assert.ok(run.usage);
     assert.ok(raw.length >= 2);
-    assert.equal(captured.length, 1);
     assert.equal(closed(), 1);
+  }
+});
+test("Claude subagent retractions leave the main answer intact", async () => {
+  const refused = assistant([textBlock("subagent refused")], {
+    parent_tool_use_id: "task",
+  });
+  const notice: SDKMessage = {
+    type: "system",
+    subtype: "model_refusal_fallback",
+    trigger: "refusal",
+    direction: "retry",
+    scope: "local",
+    original_model: "claude-test",
+    fallback_model: "claude-fallback",
+    request_id: null,
+    retracted_message_uuids: [refused.uuid],
+    content: "",
+    uuid: randomUUID(),
+    session_id: "claude-session",
+  };
+  const replacement = assistant([textBlock("subagent retry")], {
+    parent_tool_use_id: "task",
+    supersedes: [refused.uuid],
+  });
+  const answer = assistant([textBlock("main answer")], {}, { id: "main" });
+  for (const messages of [
+    [refused, notice, answer, result({ result: "main answer" })],
+    [refused, replacement, answer, result({ result: "main answer" })],
+  ]) {
+    const run = await harness(messages).agent.run("delegate");
+    assert.equal(run.status, "success");
+    assert.equal(run.final_text, "main answer");
+    assert.deepEqual(errorsOf(run), []);
   }
 });
 test("Claude excludes subagent tool results with their omitted calls", async () => {

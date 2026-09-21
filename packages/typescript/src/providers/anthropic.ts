@@ -297,11 +297,15 @@ export class AnthropicAdapter implements ProviderAdapter {
           : {};
         // After a retraction only the result's usage is still meaningful.
         if (retracted && message.type !== "result") continue;
-        // The v1 contract cannot retract emitted text or tool events.
+        // The v1 contract cannot retract emitted text or tool events. Subagent
+        // (local-scope) retractions only touch output the wrapper omitted.
         if (
-          (message.type === "assistant" && message.supersedes?.length) ||
+          (message.type === "assistant" &&
+            message.supersedes?.length &&
+            !message.parent_tool_use_id) ||
           (message.type === "system" &&
             message.subtype === "model_refusal_fallback" &&
+            message.scope !== "local" &&
             message.retracted_message_uuids?.length)
         ) {
           retracted = true;
