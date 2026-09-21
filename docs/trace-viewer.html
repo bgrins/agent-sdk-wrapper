@@ -1367,22 +1367,25 @@
 
       try {
         const previous = new Map(discoveredRuns.map((run) => [run.runUrl.href, run]));
-        const { runs, truncated } = await findResultRuns();
+        const { runs, found, scanned } = await findResultRuns();
         discoveredRuns = runs.map((run) => ({
           ...run, manifest: run.manifest || previous.get(run.runUrl.href)?.manifest,
         }));
         renderRuns(discoveredRuns);
         if (selectionVersion !== loadVersion) return;
-        const scanned = truncated
-          ? ` Showing the ${truncated} most recently updated runs.`
+        const count = discoveredRuns.length;
+        const limit = scanned
+          ? ` Scanned only the ${scanned} most recently modified directories.`
           : "";
-        if (discoveredRuns.length) {
-          setResultsStatus(`Found ${discoveredRuns.length} result run(s).${scanned}`);
+        if (count) {
+          setResultsStatus(found
+            ? `Showing the ${count} most recently updated of ${found} runs.${limit}`
+            : `Found ${count} result run(s).${limit}`);
           const selected = followLatest ? discoveredRuns[0]
             : discoveredRuns.find((run) => run.runUrl.href === activeRunUrl) || discoveredRuns[0];
           await loadRunFromUrl(selected, { refresh: !force });
         } else {
-          setResultsStatus(`Waiting for traces.${scanned}`);
+          setResultsStatus(`Waiting for traces.${limit}`);
         }
       } catch (error) {
         renderRuns([]);
@@ -1416,7 +1419,13 @@
           updatedAt: typeof entry.updated_at === "string" ? entry.updated_at : "",
         });
       }
-      return { runs: runs.sort(compareRuns), truncated: response.headers.get("x-runs-truncated") };
+      // The server sends each count only when its limit shortened the list.
+      const count = (name) => Number(response.headers.get(name)) || 0;
+      return {
+        runs: runs.sort(compareRuns),
+        found: count("x-runs-found"),
+        scanned: count("x-directories-scanned"),
+      };
     }
 
     function sameOriginUrl(path) {

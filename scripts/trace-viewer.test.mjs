@@ -21,6 +21,7 @@ import vm from "node:vm";
 import {
   contentSecurityPolicy,
   createTraceServer,
+  MAX_DIRECTORIES,
   MAX_RUNS,
 } from "./trace-viewer.mjs";
 
@@ -252,7 +253,8 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
   await chmod(locked, 0);
   const response = await get(base, "/api/runs");
   assert.equal(response.status, 200);
-  assert.equal(response.headers["x-runs-truncated"], String(MAX_RUNS));
+  assert.equal(response.headers["x-runs-found"], String(count));
+  assert.equal(response.headers["x-directories-scanned"], undefined);
   const runs = JSON.parse(response.body);
   const newest = Array.from({ length: count }, (_, age) =>
     stamp(age).toISOString(),
@@ -263,6 +265,49 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
   assert.deepEqual(
     runs.map((run) => run.updated_at),
     newest,
+  );
+});
+
+test("past the directory cap the scan skips the oldest directories and says so", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-directory-cap-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (let index = 0; index < MAX_DIRECTORIES + 10; index += 500)
+    await Promise.all(
+      Array.from({ length: Math.min(500, MAX_DIRECTORIES + 10 - index) }, (_, i) =>
+        mkdir(join(root, `old-${index + i}`)),
+      ),
+    );
+  const newest = join(root, "newest");
+  await mkdir(newest);
+  await writeFile(join(newest, "trace.jsonl"), "{}\n");
+  const later = new Date(Date.now() + 60_000);
+  await utimes(newest, later, later);
+  // List the newest directory last, as readdir order sometimes does.
+  const readdir = fs.readdir;
+  const mocked = t.mock.method(fs, "readdir", async (path, ...args) => {
+    const entries = await readdir(path, ...args);
+    return path === root
+      ? [
+          ...entries.filter((entry) => entry.name !== "newest"),
+          ...entries.filter((entry) => entry.name === "newest"),
+        ]
+      : entries;
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const base = await listen(t, root, { depth: 1 });
+  const response = await get(base, "/api/runs");
+  assert.deepEqual(
+    JSON.parse(response.body).map((run) => run.label),
+    ["newest"],
+  );
+  assert.equal(response.headers["x-runs-found"], undefined);
+  assert.equal(
+    response.headers["x-directories-scanned"],
+    String(MAX_DIRECTORIES),
   );
 });
 
@@ -744,7 +789,7 @@ test("the viewer only lists runs from its own origin", async () => {
       { label: "local", trace: "/results/local/trace.jsonl" },
     ];
     return new Response(JSON.stringify(runs), {
-      headers: { "x-runs-truncated": "500" },
+      headers: { "x-runs-found": "812", "x-directories-scanned": "5000" },
     });
   };
   await vm.runInContext("discoverResults()", context);
@@ -754,9 +799,9 @@ test("the viewer only lists runs from its own origin", async () => {
   );
   assert.ok(requested.every((url) => url.startsWith("http://localhost:8765/")));
   assert.match(visibleTrace(context), /local/);
-  assert.match(
+  assert.equal(
     vm.runInContext("resultsStatusEl.textContent", context),
-    /500 most recently updated runs/,
+    "Showing the 1 most recently updated of 812 runs. Scanned only the 5000 most recently modified directories.",
   );
 });
 

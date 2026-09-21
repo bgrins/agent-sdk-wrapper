@@ -23,59 +23,74 @@ export const MAX_DIRECTORIES = 5000;
 
 async function listRuns(directory, depth) {
   // Read every directory within the depth limit, then keep the newest runs, so
-  // neither shallow siblings nor deep runs can crowd out newer ones.
-  const queue = [""];
+  // neither shallow siblings nor deep runs can crowd out newer ones. Each depth
+  // is read most recently modified first, so the directory cap skips the oldest.
   const runs = [];
-  for (let visited = 0; queue.length && visited < MAX_DIRECTORIES; visited++) {
-    const relative = queue.shift();
-    let entries;
-    try {
-      entries = await readdir(resolve(directory, relative), {
-        withFileTypes: true,
-      });
-    } catch (error) {
-      // An unreadable or replaced directory must not hide the other runs.
-      if (!relative && error.code !== "ENOENT") throw error;
-      continue;
-    }
-    const prefix = relative ? `${relative}/` : "";
-    const hasManifest = entries.some(
-      (entry) => entry.name === "manifest.json" && entry.isFile(),
-    );
-    const traceCount = entries.filter(
-      (entry) =>
-        entry.isFile() &&
-        (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
-    ).length;
-    const descend =
-      depth > 0 && (!relative || relative.split("/").length < depth);
-    await Promise.all(
-      entries.map(async (entry) => {
-        if (entry.name.startsWith(".")) return;
-        const path = prefix + entry.name;
-        const isRun =
-          entry.isFile() &&
-          (hasManifest
-            ? entry.name === "manifest.json"
-            : entry.name === "trace.jsonl" ||
-              entry.name.endsWith(".trace.jsonl"));
-        if (!isRun && !(descend && entry.isDirectory())) return;
-        const info = await lstat(resolve(directory, path)).catch(() => null);
-        if (info?.isDirectory() && !isRun) return queue.push(path);
-        if (!isRun || !info?.isFile() || info.nlink !== 1) return;
-        runs.push({
-          label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
-          trace: hasManifest ? null : `/results/${urlPath(path)}`,
-          manifest: hasManifest ? `/results/${urlPath(path)}` : null,
-          updated_at: info.mtime.toISOString(),
+  let scanned = 0;
+  let capped = false;
+  for (let level = [""]; level.length && !capped; ) {
+    const next = [];
+    for (const relative of level) {
+      if (scanned === MAX_DIRECTORIES) {
+        capped = true;
+        break;
+      }
+      scanned++;
+      let entries;
+      try {
+        entries = await readdir(resolve(directory, relative), {
+          withFileTypes: true,
         });
-      }),
-    );
+      } catch (error) {
+        // An unreadable or replaced directory must not hide the other runs.
+        if (!relative && error.code !== "ENOENT") throw error;
+        continue;
+      }
+      const prefix = relative ? `${relative}/` : "";
+      const hasManifest = entries.some(
+        (entry) => entry.name === "manifest.json" && entry.isFile(),
+      );
+      const traceCount = entries.filter(
+        (entry) =>
+          entry.isFile() &&
+          (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
+      ).length;
+      const descend =
+        depth > 0 && (!relative || relative.split("/").length < depth);
+      await Promise.all(
+        entries.map(async (entry) => {
+          if (entry.name.startsWith(".")) return;
+          const path = prefix + entry.name;
+          const isRun =
+            entry.isFile() &&
+            (hasManifest
+              ? entry.name === "manifest.json"
+              : entry.name === "trace.jsonl" ||
+                entry.name.endsWith(".trace.jsonl"));
+          if (!isRun && !(descend && entry.isDirectory())) return;
+          const info = await lstat(resolve(directory, path)).catch(() => null);
+          if (info?.isDirectory() && !isRun)
+            return next.push({ path, modified: info.mtimeMs });
+          if (!isRun || !info?.isFile() || info.nlink !== 1) return;
+          runs.push({
+            label:
+              !hasManifest && traceCount > 1 ? path : relative || entry.name,
+            trace: hasManifest ? null : `/results/${urlPath(path)}`,
+            manifest: hasManifest ? `/results/${urlPath(path)}` : null,
+            updated_at: info.mtime.toISOString(),
+          });
+        }),
+      );
+    }
+    level = next
+      .sort((a, b) => b.modified - a.modified)
+      .map((entry) => entry.path);
   }
   runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   return {
     runs: runs.slice(0, MAX_RUNS),
-    truncated: queue.length > 0 || runs.length > MAX_RUNS,
+    found: runs.length,
+    scanned: capped ? scanned : null,
   };
 }
 
@@ -162,12 +177,16 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
         });
       }
       if (path === "/api/runs") {
-        const { runs, truncated } = await listRuns(directory, depth);
+        const { runs, found, scanned } = await listRuns(directory, depth);
+        // Each header appears only when its limit shortened the list.
+        const headers = {};
+        if (found > runs.length) headers["x-runs-found"] = String(found);
+        if (scanned) headers["x-directories-scanned"] = String(scanned);
         return send(
           200,
           "application/json",
           JSON.stringify(runs),
-          truncated ? { "x-runs-truncated": String(MAX_RUNS) } : {},
+          headers,
         );
       }
       if (
