@@ -35,7 +35,6 @@ from agent_sdk_wrapper.providers.openai_provider import (
     _codex_output_schema,
     _runtime_config,
     _stream_turn,
-    _tool_entry,
     _validate_supported,
     _write_sdk_debug_log,
 )
@@ -569,11 +568,14 @@ async def test_codex_stream_maps_more_tool_like_items():
     assert '"status":"completed"' in (agent_result.output or "")
 
 
-def test_codex_tool_entry_keeps_source_fallback_for_importable_tool():
-    entry = _tool_entry(sample_importable_tool)
+def test_codex_rejects_positional_only_tool_parameters():
+    def scale(value: int, /) -> int:
+        return value * 2
 
-    assert entry["module"] == __name__
-    assert "def sample_importable_tool" in entry["source"]
+    req = RunRequest(provider="openai", prompt="ignored", tools=[scale])
+
+    with pytest.raises(ConfigError, match="positional-only"):
+        OpenAIProvider().validate_request(req)
 
 
 MODULE_OFFSET = 3

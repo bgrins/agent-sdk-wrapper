@@ -107,13 +107,12 @@ class MockResponses:
 def _sse(index: int, step: dict[str, Any]) -> str:
     response_id = f"resp_{index}"
     items: list[dict[str, Any]] = list(step.get("items", []))
-    if "call" in step:
-        call = step["call"]
+    for n, call in enumerate(step.get("calls", [step["call"]] if "call" in step else [])):
         items.append(
             {
                 "type": "function_call",
-                "id": f"fc_{index}",
-                "call_id": f"call_{index}",
+                "id": f"fc_{index}_{n}",
+                "call_id": f"call_{index}_{n}",
                 "name": call["name"],
                 "arguments": json.dumps(call.get("args", {})),
                 **({"namespace": call["namespace"]} if "namespace" in call else {}),
@@ -469,6 +468,56 @@ async def test_wrapper_tools_see_the_parent_env_and_imports(
     assert not tool_result.is_error, tool_result.output
     [content] = json.loads(tool_result.output or "{}")["content"]
     assert content["text"] == "token:t0k3n"
+
+
+async def test_wrapper_tools_validate_and_report_like_the_claude_handler(
+    mock_api, codex_home, tmp_path, monkeypatch
+):
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "kwargs_tools.py").write_text(
+        "def search(query: str, **filters: str) -> str:\n"
+        '    """Search with any filters."""\n'
+        "    return f'{query} {sorted(filters.items())}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(modules))
+    search = importlib.import_module("kwargs_tools").search
+
+    def shout(text: str) -> str:
+        """Upper-case text."""
+        if not text:
+            raise ValueError("nothing to shout")
+        return text.upper()
+
+    # A script's tools live in __main__, which the tool server rebuilds from source.
+    shout.__module__ = "__main__"
+    shout.__qualname__ = "shout"
+    namespace = "mcp__agent_sdk_wrapper_tools"
+    mock_api.plan = [
+        {
+            "calls": [
+                {"name": "search", "namespace": namespace, "args": {"query": "q", "lang": "en"}},
+                {"name": "shout", "namespace": namespace, "args": {"text": "hi"}},
+                {"name": "shout", "namespace": namespace, "args": {"text": ""}},
+            ]
+        },
+        {"text": "done"},
+    ]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path, tools=[search, shout]).run("go")
+
+    assert result.ok, result.error
+    outputs = {
+        e.event.id: (e.event.is_error, json.loads(e.event.output or "{}")["content"][0]["text"])
+        for e in result.events
+        if e.event.type == "tool_result"
+    }
+    assert outputs == {
+        "call_1_0": (False, "q [('lang', 'en')]"),
+        "call_1_1": (False, "HI"),
+        "call_1_2": (True, "Error: nothing to shout"),
+    }
 
 
 async def test_session_reports_the_model_and_mcp_startup_failures(

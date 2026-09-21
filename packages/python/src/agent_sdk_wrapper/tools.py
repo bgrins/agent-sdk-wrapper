@@ -10,7 +10,7 @@ import inspect
 import json
 import re
 import typing
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, create_model
@@ -55,12 +55,18 @@ def tool_description(fn: Callable[..., Any]) -> str:
 
 
 def _parameters(fn: Callable[..., Any]) -> list[inspect.Parameter]:
-    return [
-        param
-        for name, param in inspect.signature(fn).parameters.items()
-        if name not in ("self", "cls")
-        and param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
-    ]
+    params = []
+    for name, param in inspect.signature(fn).parameters.items():
+        if name in ("self", "cls") or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        if param.kind is param.POSITIONAL_ONLY:
+            # Tool arguments arrive by name, so every call would fail.
+            raise ConfigError(
+                f"tool {tool_name(fn)!r} has positional-only parameter {name!r}; "
+                "tool arguments are passed by keyword"
+            )
+        params.append(param)
+    return params
 
 
 def _annotations(fn: Callable[..., Any], params: list[inspect.Parameter]) -> dict[str, Any]:
@@ -143,6 +149,8 @@ def json_schema_for(fn: Callable[..., Any]) -> dict[str, Any]:
 
     try:
         schema = _arguments_model(fn).model_json_schema()
+    except ConfigError:
+        raise
     except Exception as exc:
         raise ConfigError(
             f"cannot derive an input schema for tool {tool_name(fn)!r}: {exc}", cause=exc
@@ -152,20 +160,23 @@ def json_schema_for(fn: Callable[..., Any]) -> dict[str, Any]:
     return schema
 
 
-def _make_anthropic_handler(fn: Callable[..., Any]):
+def tool_caller(fn: Callable[..., Any]) -> Callable[[dict[str, Any]], Awaitable[tuple[str, bool]]]:
+    """Validate arguments against ``json_schema_for``'s model, then call ``fn``.
+
+    The returned coroutine gives ``(text, is_error)``. Both providers' tool servers
+    use it, so a tool accepts the same arguments and reports the same text on each.
+    """
+
     model = _arguments_model(fn)
     names = [param.name for param in _parameters(fn)]
 
-    async def handler(args: dict[str, Any]) -> dict[str, Any]:
+    async def call(args: dict[str, Any]) -> tuple[str, bool]:
         try:
             validated = model.model_validate(args)
-            kwargs = {name: getattr(validated, f"p{i}") for i, name in enumerate(names)}
-            kwargs.update(validated.model_extra or {})
         except ValidationError as exc:
-            return {
-                "content": [{"type": "text", "text": f"Error: invalid arguments: {exc}"}],
-                "is_error": True,
-            }
+            return f"Error: invalid arguments: {exc}", True
+        kwargs = {name: getattr(validated, f"p{i}") for i, name in enumerate(names)}
+        kwargs.update(validated.model_extra or {})
         try:
             if inspect.iscoroutinefunction(fn):
                 result = await fn(**kwargs)
@@ -174,12 +185,22 @@ def _make_anthropic_handler(fn: Callable[..., Any]):
                 if inspect.isawaitable(result):
                     result = await result
             text = result if isinstance(result, str) else json.dumps(_jsonable(result))
-            return {"content": [{"type": "text", "text": text}]}
         except Exception as exc:  # surface as a tool error, keep the loop alive
-            return {
-                "content": [{"type": "text", "text": f"Error: {exc}"}],
-                "is_error": True,
-            }
+            return f"Error: {exc}", True
+        return text, False
+
+    return call
+
+
+def _make_anthropic_handler(fn: Callable[..., Any]):
+    call = tool_caller(fn)
+
+    async def handler(args: dict[str, Any]) -> dict[str, Any]:
+        text, is_error = await call(args)
+        out: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+        if is_error:
+            out["is_error"] = True
+        return out
 
     return handler
 

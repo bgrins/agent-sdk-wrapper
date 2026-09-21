@@ -50,7 +50,13 @@ from ..events import (
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
 from ..request import RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
-from ..tools import CODEX_TOOL_SERVER, tool_description, tool_name, validate_tool_names
+from ..tools import (
+    CODEX_TOOL_SERVER,
+    json_schema_for,
+    tool_description,
+    tool_name,
+    validate_tool_names,
+)
 from .base import ProviderAdapter
 
 _CODEX_NATIVE_TOOL_FILTER_NAMES = {
@@ -1012,15 +1018,13 @@ def _tool_manifest(callables: list[Any]) -> dict[str, Any]:
 
 
 def _tool_entry(fn: Any) -> dict[str, Any]:
-    importable = _is_importable(fn)
-    try:
+    """Describe how the tool server loads ``fn``: by import, or from its source."""
+
+    json_schema_for(fn)
+    source = None
+    if not _is_importable(fn):
         source = _source_for_tool(fn)
-    except ConfigError:
-        if not importable:
-            raise
-        source = None
-    if not importable:
-        _check_source_fallback(fn, source or "")
+        _check_source_fallback(fn, source)
     return {
         "name": tool_name(fn),
         "description": tool_description(fn),
@@ -1145,6 +1149,8 @@ def _source_for_tool_from_repo_path(fn: Any) -> str | None:
 
 
 def _tool_server_script() -> str:
+    """Serve the manifest's tools with the same schemas and calls as the Claude path."""
+
     return textwrap.dedent(
         """
         from __future__ import annotations
@@ -1154,39 +1160,90 @@ def _tool_server_script() -> str:
         import sys
         from pathlib import Path
 
-        from mcp.server.mcpserver import MCPServer as _Server
-
         manifest = json.loads(Path(__file__).with_name("tools.json").read_text(encoding="utf-8"))
         # Import tools from the same paths the parent process used.
         sys.path[:0] = [path for path in manifest["sys_path"] if path not in sys.path]
-        server = _Server("agent_sdk_wrapper_tools")
 
 
         def _resolve(entry):
-            try:
-                if entry["module"] in (None, "__main__"):
-                    raise ImportError(entry["module"])
+            if entry["source"] is None:
                 obj = importlib.import_module(entry["module"])
                 for part in entry["qualname"].split("."):
                     obj = getattr(obj, part)
                 return obj
-            except Exception:
-                if not entry.get("source"):
-                    raise
-                namespace = {}
-                exec("from __future__ import annotations\\n" + entry["source"], namespace)
-                return namespace[entry["source_name"]]
+            namespace = {}
+            exec("from __future__ import annotations\\n" + entry["source"], namespace)
+            return namespace[entry["source_name"]]
 
 
-        for entry in manifest["tools"]:
-            server.add_tool(
-                _resolve(entry),
-                name=entry["name"],
-                description=entry["description"],
-                structured_output=False,
+        def _load():
+            from agent_sdk_wrapper.tools import json_schema_for, tool_caller
+            from mcp import types
+
+            tools = {}
+            for entry in manifest["tools"]:
+                try:
+                    fn = _resolve(entry)
+                    schema = json_schema_for(fn)
+                    call = tool_caller(fn)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"cannot load tool {entry['name']!r}: {type(exc).__name__}: {exc}"
+                    ) from exc
+                spec = types.Tool(
+                    name=entry["name"], description=entry["description"], input_schema=schema
+                )
+                tools[entry["name"]] = (spec, call)
+            return tools
+
+
+        def _refuse_initialize(message):
+            # Codex reports an initialize error in its startup failure; an exit only
+            # reports a closed connection.
+            for line in sys.stdin:
+                request = json.loads(line)
+                if request.get("method") == "initialize":
+                    error = {"code": -32603, "message": message}
+                    response = {"jsonrpc": "2.0", "id": request["id"], "error": error}
+                    print(json.dumps(response), flush=True)
+                    return
+
+
+        def _serve(tools):
+            import anyio
+            from mcp import types
+            from mcp.server.lowlevel import Server
+            from mcp.server.stdio import stdio_server
+
+            async def list_tools(ctx, params):
+                return types.ListToolsResult(tools=[spec for spec, _ in tools.values()])
+
+            async def call_tool(ctx, params):
+                if params.name not in tools:
+                    text, is_error = f"Error: unknown tool {params.name!r}", True
+                else:
+                    text, is_error = await tools[params.name][1](params.arguments or {})
+                content = [types.TextContent(type="text", text=text)]
+                return types.CallToolResult(content=content, is_error=is_error)
+
+            server = Server(
+                "agent_sdk_wrapper_tools", on_list_tools=list_tools, on_call_tool=call_tool
             )
 
-        server.run("stdio")
+            async def main():
+                async with stdio_server() as (read_stream, write_stream):
+                    options = server.create_initialization_options()
+                    await server.run(read_stream, write_stream, options)
+
+            anyio.run(main)
+
+
+        try:
+            loaded = _load()
+        except Exception as exc:
+            _refuse_initialize(str(exc))
+            raise
+        _serve(loaded)
         """
     ).lstrip()
 
