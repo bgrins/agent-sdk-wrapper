@@ -1191,6 +1191,70 @@ def test_anthropic_model_fallback_warns_and_reports_the_serving_model(monkeypatc
     ]
 
 
+def _refusal_fallback(uuids, **fields):
+    from claude_agent_sdk import SystemMessage
+
+    data = {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "original_model": "claude-opus-5",
+        "fallback_model": "claude-sonnet-4-5",
+        "content": "Switched to Sonnet 4.5",
+        "retracted_message_uuids": uuids,
+        "session_id": "s1",
+        **fields,
+    }
+    return SystemMessage(subtype="model_refusal_fallback", data=data)
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        _refusal_fallback(["sub-1"], scope="local"),
+        # Older CLIs omit the scope; the uuids still name only subagent frames.
+        _refusal_fallback(["sub-1", "sub-2"]),
+    ],
+)
+def test_anthropic_retractions_of_subagent_output_keep_the_answer(monkeypatch, notice):
+    from claude_agent_sdk import TextBlock, ToolResultBlock, UserMessage
+
+    from agent_sdk_wrapper.events import Error, Text
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="partial"), parent_tool_use_id="agent-1", uuid="sub-1"),
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="t", content="x")],
+                parent_tool_use_id="agent-1",
+                uuid="sub-2",
+            ),
+            notice,
+            _assistant(TextBlock(text="main answer"), message_id="m1", uuid="main-1"),
+        ],
+    )
+
+    assert not any(isinstance(event, Error) for event in events)
+    assert [event.text for event in events if isinstance(event, Text)] == ["main answer"]
+
+
+def test_anthropic_retraction_touching_main_output_still_fails(monkeypatch):
+    from claude_agent_sdk import TextBlock
+
+    from agent_sdk_wrapper.events import Error
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="sub"), parent_tool_use_id="agent-1", uuid="sub-1"),
+            _assistant(TextBlock(text="partial"), message_id="m1", uuid="main-1"),
+            _refusal_fallback(["sub-1", "main-1"], scope="session"),
+        ],
+    )
+
+    assert [e.error_type for e in events if isinstance(e, Error)] == ["provider_protocol_error"]
+
+
 def test_anthropic_joins_text_frames_of_one_message(monkeypatch):
     from claude_agent_sdk import TextBlock, ThinkingBlock
 

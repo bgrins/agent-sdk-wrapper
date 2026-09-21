@@ -400,6 +400,8 @@ class AnthropicProvider(ProviderAdapter):
         retracted = False
         session_model: str | None = None
         seen_uuids: set[str] = set()
+        # Uuids of subagent frames, which the portable output omits.
+        omitted_uuids: set[str] = set()
         pending = _PendingText()
         # The latest error-bearing assistant message: (AssistantMessage.error, its text).
         assistant_error: tuple[str | None, str] | None = None
@@ -435,6 +437,8 @@ class AnthropicProvider(ProviderAdapter):
                                     continue
                                 seen_uuids.add(message.uuid)
                             if message.parent_tool_use_id:
+                                if message.uuid:
+                                    omitted_uuids.add(message.uuid)
                                 yield WarningEvent(
                                     message="Subagent message omitted from portable output; "
                                     "inspect on_provider_event"
@@ -456,6 +460,8 @@ class AnthropicProvider(ProviderAdapter):
                                 yield event
                         elif isinstance(message, UserMessage):
                             content = message.content
+                            if message.parent_tool_use_id and message.uuid:
+                                omitted_uuids.add(message.uuid)
                             if message.parent_tool_use_id or not isinstance(content, list):
                                 continue
                             for block in content:
@@ -492,8 +498,8 @@ class AnthropicProvider(ProviderAdapter):
                                 subagent_tasks[message.task_id] = message.status
                         elif isinstance(message, SystemMessage):
                             data = message.data
-                            if message.subtype == "model_refusal_fallback" and data.get(
-                                "retracted_message_uuids"
+                            if message.subtype == "model_refusal_fallback" and (
+                                _retracts_emitted_output(data, omitted_uuids)
                             ):
                                 yield Error(
                                     message="Claude retracted earlier messages after a refusal; "
@@ -641,6 +647,19 @@ def _native_option_names() -> frozenset[str]:
 
 def _message_text(message: AssistantMessage) -> str:
     return "".join(block.text for block in message.content if isinstance(block, TextBlock))
+
+
+def _retracts_emitted_output(data: dict[str, Any], omitted_uuids: set[str]) -> bool:
+    """Whether a refusal fallback retracts messages the portable output may contain.
+
+    A ``local`` scope, or a notice from a subagent, retracts only subagent or side
+    requests, and so does a list of uuids that all belong to omitted subagent frames.
+    """
+
+    retracted = data.get("retracted_message_uuids") or []
+    if not retracted or data.get("scope") == "local" or data.get("parent_tool_use_id"):
+        return False
+    return not set(retracted) <= omitted_uuids
 
 
 def _fallback_warning(message: SystemMessage, *, include_raw: bool) -> WarningEvent:
