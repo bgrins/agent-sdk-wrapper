@@ -699,7 +699,10 @@
     {
       "id": "anthropic.invalid_key",
       "provider": "anthropic",
-      "options": { "model": "claude-haiku-4-5", "env": { "ANTHROPIC_API_KEY": "sk-ant-invalid-conformance" } },
+      "options": {
+        "model": "claude-haiku-4-5",
+        "env": { "ANTHROPIC_API_KEY": "sk-ant-invalid-conformance", "CLAUDE_CODE_MAX_RETRIES": "0" }
+      },
       "prompt": "Say ok.",
       "mock": [{ "status": 401, "body": { "type": "error", "error": { "type": "authentication_error", "message": "invalid x-api-key" } } }],
       "expect": {

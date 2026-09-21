@@ -562,7 +562,7 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
         : { client: { env: { ...env } }, thread: { skipGitRepoCheck: true } }),
     });
     const deadline = AbortSignal.timeout(
-      (mode === "live" ? 170_000 : 60_000) * plan.turns.length,
+      (mode === "live" ? 300_000 : 60_000) * plan.turns.length,
     );
     const defaults = (fragment: Fragment) => {
       const signal = fragment.request?.signal;
