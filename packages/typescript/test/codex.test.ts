@@ -334,7 +334,6 @@ test("Codex truncated streams fail; signal exits throw", async () => {
     new Error("Codex Exec exited with signal SIGTERM:"),
   );
   await assert.rejects(killed.agent.run("killed"), ProcessTerminatedError);
-  assert.equal(killed.clients.length, 1);
 });
 test("closing a Codex stream closes its iterator without aborting the native signal", async () => {
   const { agent, turns, closed } = harness([

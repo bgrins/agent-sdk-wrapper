@@ -6,7 +6,6 @@ import {
   ProcessTerminatedError,
   ProviderError,
   RuntimeUnavailableError,
-  TransientError,
 } from "../errors.js";
 import type { ErrorEvent } from "../events.js";
 import { checkKeys } from "../request.js";
@@ -153,7 +152,5 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
     "provider_exception",
     typeof data?.status === "number" ? data.status : undefined,
   );
-  return error.error_type === "transient_api_error"
-    ? new TransientError(message, { cause })
-    : new ProviderError(message, error.error_type, { cause });
+  return new ProviderError(message, error.error_type, { cause });
 }

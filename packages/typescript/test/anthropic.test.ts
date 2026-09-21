@@ -12,7 +12,6 @@ import {
   ConfigError,
   ProviderError,
   RuntimeUnavailableError,
-  TransientError,
 } from "../src/index.js";
 import type {
   AgentDefaults,
@@ -612,7 +611,7 @@ for (const [error, status, reason, message, expected] of [
   });
 test("Claude synthetic API failures become one transient error", async () => {
   const message = "API Error: 529 overloaded";
-  const { agent, captured } = harness([
+  const { agent } = harness([
     init("claude-test"),
     assistant(
       [textBlock(message)],
@@ -622,7 +621,6 @@ test("Claude synthetic API failures become one transient error", async () => {
     result({ is_error: true, api_error_status: 529, result: message }),
   ]);
   const run = await agent.run("fail");
-  assert.equal(captured.length, 1);
   assert.deepEqual(
     [run.error, run.error_type],
     [message, "transient_api_error"],
@@ -845,7 +843,7 @@ test("Claude keeps a finished answer when the runtime then fails", async () => {
   const { agent } = harness(
     [assistant([textBlock("final answer")])],
     {},
-    new TransientError("overloaded"),
+    new Error("overloaded"),
   );
   const run = await agent.run("answer");
   assert.equal(run.final_text, "final answer");

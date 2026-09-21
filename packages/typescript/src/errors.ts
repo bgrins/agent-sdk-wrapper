@@ -6,8 +6,6 @@ export class AgentSdkWrapperError extends Error {
 }
 export class ConfigError extends AgentSdkWrapperError {}
 export class RuntimeUnavailableError extends AgentSdkWrapperError {}
-export { RuntimeUnavailableError as ProviderNotAvailableError };
-export class TransientError extends AgentSdkWrapperError {}
 export class ProcessTerminatedError extends AgentSdkWrapperError {}
 export class ProviderProtocolError extends AgentSdkWrapperError {}
 export class TraceWriteError extends AgentSdkWrapperError {}

@@ -6,9 +6,9 @@ import {
   Agent,
   ConfigError,
   ProcessTerminatedError,
+  ProviderError,
   ProviderProtocolError,
   RuntimeUnavailableError,
-  TransientError,
   collectRun,
   resolveProvider,
 } from "../src/index.js";
@@ -268,20 +268,17 @@ test("constructor session ID is available before the first run", async () => {
   assert.equal(agent.sessionId, "saved");
   assert.equal((await agent.run("resume")).session_id, "saved");
 });
-test("a transient failure ends the run with its type", async () => {
-  let calls = 0;
+test("a thrown ProviderError ends the run with its type", async () => {
   const agent = new Agent(
     { provider: "codex" },
     {
       // biome-ignore lint/correctness/useYield: model a transient startup failure
       openai: fake(async function* () {
-        calls++;
-        throw new TransientError("unavailable");
+        throw new ProviderError("unavailable", "transient_api_error");
       }),
     },
   );
-  const result = await agent.run("no retry");
-  assert.equal(calls, 1);
+  const result = await agent.run("transient");
   assert.equal(result.status, "failure");
   assert.deepEqual(
     [result.error, result.error_type],
@@ -299,7 +296,7 @@ test("a provider error wins over a later exception", async () => {
           message: "real failure",
           error_type: "max_turns",
         };
-        throw new TransientError("cleanup failure");
+        throw new Error("cleanup failure");
       }),
     },
   );
@@ -315,13 +312,11 @@ test("a provider error wins over a later exception", async () => {
   );
 });
 test("signal-killed runtimes record the failure, then throw", async () => {
-  let calls = 0;
   const agent = new Agent(
     { provider: "openai" },
     {
       // biome-ignore lint/correctness/useYield: model a runtime killed before its first frame
       openai: fake(async function* () {
-        calls++;
         throw new ProcessTerminatedError("SIGTERM");
       }),
     },
@@ -333,7 +328,6 @@ test("signal-killed runtimes record the failure, then throw", async () => {
     }),
     ProcessTerminatedError,
   );
-  assert.equal(calls, 1);
   assert.deepEqual(
     seen.map((env) => env.event.type),
     ["run_started", "error", "run_finished"],

@@ -6,7 +6,6 @@ import {
   ProviderProtocolError,
   RuntimeUnavailableError,
   TraceWriteError,
-  TransientError,
 } from "./errors.js";
 import {
   type AgentEvent,
@@ -37,15 +36,13 @@ function errorEvent(cause: unknown): ErrorEvent {
     type: "error",
     message: cause instanceof Error ? cause.message : String(cause),
     error_type:
-      cause instanceof TransientError
-        ? "transient_api_error"
-        : cause instanceof ProviderError
-          ? cause.errorType
-          : cause instanceof ProviderProtocolError
-            ? "provider_protocol_error"
-            : cause instanceof RuntimeUnavailableError
-              ? "runtime_unavailable"
-              : "provider_exception",
+      cause instanceof ProviderError
+        ? cause.errorType
+        : cause instanceof ProviderProtocolError
+          ? "provider_protocol_error"
+          : cause instanceof RuntimeUnavailableError
+            ? "runtime_unavailable"
+            : "provider_exception",
   };
 }
 
