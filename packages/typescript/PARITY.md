@@ -64,6 +64,11 @@ in that session.
 ## Shared limits
 
 - Text events are completed assistant messages, not token deltas.
+- The packages bundle different Claude CLI builds (Python 2.1.259, TypeScript 2.1.268), so
+  runtime behavior can differ; for example, after a stream fails following partial text,
+  2.1.268 streams again and repeats the partial text as more Text events.
+- `effort` has no effect where the model does not take it: the Claude CLI sends a fixed
+  thinking budget for `claude-haiku-4-5` and `claude-sonnet-4-5`.
 - Claude subagent messages are omitted with a warning; their tokens are included in totals.
 - Claude background subagents are disabled, so a run has one result. The `Workflow` tool
   still runs in the background; a run that allows it can end at its first result,
