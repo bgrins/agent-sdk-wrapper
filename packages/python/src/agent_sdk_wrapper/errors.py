@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .events import RunResult
+
 
 class AgentSdkWrapperError(Exception):
     """Base class for every error this library raises."""
@@ -36,8 +41,11 @@ class ProcessTerminatedError(AgentSdkWrapperError):
 
 
 class RunFailedError(AgentSdkWrapperError):
-    """The agent run completed in a non-success state and raise_on_error was set."""
+    """``run()`` ended in a non-success state and raise_on_error was set.
 
-    def __init__(self, message: str, *, status: str, cause: BaseException | None = None) -> None:
-        super().__init__(message, cause=cause)
-        self.status = status
+    ``result`` is the failed ``RunResult``.
+    """
+
+    def __init__(self, result: RunResult) -> None:
+        super().__init__(result.error or f"run ended with status {result.status.value}")
+        self.result = result

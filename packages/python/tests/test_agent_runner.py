@@ -9,6 +9,7 @@ import pytest
 
 from agent_sdk_wrapper import (
     Agent,
+    ConfigError,
     Error,
     EventEnvelope,
     ProcessTerminatedError,
@@ -112,12 +113,21 @@ def test_the_first_provider_error_sets_the_result_error(monkeypatch):
     assert result.to_dict()["error_type"] == "transient_api_error"
 
 
-def test_raise_on_error(monkeypatch):
+def test_raise_on_error_carries_the_result(monkeypatch):
     play, _ = script(TransientError("rate limit"))
     install_fake_providers(monkeypatch, events=play)
 
-    with pytest.raises(RunFailedError):
+    with pytest.raises(RunFailedError, match="rate limit") as raised:
         asyncio.run(Agent(provider="openai", raise_on_error=True).run("hi"))
+
+    assert raised.value.result.error_type == "transient_api_error"
+
+
+def test_stream_rejects_raise_on_error(monkeypatch):
+    install_fake_providers(monkeypatch)
+
+    with pytest.raises(ConfigError, match="raise_on_error"):
+        Agent(provider="openai").stream("hi", raise_on_error=True)
 
 
 def test_a_stream_method_that_raises_is_a_failed_run(monkeypatch):

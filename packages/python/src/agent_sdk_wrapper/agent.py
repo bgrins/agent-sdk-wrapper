@@ -208,6 +208,8 @@ class Agent:
     def stream(self, prompt: str, **overrides: Any) -> AsyncIterator[EventEnvelope]:
         """Stream envelopes for one run. Invalid settings raise ``ConfigError`` here."""
 
+        if "raise_on_error" in overrides:
+            raise ConfigError("stream() does not accept raise_on_error; check run_finished")
         return self._events(self._prepare(prompt, overrides))
 
     async def run(self, prompt: str, **overrides: Any) -> RunResult:
@@ -220,7 +222,7 @@ class Agent:
         result = run.result
         assert result is not None
         if not result.ok and run.raise_on_error:
-            raise RunFailedError(result.error or "run failed", status=result.status.value)
+            raise RunFailedError(result)
         return result
 
     def run_sync(self, prompt: str, **overrides: Any) -> RunResult:
