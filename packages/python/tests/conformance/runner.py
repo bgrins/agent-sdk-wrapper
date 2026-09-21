@@ -37,7 +37,14 @@ LIVE_MODELS = {
     "codex": ("AGENT_SDK_WRAPPER_OPENAI_MODEL", "gpt-5.6-luna"),
 }
 LIVE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
-RUN_KEYWORDS = frozenset({"raise_on_error"})
+# Live runs keep their artifacts for inspection unless a case writes its own.
+LIVE_ARTIFACTS = Path(
+    os.environ.get("AGENT_SDK_WRAPPER_TEST_ARTIFACTS_DIR")
+    or Path(__file__).resolve().parents[2]
+    / "results"
+    / "integration-runs"
+    / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+).resolve()
 MOCK_KEY = {"anthropic": "sk-ant-mock", "codex": "sk-mock-key"}
 DEAD_PROXY = "http://127.0.0.1:9"
 # A run that outlives this is a hung test, not a case result.
@@ -78,13 +85,13 @@ def live_view(case: dict[str, Any]) -> dict[str, Any]:
     """The case as its live section describes it."""
 
     live = case["live"]
+    live_runs = live.get("runs", [])
     runs = [
-        {**run, **(live.get("runs") or [])[n]} if n < len(live.get("runs") or []) else run
+        {**run, **(live_runs[n] if n < len(live_runs) else {})}
         for n, run in enumerate(case.get("runs", []))
     ]
-    model = os.environ.get(LIVE_MODELS[case["provider"]][0]) or live.get("options", {}).get(
-        "model", LIVE_MODELS[case["provider"]][1]
-    )
+    variable, default = LIVE_MODELS[case["provider"]]
+    model = os.environ.get(variable) or live.get("options", {}).get("model", default)
     return {
         **case,
         "prompt": live.get("prompt", case["prompt"]),
@@ -310,7 +317,9 @@ async def _mock(
     if provider == "anthropic":
         monkeypatch.setenv("ANTHROPIC_BASE_URL", api.base_url)
         monkeypatch.setenv("CLAUDE_CODE_MAX_RETRIES", "0")
-    monkeypatch.setenv("ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY", MOCK_KEY[provider])
+    monkeypatch.setenv(
+        "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY", MOCK_KEY[provider]
+    )
     try:
         yield api
     finally:
@@ -322,16 +331,18 @@ async def _runs(case: dict[str, Any], ctx: Context, live: bool) -> None:
     base = _merged(base, case.get("options", {}))
     agent: Agent | None = None
     runs = [
-        {"prompt": case["prompt"], "options": case.get("run_options", {}), "expect": case["expect"]},
+        {
+            "prompt": case["prompt"],
+            "options": case.get("run_options", {}),
+            "expect": case["expect"],
+        },
         *case.get("runs", []),
     ]
     for n, run in enumerate(runs):
         new_agent = n == 0 or run.get("agent") == "new"
-        agent_options = base
-        run_options = run.get("options", {})
+        agent_options, run_options = base, run.get("options", {})
         if new_agent and n > 0:
-            agent_options = _merged(base, run_options)
-            run_options = {}
+            agent_options, run_options = _merged(base, run_options), {}
         first_request = len(ctx.api.requests) if ctx.api else 0
         ctx.events.clear()
         outcome = Outcome()
@@ -340,6 +351,8 @@ async def _runs(case: dict[str, Any], ctx: Context, live: bool) -> None:
                 agent = Agent(**await ctx.native(agent_options))
             assert agent is not None
             overrides = await ctx.native(run_options)
+            if live and "artifacts_dir" not in agent_options | run_options:
+                overrides["artifacts_dir"] = LIVE_ARTIFACTS / case["id"] / f"run-{n}"
             outcome.result = await asyncio.wait_for(
                 agent.run(run["prompt"], **overrides), RUN_LIMIT_S
             )
@@ -349,7 +362,7 @@ async def _runs(case: dict[str, Any], ctx: Context, live: bool) -> None:
             outcome.raised = exc
             outcome.result = exc.result
         requests = ctx.api.requests[first_request:] if ctx.api else []
-        check(run["expect"], outcome, requests, ctx, run_options=agent_options | run_options, live=live)
+        check(run["expect"], outcome, requests, ctx, options=agent_options | run_options, live=live)
         if outcome.result is not None:
             ctx.session_id = outcome.result.session_id
 
@@ -367,50 +380,58 @@ def check(
     requests: list[dict[str, Any]],
     ctx: Context,
     *,
-    run_options: dict[str, Any],
+    options: dict[str, Any],
     live: bool,
 ) -> None:
+    """Assert a run's expectations; ``options`` are the run's JSON options."""
+
     if expect.get("config_error"):
         assert outcome.config_error is not None, "expected ConfigError"
         assert requests == []
         return
     if outcome.config_error is not None:
         raise outcome.config_error
-    assert (outcome.raised is not None) == (expect.get("raises") == "RunFailedError"), outcome.raised
-    result = outcome.result
-    assert result is not None
-    envelopes = result.events
-    events = [envelope.event for envelope in envelopes]
+    raised = outcome.raised is not None
+    assert raised == (expect.get("raises") == "RunFailedError"), outcome.raised
+    assert outcome.result is not None
+    _check_result(expect, outcome.result, ctx)
+    _check_outputs(expect, outcome.result, ctx, options)
+    if "setup_error" in expect:
+        assert requests == []
+    if not live:
+        wanted = expect.get("requests", {})
+        if "count" in wanted:
+            assert len(requests) == wanted["count"], [r["body"] for r in requests]
+        for match in wanted.get("match", []):
+            _check_match(match, requests)
+
+
+def _check_result(expect: dict[str, Any], result: RunResult, ctx: Context) -> None:
+    events = [envelope.event for envelope in result.events]
     types = [event.type for event in events]
     detail = f"{result.status.value} {result.error_type}: {result.error}; events {types}"
-
     if "setup_error" in expect:
-        assert (result.status.value, result.error_type) == ("failure", expect["setup_error"]), detail
-        assert requests == []
-    if "status" in expect:
-        assert result.status.value == expect["status"], detail
-    if "error_type" in expect:
-        assert result.error_type == expect["error_type"], detail
-    if "final_text" in expect:
-        assert result.final_text == expect["final_text"], detail
+        assert (result.status.value, result.error_type) == ("failure", expect["setup_error"]), (
+            detail
+        )
+    for name in ("status", "error_type", "final_text"):
+        if name in expect:
+            actual = getattr(result, name)
+            assert getattr(actual, "value", actual) == expect[name], detail
     if "final_text_contains" in expect:
         assert expect["final_text_contains"] in result.final_text, result.final_text
     matcher = expect.get("events", {})
-    for name in matcher.get("includes", []):
-        assert name in types, detail
-    for name in matcher.get("excludes", []):
-        assert name not in types, detail
+    assert set(matcher.get("includes", [])) <= set(types), detail
+    assert not set(matcher.get("excludes", [])) & set(types), detail
     if "count" in matcher:
-        assert len(envelopes) == matcher["count"], types
+        assert len(types) == matcher["count"], types
     calls = [call.name for call in result.tool_calls()]
     wanted_calls = expect.get("tool_calls", {})
     if isinstance(wanted_calls, list):
         assert calls == wanted_calls, detail
     else:
-        for name in wanted_calls.get("includes", []):
-            assert name in calls, detail
-        for name in wanted_calls.get("excludes", []):
-            assert name not in calls, detail
+        assert set(wanted_calls.get("includes", [])) <= set(calls), detail
+        assert not set(wanted_calls.get("excludes", [])) & set(calls), detail
     if "tool_results" in expect:
         results = [event for event in events if event.type == "tool_result"]
         assert len(results) == len(expect["tool_results"]), results
@@ -423,28 +444,28 @@ def check(
         assert value == expect["structured_output"], detail
     if "same_session" in expect:
         assert (result.session_id == ctx.session_id) == expect["same_session"], result.session_id
-    envelope_keys = [(envelope.sequence, envelope.event.type) for envelope in envelopes]
-    if expect.get("on_event"):
-        _check_envelopes([(e.sequence, e.event.type) for e in ctx.events], envelope_keys)
-    if expect.get("trace_file"):
-        path = run_options.get("trace_file") or Path(run_options["artifacts_dir"]) / "trace.jsonl"
-        lines = ctx.path(str(path)).read_text(encoding="utf-8").splitlines()
-        traced = [json.loads(line) for line in lines]
-        _check_envelopes([(t["sequence"], t["event"]["type"]) for t in traced], envelope_keys)
-    if expect.get("on_provider_event"):
-        assert ctx.provider_events, "no native events"
     for name in expect.get("raw", []):
         raw = [event.raw for event in events if event.type == name]
         assert raw and all(item is not None for item in raw), (name, raw)
+
+
+def _check_outputs(
+    expect: dict[str, Any], result: RunResult, ctx: Context, options: dict[str, Any]
+) -> None:
+    """The callbacks, trace and artifacts a run wrote."""
+
+    kept = [(envelope.sequence, envelope.event.type) for envelope in result.events]
+    if expect.get("on_event"):
+        _check_envelopes([(e.sequence, e.event.type) for e in ctx.events], kept)
+    if expect.get("trace_file"):
+        path = options.get("trace_file") or Path(options["artifacts_dir"]) / "trace.jsonl"
+        lines = ctx.path(str(path)).read_text(encoding="utf-8").splitlines()
+        traced = [json.loads(line) for line in lines]
+        _check_envelopes([(t["sequence"], t["event"]["type"]) for t in traced], kept)
+    if expect.get("on_provider_event"):
+        assert ctx.provider_events, "no native events"
     for name in expect.get("artifacts", []):
-        assert (ctx.path(run_options["artifacts_dir"]) / name).is_file(), name
-    if live:
-        return
-    wanted = expect.get("requests", {})
-    if "count" in wanted:
-        assert len(requests) == wanted["count"], [r["body"] for r in requests]
-    for match in wanted.get("match", []):
-        _check_match(match, requests)
+        assert (ctx.path(options["artifacts_dir"]) / name).is_file(), name
 
 
 def _check_envelopes(seen: list[tuple[int, str]], result: list[tuple[int, str]]) -> None:

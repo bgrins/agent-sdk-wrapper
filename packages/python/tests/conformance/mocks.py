@@ -184,7 +184,9 @@ class MockClaude(MockApi):
     def respond(self, handler: Handler, index: int, step: dict[str, Any], body: Any) -> None:
         model = body.get("model", "claude-haiku-4-5") if isinstance(body, dict) else ""
         if isinstance(body, dict) and body.get("stream"):
-            handler.sse(_claude_events(index, model, step), step.get("headers"), step.get("truncate"))
+            handler.sse(
+                _claude_events(index, model, step), step.get("headers"), step.get("truncate")
+            )
             return
         if "stream_error" in step:
             error = step["stream_error"]
@@ -204,8 +206,13 @@ class MockClaude(MockApi):
         handler.send(200, message, headers=step.get("headers"))
 
 
+def _tool_calls(step: dict[str, Any]) -> list[dict[str, Any]]:
+    tool = step.get("tool", [])
+    return tool if isinstance(tool, list) else [tool]
+
+
 def _claude_message(index: int, model: str, step: dict[str, Any]) -> dict[str, Any]:
-    input_tokens, output_tokens = step.get("usage", (100, 10))
+    input_tokens, output_tokens = step.get("usage", (100, 10))[:2]
     return {
         "id": f"msg_{index}",
         "type": "message",
@@ -234,7 +241,7 @@ def _claude_blocks(index: int, step: dict[str, Any]) -> list[dict[str, Any]]:
         blocks.append({"type": "thinking", "thinking": step["thinking"], "signature": "c2ln"})
     if "text" in step:
         blocks.append({"type": "text", "text": step["text"]})
-    calls = [step["tool"]] if "tool" in step else []
+    calls = _tool_calls(step)
     if "shell" in step:
         calls.append({"name": "Bash", "input": {"command": step["shell"]}})
     for n, call in enumerate(calls):
@@ -319,10 +326,10 @@ def _codex_events(index: int, step: dict[str, Any]) -> list[dict[str, Any]]:
                 "arguments": {"query": step["tool_search"]},
             }
         )
-    if "tool" in step:
-        items.append(_codex_call(index, **step["tool"]))
+    calls = _tool_calls(step)
     if "shell" in step:
-        items.append(_codex_call(index, "exec_command", {"cmd": step["shell"]}))
+        calls.append({"name": "exec_command", "input": {"cmd": step["shell"]}})
+    items += [_codex_call(f"{index}_{n}", **call) for n, call in enumerate(calls)]
     if "text" in step:
         items.append(
             {
@@ -339,24 +346,27 @@ def _codex_events(index: int, step: dict[str, Any]) -> list[dict[str, Any]]:
     if "stream_error" in step:
         failed = {"id": response_id, "status": "failed", "error": step["stream_error"]}
         return [*events, {"type": "response.failed", "response": failed}]
-    input_tokens, output_tokens = step.get("usage", (100, 10))
+    input_tokens, output_tokens, reasoning_tokens = [*step.get("usage", (100, 10)), 0][:3]
     usage = {
         "input_tokens": input_tokens,
         "input_tokens_details": {"cached_tokens": 0},
         "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "total_tokens": input_tokens + output_tokens,
     }
-    return [*events, {"type": "response.completed", "response": {"id": response_id, "usage": usage}}]
+    return [
+        *events,
+        {"type": "response.completed", "response": {"id": response_id, "usage": usage}},
+    ]
 
 
-def _codex_call(index: int, name: str, input: dict[str, Any] | None = None) -> dict[str, Any]:
+def _codex_call(call_id: str, name: str, input: dict[str, Any] | None = None) -> dict[str, Any]:
     """A function call; ``mcp__<server>__<tool>`` becomes Codex's namespaced MCP call."""
 
     call: dict[str, Any] = {
         "type": "function_call",
-        "id": f"fc_{index}",
-        "call_id": f"call_{index}",
+        "id": f"fc_{call_id}",
+        "call_id": f"call_{call_id}",
         "name": name,
         "arguments": json.dumps(input or {}),
     }

@@ -88,9 +88,7 @@ def test_every_option_has_a_case_or_an_exemption():
     exemptions = SPEC["coverage_exemptions"]["python"]
     for provider, options in _options().items():
         used = set().union(*(_used(c) for c in CASES if c["provider"] == provider))
-        exempt = {
-            key.split(":", 1)[1] for key in exemptions if key.startswith(f"{provider}:")
-        }
+        exempt = {key.split(":", 1)[1] for key in exemptions if key.startswith(f"{provider}:")}
         assert not exempt - options, f"{provider} exemptions name unknown options"
         assert not exempt & used, f"{provider} exemptions name options a case uses"
         assert options - used - exempt == set(), f"{provider} options without a case"

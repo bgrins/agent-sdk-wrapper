@@ -430,7 +430,7 @@ def _live_model_for(provider: str, *, use_generic_model_env: bool = True) -> str
     return (
         os.environ.get("OPENAI_MODEL")
         or (os.environ.get("MODEL") if selected_provider == "openai" else None)
-        # Matches the live-test default in tests/test_live_integration.py.
+        # Matches the live-test default in tests/conformance/runner.py.
         or "gpt-5.6-luna"
     )
 
