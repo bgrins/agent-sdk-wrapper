@@ -1,6 +1,9 @@
 {
   "description": "Cross-language conformance cases. Each case runs the real Claude or Codex runtime in both packages: offline against a local mock API that answers with `mock` steps and records requests, and live (opt-in, billed) when the case has a `live` section. Format: docs/fixtures/CONFORMANCE.md.",
   "version": 1,
+  "coverage_exemptions": {
+    "python": {}
+  },
   "cases": [
     {
       "id": "anthropic.basic",
@@ -12,9 +15,24 @@
         "status": "success",
         "final_text": "PONG",
         "events": { "includes": ["run_started", "session_info", "text", "usage", "run_finished"] },
-        "requests": { "count": 1, "match": [{ "path": "model", "equals": "claude-haiku-4-5" }] }
+        "requests": {
+          "count": 1,
+          "match": [
+            { "path": "model", "equals": "claude-haiku-4-5" },
+            { "path": "messages.0", "contains": "Reply with the single word PONG." },
+            { "header": "x-api-key", "equals": "sk-ant-mock" }
+          ]
+        }
       },
       "live": { "expect": { "status": "success", "final_text_contains": "PONG" } }
+    },
+    {
+      "id": "anthropic.thinking",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "thinking": "plan", "text": "ok", "usage": [10, 2] }],
+      "expect": { "status": "success", "final_text": "ok", "events": { "includes": ["thinking", "text", "usage"] } }
     },
     {
       "id": "anthropic.effort",
@@ -25,7 +43,642 @@
       "expect": {
         "status": "success",
         "requests": { "match": [{ "path": "output_config.effort", "equals": "low" }] }
+      },
+      "live": { "expect": { "status": "success" } }
+    },
+    {
+      "id": "anthropic.effort_unsupported",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "effort": "minimal" },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.system_prompt",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "system_prompt": "When asked for the code word, reply with only MAPLE7."
+      },
+      "prompt": "What is the code word?",
+      "mock": [{ "text": "MAPLE7" }],
+      "expect": {
+        "status": "success",
+        "requests": { "match": [{ "path": "system", "contains": "When asked for the code word, reply with only MAPLE7." }] }
+      },
+      "live": { "expect": { "status": "success", "final_text_contains": "MAPLE7" } }
+    },
+    {
+      "id": "anthropic.run_overrides",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "system_prompt": "AGENT-DEFAULT-PROMPT" },
+      "run_options": { "system_prompt": "RUN-OVERRIDE-PROMPT", "model": "claude-sonnet-4-6" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "system", "contains": "RUN-OVERRIDE-PROMPT" },
+            { "path": "system", "excludes": "AGENT-DEFAULT-PROMPT" },
+            { "path": "model", "equals": "claude-sonnet-4-6" }
+          ]
+        }
       }
+    },
+    {
+      "id": "anthropic.run_override_unknown",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "run_options": { "provider_options": { "cli_path": "claude" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.builtin_tools",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "builtin_tools": ["Read"] },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "request": 0, "path": "tools.0.name", "equals": "Read" },
+            { "request": 0, "path": "tools.1", "absent": true }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.builtin_tools_none",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "builtin_tools": "none" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "tools.0", "absent": true }] } }
+    },
+    {
+      "id": "anthropic.write_needs_approval",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Create a file.",
+      "mock": [{ "shell": "touch made-by-bash && echo CONF_TOUCHED" }, { "text": "done" }],
+      "expect": { "status": "success", "tool_calls": ["Bash"], "tool_results": [{ "contains": "", "is_error": true }] }
+    },
+    {
+      "id": "anthropic.allowed_tools",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "allowed_tools": ["Bash"] },
+      "prompt": "Create a file.",
+      "mock": [{ "shell": "touch made-by-bash && echo CONF_TOUCHED" }, { "text": "done" }],
+      "expect": { "status": "success", "tool_results": [{ "contains": "CONF_TOUCHED" }] }
+    },
+    {
+      "id": "anthropic.disallowed_tools",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "disallowed_tools": ["Bash"] },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "tools", "contains": "\"name\":\"Read\"" },
+            { "path": "tools", "excludes": "\"name\":\"Bash\"" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.web_tools_off",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "web_tools": false },
+      "prompt": "Search the web for today's top news headline. If you cannot search the web, reply exactly NO_WEB.",
+      "mock": [{ "text": "NO_WEB" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "tools", "contains": "\"name\":\"Read\"" },
+            { "path": "tools", "excludes": "\"name\":\"WebSearch\"" },
+            { "path": "tools", "excludes": "\"name\":\"WebFetch\"" }
+          ]
+        }
+      },
+      "live": { "expect": { "status": "success", "tool_calls": { "excludes": ["WebSearch", "WebFetch"] } } }
+    },
+    {
+      "id": "anthropic.web_tools_on",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "web_tools": true, "builtin_tools": ["Read"] },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "tools", "contains": "\"name\":\"WebSearch\"" },
+            { "path": "tools", "contains": "\"name\":\"WebFetch\"" },
+            { "path": "tools", "excludes": "\"name\":\"Bash\"" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.web_tools_conflict",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "web_tools": true, "builtin_tools": "none" },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.tools",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "tools": ["add", "shout"] },
+      "prompt": "Use the add tool to add 1234 and 4321, then use shout on the word maple. Reply with the sum.",
+      "mock": [
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1234, "b": 4321 } } },
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "maple" } } },
+        { "text": "5555 MAPLE" }
+      ],
+      "expect": {
+        "status": "success",
+        "tool_calls": ["mcp__agent_sdk_wrapper_tools__add", "mcp__agent_sdk_wrapper_tools__shout"],
+        "tool_results": [{ "contains": "5555" }, { "contains": "MAPLE" }],
+        "requests": {
+          "count": 3,
+          "match": [
+            { "request": 0, "path": "tools", "contains": "\"name\":\"mcp__agent_sdk_wrapper_tools__add\"" },
+            { "request": 1, "path": "messages.-1", "contains": "5555" },
+            { "request": 2, "path": "messages.-1", "contains": "MAPLE" }
+          ]
+        }
+      },
+      "live": {
+        "expect": {
+          "status": "success",
+          "final_text_contains": "5555",
+          "tool_calls": { "includes": ["mcp__agent_sdk_wrapper_tools__add", "mcp__agent_sdk_wrapper_tools__shout"] }
+        }
+      }
+    },
+    {
+      "id": "anthropic.tool_error",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "tools": ["shout"] },
+      "prompt": "Shout nothing.",
+      "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "" } } }, { "text": "failed" }],
+      "expect": { "status": "success", "tool_results": [{ "contains": "nothing to shout", "is_error": true }] }
+    },
+    {
+      "id": "anthropic.mcp_servers",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "mcp_servers": [{ "name": "brief_tools", "fixture": "simple_mcp_server", "enabled_tools": ["read_brief"] }],
+        "allowed_tools": ["mcp__brief_tools__read_brief"]
+      },
+      "prompt": "Use read_brief, then reply with LIVE_MCP_OK.",
+      "mock": [{ "tool": { "name": "mcp__brief_tools__read_brief", "input": {} } }, { "text": "LIVE_MCP_OK" }],
+      "expect": {
+        "status": "success",
+        "tool_calls": ["mcp__brief_tools__read_brief"],
+        "tool_results": [{ "contains": "LIVE_MCP_OK: external MCP server returned the release-readiness brief." }],
+        "requests": { "match": [{ "request": 0, "path": "tools", "contains": "\"name\":\"mcp__brief_tools__read_brief\"" }] }
+      },
+      "live": {
+        "expect": { "status": "success", "final_text_contains": "LIVE_MCP_OK", "tool_calls": { "includes": ["mcp__brief_tools__read_brief"] } }
+      }
+    },
+    {
+      "id": "anthropic.mcp_codex_only_field",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "mcp_servers": [{ "name": "brief_tools", "fixture": "simple_mcp_server", "required": true }]
+      },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.mcp_reserved_name",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "mcp_servers": [{ "name": "agent_sdk_wrapper_tools", "fixture": "simple_mcp_server" }]
+      },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.subagents",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "subagents": {
+          "reviewer": {
+            "description": "Reviews tiny Python snippets for obvious bugs.",
+            "prompt": "You are a terse reviewer. Return one sentence."
+          }
+        }
+      },
+      "prompt": "Delegate this to reviewer: def add(a, b): return a - b. Return the reviewer's verdict.",
+      "mock": [
+        { "tool": { "name": "Agent", "input": { "description": "Review add", "prompt": "Review def add(a, b): return a - b.", "subagent_type": "reviewer" } } },
+        { "text": "It subtracts instead of adding." },
+        { "text": "The reviewer says it subtracts instead of adding." }
+      ],
+      "expect": {
+        "status": "success",
+        "final_text": "The reviewer says it subtracts instead of adding.",
+        "tool_calls": ["Agent"],
+        "events": { "includes": ["subagent_started", "subagent_ended"] },
+        "tool_results": [{ "contains": "It subtracts instead of adding." }],
+        "requests": {
+          "count": 3,
+          "match": [
+            { "request": 0, "path": "messages.0", "contains": "reviewer: Reviews tiny Python snippets for obvious bugs." },
+            { "request": 1, "path": "system", "contains": "You are a terse reviewer. Return one sentence." },
+            { "request": 1, "path": "model", "equals": "claude-haiku-4-5" }
+          ]
+        }
+      },
+      "live": {
+        "expect": { "status": "success", "tool_calls": { "includes": ["Agent"] }, "events": { "includes": ["subagent_started"] } }
+      }
+    },
+    {
+      "id": "anthropic.subagent_definition",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "subagents": {
+          "reader": { "description": "Reads files.", "prompt": "You read files.", "model": "claude-sonnet-4-6", "tools": ["Read"] }
+        }
+      },
+      "prompt": "Ask reader to read a file.",
+      "mock": [
+        { "tool": { "name": "Agent", "input": { "description": "Read", "prompt": "Read README.md.", "subagent_type": "reader" } } },
+        { "text": "read" },
+        { "text": "done" }
+      ],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "request": 1, "path": "model", "equals": "claude-sonnet-4-6" },
+            { "request": 1, "path": "tools.0.name", "equals": "Read" },
+            { "request": 1, "path": "tools.1", "absent": true }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.structured_tool_handoff",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "tools": ["add"], "output_schema": "Weather" },
+      "prompt": "Call add with a=19 and b=2, then report the weather for Paris with temp_c set to the sum.",
+      "mock": [
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 19, "b": 2 } } },
+        { "tool": { "name": "StructuredOutput", "input": { "city": "Paris", "temp_c": 21 } } }
+      ],
+      "expect": {
+        "status": "success",
+        "structured_output": { "city": "Paris", "temp_c": 21 },
+        "tool_calls": ["mcp__agent_sdk_wrapper_tools__add", "StructuredOutput"],
+        "events": { "includes": ["structured_output"] },
+        "requests": { "match": [{ "request": 0, "path": "tools", "contains": "\"name\":\"StructuredOutput\"" }] }
+      },
+      "live": {
+        "expect": {
+          "status": "success",
+          "structured_output": { "city": "Paris", "temp_c": 21 },
+          "tool_calls": { "includes": ["mcp__agent_sdk_wrapper_tools__add"] }
+        }
+      }
+    },
+    {
+      "id": "anthropic.output_schema_missing",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "output_schema": "Weather" },
+      "prompt": "Report the weather for Paris.",
+      "mock": [{ "text": "It is sunny." }],
+      "expect": { "status": "failure", "error_type": "structured_output_failed" }
+    },
+    {
+      "id": "anthropic.max_turns",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "max_turns": 1, "tools": ["add"] },
+      "prompt": "Add 1 and 2.",
+      "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1, "b": 2 } } }, { "text": "3" }],
+      "expect": { "status": "failure", "error_type": "max_turns", "requests": { "count": 1 } }
+    },
+    {
+      "id": "anthropic.max_turns_invalid",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "max_turns": 0 },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.timeout",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "timeout": 3 },
+      "prompt": "Say ok.",
+      "mock": [{ "hang": 30 }],
+      "expect": { "status": "timeout", "error_type": "timeout" }
+    },
+    {
+      "id": "anthropic.session",
+      "provider": "anthropic",
+      "options": {
+        "model": "claude-haiku-4-5",
+        "continue_session": true,
+        "on_event": true,
+        "builtin_tools": "none",
+        "permission_mode": "dontAsk"
+      },
+      "prompt": "Remember the token NATIVE_TWIN_42 for later. Reply READY.",
+      "mock": [{ "text": "READY" }, { "text": "NATIVE_TWIN_42" }],
+      "expect": { "status": "success", "on_event": true },
+      "runs": [
+        {
+          "prompt": "What token did I ask you to remember? Return only that token.",
+          "expect": {
+            "same_session": true,
+            "final_text_contains": "NATIVE_TWIN_42",
+            "requests": {
+              "match": [
+                { "request": 0, "path": "messages.0", "contains": "Remember the token NATIVE_TWIN_42 for later." },
+                { "request": 0, "path": "messages.1", "contains": "READY" }
+              ]
+            }
+          }
+        },
+        {
+          "agent": "new",
+          "options": { "session_id": "{session_id}" },
+          "prompt": "Repeat the remembered token.",
+          "expect": {
+            "same_session": true,
+            "final_text_contains": "NATIVE_TWIN_42",
+            "requests": { "match": [{ "request": 0, "path": "messages", "contains": "What token did I ask you to remember?" }] }
+          }
+        }
+      ],
+      "live": { "expect": { "status": "success", "on_event": true } }
+    },
+    {
+      "id": "anthropic.setting_sources_default",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "setup": { "files": { "cwd/CLAUDE.md": "PROJECT-MEMORY-MARKER", "claude_config/CLAUDE.md": "USER-MEMORY-MARKER" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "messages", "excludes": "PROJECT-MEMORY-MARKER" },
+            { "path": "messages", "excludes": "USER-MEMORY-MARKER" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.setting_sources_project",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "setting_sources": ["project"] },
+      "setup": { "files": { "cwd/CLAUDE.md": "PROJECT-MEMORY-MARKER", "claude_config/CLAUDE.md": "USER-MEMORY-MARKER" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "messages", "contains": "PROJECT-MEMORY-MARKER" },
+            { "path": "messages", "excludes": "USER-MEMORY-MARKER" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.setting_sources_user",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "setting_sources": ["user"] },
+      "setup": { "files": { "cwd/CLAUDE.md": "PROJECT-MEMORY-MARKER", "claude_config/CLAUDE.md": "USER-MEMORY-MARKER" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "messages", "excludes": "PROJECT-MEMORY-MARKER" },
+            { "path": "messages", "contains": "USER-MEMORY-MARKER" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.setting_sources_unknown",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "setting_sources": ["managed"] },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.permission_mode",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "permission_mode": "plan" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "messages", "contains": "Plan mode is active." }] } }
+    },
+    {
+      "id": "anthropic.permission_mode_bypass",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "permission_mode": "bypassPermissions" },
+      "prompt": "Create a file.",
+      "mock": [{ "shell": "touch made-by-bash && echo CONF_TOUCHED" }, { "text": "done" }],
+      "expect": { "status": "success", "tool_results": [{ "contains": "CONF_TOUCHED" }] }
+    },
+    {
+      "id": "anthropic.cli_login_require",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "cli_login": "require" },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.no_credentials",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "cli_login": "deny", "env": { "ANTHROPIC_API_KEY": "" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "authentication_failed" }
+    },
+    {
+      "id": "anthropic.env_auth_token",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "env": { "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "tok-conformance" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "header": "authorization", "equals": "Bearer tok-conformance" },
+            { "header": "x-api-key", "absent": true }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic.env_custom_headers",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "env": { "ANTHROPIC_CUSTOM_HEADERS": "x-conformance: env-header" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "header": "x-conformance", "equals": "env-header" }] } }
+    },
+    {
+      "id": "anthropic.env_runtime_retries",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "env": { "CLAUDE_CODE_MAX_RETRIES": "1" } },
+      "prompt": "Say ok.",
+      "mock": [
+        { "status": 529, "body": { "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } } },
+        { "text": "RECOVERED" }
+      ],
+      "expect": { "status": "success", "final_text": "RECOVERED", "events": { "includes": ["warning"] }, "requests": { "count": 2 } }
+    },
+    {
+      "id": "anthropic.env_login_token",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "env": { "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-conformance" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.cwd",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "cwd": "conformance-cwd" },
+      "prompt": "Where are you?",
+      "mock": [{ "shell": "pwd" }, { "text": "here" }],
+      "expect": { "status": "success", "tool_results": [{ "contains": "/conformance-cwd" }] }
+    },
+    {
+      "id": "anthropic.include_raw",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "include_raw": true, "tools": ["add"] },
+      "prompt": "Add 1 and 2.",
+      "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1, "b": 2 } } }, { "text": "3" }],
+      "expect": { "status": "success", "raw": ["tool_call", "tool_result", "usage"] }
+    },
+    {
+      "id": "anthropic.include_events_in_result",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "include_events_in_result": false, "on_event": true },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "final_text": "ok", "events": { "count": 0 }, "on_event": true }
+    },
+    {
+      "id": "anthropic.trace_file",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "trace_file": "trace.jsonl" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "trace_file": true }
+    },
+    {
+      "id": "anthropic.artifacts_dir",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "artifacts_dir": "artifacts" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "trace_file": true,
+        "artifacts": ["trace.jsonl", "result.json", "manifest.json", "provider-events.jsonl"]
+      }
+    },
+    {
+      "id": "anthropic.on_provider_event",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "on_provider_event": true },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "on_provider_event": true }
+    },
+    {
+      "id": "anthropic.raise_on_error",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "run_options": { "raise_on_error": true },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 401, "body": { "type": "error", "error": { "type": "authentication_error", "message": "invalid x-api-key" } } }],
+      "expect": { "raises": "RunFailedError", "status": "failure", "error_type": "authentication_failed" }
+    },
+    {
+      "id": "anthropic.raise_on_error_success",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "run_options": { "raise_on_error": true },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "final_text": "ok" }
+    },
+    {
+      "id": "anthropic.extra_options",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "extra_options": { "thinking": { "type": "enabled", "budget_tokens": 2048 } } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "thinking.budget_tokens", "equals": 2048 }] } }
+    },
+    {
+      "id": "anthropic.extra_options_owned",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "extra_options": { "model": "claude-sonnet-4-6" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.extra_options_unknown",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "extra_options": { "not_an_option": true } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.cli_path_missing",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "provider_options": { "cli_path": "/nonexistent/claude" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "runtime_unavailable" }
+    },
+    {
+      "id": "anthropic.provider_options_unknown",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "provider_options": { "api_key": "sk-ant-mock" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "anthropic.invalid_key",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "env": { "ANTHROPIC_API_KEY": "sk-ant-invalid-conformance" } },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 401, "body": { "type": "error", "error": { "type": "authentication_error", "message": "invalid x-api-key" } } }],
+      "expect": {
+        "status": "failure",
+        "error_type": "authentication_failed",
+        "requests": { "match": [{ "header": "x-api-key", "equals": "sk-ant-invalid-conformance" }] }
+      },
+      "live": { "expect": { "status": "failure", "error_type": "authentication_failed" } }
     },
     {
       "id": "anthropic.rate_limit",
@@ -42,6 +695,176 @@
       "expect": { "status": "failure", "error_type": "transient_api_error" }
     },
     {
+      "id": "anthropic.overloaded_529",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 529, "body": { "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "anthropic.api_error_500",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 500, "body": { "type": "error", "error": { "type": "api_error", "message": "Internal server error" } } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "anthropic.timeout_408",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 408, "body": { "type": "error", "error": { "type": "timeout_error", "message": "Request timed out" } } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "anthropic.stream_error",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "type": "api_error", "message": "Internal server error" } }, { "text": "must not be used" }],
+      "expect": { "status": "failure", "error_type": "transient_api_error", "requests": { "count": 2 } }
+    },
+    {
+      "id": "anthropic.stream_overloaded",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "type": "overloaded_error", "message": "Overloaded" } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "anthropic.stream_error_after_text",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "PARTIAL", "stream_error": { "type": "overloaded_error", "message": "Overloaded" } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "anthropic.truncated_stream",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "truncate": true }, { "text": "must not be used" }],
+      "expect": { "status": "failure", "error_type": "transient_api_error", "requests": { "count": 2 } }
+    },
+    {
+      "id": "anthropic.permission_403",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 403,
+          "body": { "type": "error", "error": { "type": "permission_error", "message": "Your API key does not have permission to use the specified resource." } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "permission_denied" }
+    },
+    {
+      "id": "anthropic.prompt_too_long",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 400,
+          "body": { "type": "error", "error": { "type": "invalid_request_error", "message": "prompt is too long: 250000 tokens > 200000 maximum" } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "context_window_exceeded" }
+    },
+    {
+      "id": "anthropic.credit_balance",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 400,
+          "body": {
+            "type": "error",
+            "error": {
+              "type": "invalid_request_error",
+              "message": "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."
+            }
+          }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "billing_error" }
+    },
+    {
+      "id": "anthropic.usage_limit",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 400,
+          "body": {
+            "type": "error",
+            "error": {
+              "type": "invalid_request_error",
+              "message": "You have reached your specified API usage limits. You will regain access on 2026-10-01 at 00:00 UTC."
+            }
+          }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "usage_limit_exceeded" }
+    },
+    {
+      "id": "anthropic.model_not_found",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 404, "body": { "type": "error", "error": { "type": "not_found_error", "message": "model: claude-haiku-4-5" } } }],
+      "expect": { "status": "failure", "error_type": "model_not_found" }
+    },
+    {
+      "id": "anthropic.request_too_large",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 413,
+          "body": { "type": "error", "error": { "type": "request_too_large", "message": "Request exceeds the maximum allowed number of bytes." } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "invalid_request" }
+    },
+    {
+      "id": "anthropic.invalid_request",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 400,
+          "body": { "type": "error", "error": { "type": "invalid_request_error", "message": "messages.0.content: Input should be a valid list" } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "invalid_request" }
+    },
+    {
+      "id": "anthropic.max_tokens_stop",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "cut off mid", "stop_reason": "max_tokens" }],
+      "expect": { "status": "failure", "error_type": "execution_error" }
+    },
+    {
+      "id": "anthropic.refusal_stop",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "", "stop_reason": "refusal" }],
+      "expect": { "status": "failure", "error_type": "refused" }
+    },
+    {
       "id": "codex.basic",
       "provider": "codex",
       "options": { "model": "gpt-5.4" },
@@ -51,12 +874,24 @@
         "status": "success",
         "final_text": "PONG",
         "events": { "includes": ["run_started", "session_info", "text", "usage", "run_finished"] },
-        "requests": { "count": 1, "match": [{ "path": "model", "equals": "gpt-5.4" }] }
+        "requests": {
+          "count": 1,
+          "match": [
+            { "path": "model", "equals": "gpt-5.4" },
+            { "path": "input.-1", "contains": "Reply with the single word PONG." },
+            { "header": "authorization", "equals": "Bearer sk-mock-key" }
+          ]
+        }
       },
-      "live": {
-        "options": { "model": "gpt-5.6-luna" },
-        "expect": { "status": "success", "final_text_contains": "PONG" }
-      }
+      "live": { "expect": { "status": "success", "final_text_contains": "PONG" } }
+    },
+    {
+      "id": "codex.thinking",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "thinking": "plan", "text": "ok", "usage": [10, 2] }],
+      "expect": { "status": "success", "final_text": "ok", "events": { "includes": ["thinking", "text", "usage"] } }
     },
     {
       "id": "codex.effort",
@@ -67,12 +902,552 @@
       "expect": {
         "status": "success",
         "requests": { "match": [{ "path": "reasoning.effort", "equals": "low" }] }
+      },
+      "live": { "expect": { "status": "success" } }
+    },
+    {
+      "id": "codex.effort_unsupported",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "effort": "extreme" },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.system_prompt",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "system_prompt": "When asked for the code word, reply with only MAPLE7." },
+      "prompt": "What is the code word?",
+      "mock": [{ "text": "MAPLE7" }],
+      "expect": {
+        "status": "success",
+        "requests": { "match": [{ "path": "input.0", "contains": "When asked for the code word, reply with only MAPLE7." }] }
+      },
+      "live": { "expect": { "status": "success", "final_text_contains": "MAPLE7" } }
+    },
+    {
+      "id": "codex.run_overrides",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "system_prompt": "AGENT-DEFAULT-PROMPT" },
+      "run_options": { "system_prompt": "RUN-OVERRIDE-PROMPT", "effort": "high" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "input", "contains": "RUN-OVERRIDE-PROMPT" },
+            { "path": "input", "excludes": "AGENT-DEFAULT-PROMPT" },
+            { "path": "reasoning.effort", "equals": "high" }
+          ]
+        }
       }
     },
     {
-      "id": "codex.invalid_key",
+      "id": "codex.builtin_tools",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "builtin_tools": ["command"] },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.tools",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "tools": ["add", "shout"],
+        "system_prompt": "Use the provided add and shout tools; find them with tool search if they are not listed. Never use the shell."
+      },
+      "prompt": "Use the add tool to add 1234 and 4321, then use shout on the word maple. Reply with the sum.",
+      "mock": [
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1234, "b": 4321 } } },
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "maple" } } },
+        { "text": "5555 MAPLE" }
+      ],
+      "expect": {
+        "status": "success",
+        "tool_calls": ["agent_sdk_wrapper_tools.add", "agent_sdk_wrapper_tools.shout"],
+        "tool_results": [{ "contains": "5555" }, { "contains": "MAPLE" }],
+        "requests": {
+          "count": 3,
+          "match": [
+            { "request": 1, "path": "input.-1.output", "contains": "5555" },
+            { "request": 2, "path": "input.-1.output", "contains": "MAPLE" }
+          ]
+        }
+      },
+      "live": {
+        "expect": {
+          "status": "success",
+          "final_text_contains": "5555",
+          "tool_calls": { "includes": ["agent_sdk_wrapper_tools.add", "agent_sdk_wrapper_tools.shout"] }
+        }
+      }
+    },
+    {
+      "id": "codex.tool_error",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "tools": ["shout"] },
+      "prompt": "Shout nothing.",
+      "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "" } } }, { "text": "failed" }],
+      "expect": { "status": "success", "tool_results": [{ "contains": "Error: nothing to shout", "is_error": true }] }
+    },
+    {
+      "id": "codex.allowed_tools",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "tools": ["add", "shout"], "allowed_tools": ["add"] },
+      "prompt": "Shout, then add.",
+      "mock": [
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "hi" } } },
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1, "b": 2 } } },
+        { "text": "done" }
+      ],
+      "expect": {
+        "status": "success",
+        "tool_calls": ["agent_sdk_wrapper_tools.add"],
+        "requests": { "match": [{ "request": 1, "path": "input.-1.output", "contains": "unsupported call" }] }
+      }
+    },
+    {
+      "id": "codex.disallowed_tools",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "tools": ["add", "shout"], "disallowed_tools": ["shout"] },
+      "prompt": "Shout.",
+      "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "hi" } } }, { "text": "done" }],
+      "expect": {
+        "status": "success",
+        "tool_calls": [],
+        "requests": { "match": [{ "request": 1, "path": "input.-1.output", "contains": "unsupported call" }] }
+      }
+    },
+    {
+      "id": "codex.allowed_tools_without_tools",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "allowed_tools": ["add"] },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.allowed_tools_native",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "tools": ["add"], "disallowed_tools": ["web_search"] },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.web_tools_off",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "web_tools": false },
+      "prompt": "Search the web for today's top news headline. If you cannot search the web, reply exactly NO_WEB.",
+      "mock": [{ "text": "NO_WEB" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "tools", "contains": "\"name\":\"exec_command\"" },
+            { "path": "tools", "excludes": "\"type\":\"web_search\"" }
+          ]
+        }
+      },
+      "live": { "expect": { "status": "success", "tool_calls": { "excludes": ["web_search"] } } }
+    },
+    {
+      "id": "codex.web_tools_on",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "web_tools": true },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": { "match": [{ "path": "tools", "contains": "\"type\":\"web_search\",\"external_web_access\":true" }] }
+      }
+    },
+    {
+      "id": "codex.web_tools_config_conflict",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "web_tools": false,
+        "provider_options": { "config": { "config_overrides": ["web_search=\"live\""] } }
+      },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.mcp_servers",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "mcp_servers": [
+          {
+            "name": "brief_tools",
+            "fixture": "simple_mcp_server",
+            "enabled_tools": ["read_brief"],
+            "default_tools_approval_mode": "approve"
+          }
+        ],
+        "allowed_tools": ["mcp__brief_tools__read_brief"],
+        "system_prompt": "Use the read_brief MCP tool when asked to inspect a brief; find it with tool search if it is not listed. Never use the shell."
+      },
+      "prompt": "Use read_brief, then reply with LIVE_MCP_OK.",
+      "mock": [{ "tool": { "name": "mcp__brief_tools__read_brief", "input": {} } }, { "text": "LIVE_MCP_OK" }],
+      "expect": {
+        "status": "success",
+        "tool_calls": ["brief_tools.read_brief"],
+        "tool_results": [{ "contains": "LIVE_MCP_OK: external MCP server returned the release-readiness brief." }],
+        "requests": { "match": [{ "request": 1, "path": "input.-1.output", "contains": "LIVE_MCP_OK: external MCP server" }] }
+      },
+      "live": {
+        "expect": { "status": "success", "final_text_contains": "LIVE_MCP_OK", "tool_calls": { "includes": ["brief_tools.read_brief"] } }
+      }
+    },
+    {
+      "id": "codex.mcp_required_failure",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "mcp_servers": [{ "name": "broken", "command": "/bin/sh", "args": ["-c", "exit 3"], "required": true }]
+      },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "provider_exception" }
+    },
+    {
+      "id": "codex.mcp_optional_failure",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "mcp_servers": [{ "name": "broken", "command": "/bin/sh", "args": ["-c", "exit 3"] }]
+      },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "events": { "includes": ["warning"] } }
+    },
+    {
+      "id": "codex.subagents",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "subagents": {
+          "reviewer": {
+            "description": "Reviews tiny Python snippets for obvious bugs.",
+            "prompt": "You are a terse reviewer. Return one sentence."
+          }
+        }
+      },
+      "prompt": "Delegate this to reviewer: def add(a, b): return a - b. Return the reviewer's verdict.",
+      "mock": [{ "tool_search": "spawn agent" }, { "text": "done" }],
+      "expect": {
+        "status": "success",
+        "requests": { "match": [{ "request": 1, "path": "input", "contains": "Reviews tiny Python snippets for obvious bugs." }] }
+      },
+      "live": { "expect": { "status": "success" } }
+    },
+    {
+      "id": "codex.subagent_tools",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "subagents": { "reader": { "description": "Reads files.", "prompt": "You read files.", "tools": ["Read"] } }
+      },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.structured_tool_handoff",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "tools": ["add"],
+        "output_schema": "Weather",
+        "system_prompt": "Use the provided add tool for arithmetic; find it with tool search if it is not listed. Never use the shell."
+      },
+      "prompt": "Call add with a=19 and b=2, then report the weather for Paris with temp_c set to the sum.",
+      "mock": [
+        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 19, "b": 2 } } },
+        { "text": "{\"city\": \"Paris\", \"temp_c\": 21}" }
+      ],
+      "expect": {
+        "status": "success",
+        "structured_output": { "city": "Paris", "temp_c": 21 },
+        "tool_calls": ["agent_sdk_wrapper_tools.add"],
+        "events": { "includes": ["structured_output"] },
+        "requests": {
+          "match": [
+            { "request": 0, "path": "text.format.type", "equals": "json_schema" },
+            { "request": 0, "path": "text.format.strict", "equals": true },
+            { "request": 0, "path": "text.format.schema.required", "equals": ["city", "temp_c"] },
+            { "request": 0, "path": "text.format.schema.additionalProperties", "equals": false }
+          ]
+        }
+      },
+      "live": {
+        "expect": {
+          "status": "success",
+          "structured_output": { "city": "Paris", "temp_c": 21 },
+          "tool_calls": { "includes": ["agent_sdk_wrapper_tools.add"] }
+        }
+      }
+    },
+    {
+      "id": "codex.output_schema_invalid",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "output_schema": "Weather" },
+      "prompt": "Report the weather for Paris.",
+      "mock": [{ "text": "It is sunny." }],
+      "expect": { "status": "failure", "error_type": "structured_output_failed" }
+    },
+    {
+      "id": "codex.max_turns",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "max_turns": 1 },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.timeout",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "timeout": 3 },
+      "prompt": "Say ok.",
+      "mock": [{ "hang": 30 }],
+      "expect": { "status": "timeout", "error_type": "timeout" }
+    },
+    {
+      "id": "codex.session",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "continue_session": true,
+        "on_event": true,
+        "web_tools": false,
+        "provider_options": { "sandbox": "read-only", "approval_mode": "deny_all" }
+      },
+      "prompt": "Remember the token NATIVE_TWIN_42 for later. Reply READY.",
+      "mock": [{ "text": "READY" }, { "text": "NATIVE_TWIN_42" }],
+      "expect": { "status": "success", "on_event": true },
+      "runs": [
+        {
+          "prompt": "What token did I ask you to remember? Return only that token.",
+          "expect": {
+            "same_session": true,
+            "final_text_contains": "NATIVE_TWIN_42",
+            "requests": {
+              "match": [
+                { "request": 0, "path": "input", "contains": "Remember the token NATIVE_TWIN_42 for later." },
+                { "request": 0, "path": "input", "contains": "READY" }
+              ]
+            }
+          }
+        },
+        {
+          "agent": "new",
+          "options": { "session_id": "{session_id}" },
+          "prompt": "Repeat the remembered token.",
+          "expect": {
+            "same_session": true,
+            "final_text_contains": "NATIVE_TWIN_42",
+            "requests": { "match": [{ "request": 0, "path": "input", "contains": "What token did I ask you to remember?" }] }
+          }
+        }
+      ],
+      "live": { "expect": { "status": "success", "on_event": true } }
+    },
+    {
+      "id": "codex.thread_id",
       "provider": "codex",
       "options": { "model": "gpt-5.4" },
+      "prompt": "Remember the token ALPHA42. Reply READY.",
+      "mock": [{ "text": "READY" }, { "text": "ALPHA42" }],
+      "expect": { "status": "success" },
+      "runs": [
+        {
+          "agent": "new",
+          "options": { "provider_options": { "thread_id": "{session_id}" } },
+          "prompt": "What token?",
+          "expect": {
+            "same_session": true,
+            "requests": { "match": [{ "request": 0, "path": "input", "contains": "Remember the token ALPHA42." }] }
+          }
+        }
+      ]
+    },
+    {
+      "id": "codex.ephemeral_resume",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "continue_session": true, "provider_options": { "ephemeral": true } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.setting_sources",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "setting_sources": ["project"] },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.permission_mode",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "permission_mode": "plan" },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.cli_login_require",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "cli_login": "require" },
+      "setup": { "codex_login": "chatgpt" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "header": "chatgpt-account-id", "equals": "acct_1" },
+            { "header": "authorization", "excludes": "sk-mock-key" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.cli_login_require_without_login",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "cli_login": "require" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "authentication_failed" }
+    },
+    {
+      "id": "codex.cli_login_require_stored_api_key",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "cli_login": "require" },
+      "setup": { "codex_login": "api_key" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "authentication_failed" }
+    },
+    {
+      "id": "codex.cli_login_require_with_api_key",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "cli_login": "require", "provider_options": { "api_key": "sk-mock-key" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.cli_login_deny_ignores_stored_login",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "cli_login": "deny" },
+      "setup": { "codex_login": "chatgpt" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "header": "authorization", "equals": "Bearer sk-mock-key" },
+            { "header": "chatgpt-account-id", "absent": true }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.no_credentials",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "env": { "OPENAI_API_KEY": "" } },
+      "setup": { "codex_provider": "builtin" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "authentication_failed" }
+    },
+    {
+      "id": "codex.env",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "env": { "CONFORMANCE_VALUE": "env-value-7" } },
+      "prompt": "Print the variable.",
+      "mock": [{ "shell": "printf %s \"$CONFORMANCE_VALUE\"" }, { "text": "done" }],
+      "expect": {
+        "status": "success",
+        "tool_results": [{ "contains": "env-value-7" }],
+        "requests": { "match": [{ "request": 1, "path": "input.-1.output", "contains": "env-value-7" }] }
+      }
+    },
+    {
+      "id": "codex.env_api_key",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "env": { "OPENAI_API_KEY": "sk-env-conformance" } },
+      "prompt": "Print the key.",
+      "mock": [{ "shell": "printf %s \"${OPENAI_API_KEY:-unset}\"" }, { "text": "done" }],
+      "expect": {
+        "status": "success",
+        "tool_results": [{ "contains": "unset" }],
+        "requests": {
+          "match": [
+            { "header": "authorization", "equals": "Bearer sk-env-conformance" },
+            { "path": "input", "excludes": "sk-env-conformance" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.cwd",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "cwd": "conformance-cwd" },
+      "prompt": "Where are you?",
+      "mock": [{ "shell": "pwd" }, { "text": "here" }],
+      "expect": {
+        "status": "success",
+        "tool_results": [{ "contains": "/conformance-cwd" }],
+        "requests": { "match": [{ "request": 0, "path": "input", "contains": "/conformance-cwd</cwd>" }] }
+      }
+    },
+    {
+      "id": "codex.include_raw",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "include_raw": true },
+      "prompt": "Say ok.",
+      "mock": [{ "thinking": "plan", "text": "ok" }],
+      "expect": { "status": "success", "raw": ["thinking", "text", "usage"] }
+    },
+    {
+      "id": "codex.include_events_in_result",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "include_events_in_result": false, "on_event": true },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "final_text": "ok", "events": { "count": 0 }, "on_event": true }
+    },
+    {
+      "id": "codex.trace_file",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "trace_file": "trace.jsonl" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "trace_file": true }
+    },
+    {
+      "id": "codex.artifacts_dir",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "artifacts_dir": "artifacts", "provider_options": { "debug": true } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "trace_file": true,
+        "artifacts": ["trace.jsonl", "result.json", "manifest.json", "provider-events.jsonl", "sdk/openai-codex.debug.log"]
+      }
+    },
+    {
+      "id": "codex.on_provider_event",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "on_provider_event": true },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "on_provider_event": true }
+    },
+    {
+      "id": "codex.raise_on_error",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "run_options": { "raise_on_error": true },
       "prompt": "Say ok.",
       "mock": [
         {
@@ -80,7 +1455,397 @@
           "body": { "error": { "message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key" } }
         }
       ],
-      "expect": { "status": "failure", "error_type": "authentication_failed" }
+      "expect": { "raises": "RunFailedError", "status": "failure", "error_type": "authentication_failed" }
+    },
+    {
+      "id": "codex.extra_options",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "extra_options": { "turn_options": { "effort": "minimal" } } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "reasoning.effort", "equals": "minimal" }] } }
+    },
+    {
+      "id": "codex.extra_options_unknown",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "extra_options": { "not_an_option": true } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.api_key",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "api_key": "sk-conformance-key" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "header": "authorization", "equals": "Bearer sk-conformance-key" }] } }
+    },
+    {
+      "id": "codex.invalid_key",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "api_key": "sk-invalid-conformance" } },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 401,
+          "body": { "error": { "message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key" } }
+        }
+      ],
+      "expect": {
+        "status": "failure",
+        "error_type": "authentication_failed",
+        "requests": { "match": [{ "header": "authorization", "equals": "Bearer sk-invalid-conformance" }] }
+      },
+      "live": { "expect": { "status": "failure", "error_type": "authentication_failed" } }
+    },
+    {
+      "id": "codex.provider_effort_and_summary",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "effort": "high", "summary": "detailed" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "reasoning.effort", "equals": "high" },
+            { "path": "reasoning.summary", "equals": "detailed" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.personality",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "personality": "friendly" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "instructions", "contains": "supportive teammate" }] } }
+    },
+    {
+      "id": "codex.service_tier",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "service_tier": "fast" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "service_tier", "equals": "priority" }] } }
+    },
+    {
+      "id": "codex.sandbox_and_approval_mode",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "read-only", "approval_mode": "deny_all" } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "input", "contains": "`sandbox_mode` is `read-only`" },
+            { "path": "input", "contains": "Approval policy is currently never." }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.sandbox_invalid",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "everything" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.config",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "provider_options": {
+          "sandbox": "workspace-write",
+          "config": { "config_overrides": ["sandbox_workspace_write.network_access=true"] }
+        }
+      },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "input", "contains": "Network access is enabled." }] } }
+    },
+    {
+      "id": "codex.config_runtime_retries",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "provider_options": { "config": { "config_overrides": ["model_providers.mock.request_max_retries=1"] } }
+      },
+      "prompt": "Say ok.",
+      "mock": [
+        { "status": 500, "body": { "error": { "message": "The server had an error while processing your request.", "type": "server_error" } } },
+        { "text": "RECOVERED" }
+      ],
+      "expect": { "status": "success", "final_text": "RECOVERED", "requests": { "count": 2 } }
+    },
+    {
+      "id": "codex.config_credential_store",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "provider_options": { "config": { "config_overrides": ["cli_auth_credentials_store=\"file\""] } }
+      },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.thread_options",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "system_prompt": "FIRST-CLASS-PROMPT",
+        "provider_options": { "thread_options": { "developer_instructions": "THREAD-OPTIONS-PROMPT" } }
+      },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": {
+          "match": [
+            { "path": "input", "contains": "THREAD-OPTIONS-PROMPT" },
+            { "path": "input", "excludes": "FIRST-CLASS-PROMPT" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.turn_options",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "turn_options": { "summary": "concise" } } },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "match": [{ "path": "reasoning.summary", "equals": "concise" }] } }
+    },
+    {
+      "id": "codex.turn_options_unknown",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "turn_options": { "temperature": 0 } } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.model_provider",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "env": { "OPENAI_API_KEY": "" },
+        "provider_options": {
+          "model_provider": "mock",
+          "config": { "config_overrides": ["model_providers.mock.requires_openai_auth=false"] }
+        }
+      },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "status": "success", "requests": { "count": 1, "match": [{ "header": "authorization", "absent": true }] } }
+    },
+    {
+      "id": "codex.prebuilt_client_stored_login",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "provider_options": { "codex": "client" } },
+      "setup": { "codex_login": "chatgpt" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": { "setup_error": "authentication_failed" }
+    },
+    {
+      "id": "codex.prebuilt_client_tools",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "tools": ["add"], "provider_options": { "codex": "client" } },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.rate_limit",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 429,
+          "headers": { "retry-after": "1", "x-ratelimit-remaining-requests": "0" },
+          "body": {
+            "error": {
+              "message": "Rate limit reached for gpt-5.4 on requests per min (RPM): Limit 60, Used 60, Requested 1. Please try again in 1s.",
+              "type": "requests",
+              "code": "rate_limit_exceeded"
+            }
+          }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "transient_api_error", "requests": { "count": 1 } }
+    },
+    {
+      "id": "codex.server_error_500",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 500, "body": { "error": { "message": "The server had an error while processing your request.", "type": "server_error" } } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.bad_gateway_502",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 502, "body": "<html><body><h1>502 Bad Gateway</h1></body></html>" }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.timeout_408",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 408, "body": "Request Timeout" }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.stream_error",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "code": "server_error", "message": "An error occurred while processing your request." } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.stream_error_after_text",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        { "text": "partial answer", "stream_error": { "code": "server_error", "message": "An error occurred while processing your request." } },
+        { "text": "must not be used" }
+      ],
+      "expect": { "status": "failure", "error_type": "transient_api_error", "final_text": "partial answer" }
+    },
+    {
+      "id": "codex.stream_overloaded",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "code": "server_is_overloaded", "message": "Our servers are currently overloaded. Please try again later." } }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.stream_context_length",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "code": "context_length_exceeded", "message": "Your input exceeds the context window of this model." } }],
+      "expect": { "status": "failure", "error_type": "context_window_exceeded" }
+    },
+    {
+      "id": "codex.stream_insufficient_quota",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "code": "insufficient_quota", "message": "You exceeded your current quota, please check your plan and billing details." } }],
+      "expect": { "status": "failure", "error_type": "usage_limit_exceeded" }
+    },
+    {
+      "id": "codex.stream_invalid_prompt",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "stream_error": { "code": "invalid_prompt", "message": "Invalid prompt: your prompt was flagged as potentially violating our usage policy." } }],
+      "expect": { "status": "failure", "error_type": "invalid_request" }
+    },
+    {
+      "id": "codex.truncated_stream",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "truncate": true }, { "text": "must not be used" }],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.permission_403",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 403,
+          "body": { "error": { "message": "Project proj_x does not have access to model gpt-5.4", "type": "invalid_request_error", "code": "model_not_found" } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "permission_denied" }
+    },
+    {
+      "id": "codex.context_length_400",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 400,
+          "body": {
+            "error": {
+              "message": "Your input exceeds the context window of this model. Please adjust your input and try again.",
+              "type": "invalid_request_error",
+              "param": "input",
+              "code": "context_length_exceeded"
+            }
+          }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "context_window_exceeded" }
+    },
+    {
+      "id": "codex.invalid_request_400",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 400,
+          "body": {
+            "error": {
+              "message": "Invalid value for 'reasoning.effort': 'ultra' is not supported with this model.",
+              "type": "invalid_request_error",
+              "param": "reasoning.effort",
+              "code": "unsupported_value"
+            }
+          }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "invalid_request" }
+    },
+    {
+      "id": "codex.model_not_found_404",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 404,
+          "body": { "error": { "message": "The model `gpt-5.4` does not exist or you do not have access to it.", "type": "invalid_request_error", "code": "model_not_found" } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "model_not_found" }
+    },
+    {
+      "id": "codex.payment_402",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [{ "status": 402, "body": { "error": { "message": "Payment required", "type": "billing_error" } } }],
+      "expect": { "status": "failure", "error_type": "billing_error" }
+    },
+    {
+      "id": "codex.usage_limit_429",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 429,
+          "body": { "error": { "type": "usage_limit_reached", "message": "The usage limit has been reached", "plan_type": "pro", "resets_at": 4102444800 } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "usage_limit_exceeded" }
     }
   ]
 }

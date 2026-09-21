@@ -402,8 +402,15 @@ def check(
         assert name not in types, detail
     if "count" in matcher:
         assert len(envelopes) == matcher["count"], types
-    if "tool_calls" in expect:
-        assert [call.name for call in result.tool_calls()] == expect["tool_calls"], detail
+    calls = [call.name for call in result.tool_calls()]
+    wanted_calls = expect.get("tool_calls", {})
+    if isinstance(wanted_calls, list):
+        assert calls == wanted_calls, detail
+    else:
+        for name in wanted_calls.get("includes", []):
+            assert name in calls, detail
+        for name in wanted_calls.get("excludes", []):
+            assert name not in calls, detail
     if "tool_results" in expect:
         results = [event for event in events if event.type == "tool_result"]
         assert len(results) == len(expect["tool_results"]), results

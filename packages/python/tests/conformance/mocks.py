@@ -308,6 +308,17 @@ def _codex_events(index: int, step: dict[str, Any]) -> list[dict[str, Any]]:
                 "summary": [{"type": "summary_text", "text": step["thinking"]}],
             }
         )
+    if "tool_search" in step:
+        items.append(
+            {
+                "type": "tool_search_call",
+                "id": f"ts_{index}",
+                "call_id": f"ts_{index}",
+                "execution": "client",
+                "status": "completed",
+                "arguments": {"query": step["tool_search"]},
+            }
+        )
     if "tool" in step:
         items.append(_codex_call(index, **step["tool"]))
     if "shell" in step:
