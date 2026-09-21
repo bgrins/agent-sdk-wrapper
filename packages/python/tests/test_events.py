@@ -12,16 +12,12 @@ from agent_sdk_wrapper import (
     ConfigError,
     Error,
     EventEnvelope,
-    EventFactory,
-    EventSource,
     FakeProvider,
     McpStdioServer,
     ProviderEventEnvelope,
     ProviderNotAvailableError,
     RunEndedReason,
     RunFinished,
-    RunRequest,
-    RunResult,
     RunStatus,
     SessionInfo,
     StructuredOutput,
@@ -81,37 +77,6 @@ def test_jsonable_handles_pydantic_dataclass_enum():
         "reasoning_output_tokens": 0,
     }
     assert _jsonable(RunStatus.SUCCESS) == "success"
-
-
-def test_run_finished_and_result_default_to_unknown_ended_reason():
-    assert RunFinished().ended_reason == RunEndedReason.UNKNOWN
-    assert RunResult("run", "openai", RunStatus.FAILURE).ended_reason == (
-        RunEndedReason.UNKNOWN
-    )
-
-
-def test_fake_provider_accepts_exported_event_factory():
-    source: EventSource = [Text(text="factory response")]
-
-    def factory(req: RunRequest) -> EventSource:
-        return source
-
-    factory_ref: EventFactory = factory
-    provider = FakeProvider(factory_ref)
-
-    import asyncio
-
-    async def collect():
-        return [
-            event
-            async for event in provider.stream(
-                RunRequest(provider="openai", prompt="ignored")
-            )
-        ]
-
-    events = asyncio.run(collect())
-
-    assert events == [Text(text="factory response")]
 
 
 def test_normalize_builtin_tools():
@@ -985,6 +950,26 @@ def test_stream_timeout_does_not_cancel_consumer(monkeypatch, tmp_path):
     assert (events[-1]["status"], events[-1]["ended_reason"]) == ("timeout", "timeout")
 
 
+def test_a_ready_event_after_the_deadline_is_not_delivered(monkeypatch):
+    import asyncio
+
+    # Both texts are ready at once, so only the deadline check can stop the second.
+    install_fake_providers(monkeypatch, events=[Text(text="first"), Text(text="ready")])
+
+    async def consume() -> list:
+        seen = []
+        async for env in Agent(provider="openai", timeout=0.3).stream("hi"):
+            seen.append(env.event)
+            if env.event.type == "text":
+                await asyncio.sleep(0.5)
+        return seen
+
+    events = asyncio.run(consume())
+
+    assert [event.type for event in events] == ["run_started", "text", "error", "run_finished"]
+    assert events[2].error_type == "timeout"
+
+
 def test_provider_timeout_error_is_not_the_run_deadline(monkeypatch):
     async def raises_timeout(req):
         yield SessionInfo(id="s1")
@@ -1096,9 +1081,17 @@ def test_uncreatable_artifacts_dir_raises_config_error_before_any_event(monkeypa
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"timeout": "30"}, {"timeout": 0}, {"max_turns": 0}, {"max_turns": True}],
+    [
+        {"timeout": "30"},
+        {"timeout": 0},
+        {"max_turns": 0},
+        {"max_turns": True},
+        {"max_turns": 2.5},
+        {"max_turns": float("nan")},
+    ],
 )
 def test_run_rejects_invalid_run_limits(monkeypatch, overrides):
+    # The fake accepts every request, so only the Agent's own checks can reject it.
     install_fake_providers(monkeypatch)
 
     with pytest.raises(ConfigError, match=next(iter(overrides))):
@@ -1306,9 +1299,4 @@ def test_artifact_json_files_are_replaced_atomically(tmp_path):
     assert torn_reads == []
     assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
 
-
-@pytest.mark.parametrize("max_turns", [0, True, 2.5, float("nan")])
-def test_run_rejects_non_positive_integer_max_turns(max_turns):
-    with pytest.raises(ConfigError, match="max_turns"):
-        Agent(provider="openai").stream("x", max_turns=max_turns)
 

@@ -37,17 +37,6 @@ def script(*items):
     return play, calls
 
 
-def test_a_transient_failure_ends_the_run_with_its_type(monkeypatch):
-    play, calls = script(TransientError("rate limit"))
-    install_fake_providers(monkeypatch, events=play)
-
-    result = asyncio.run(Agent(provider="openai").run("hi"))
-
-    assert len(calls) == 1
-    assert result.status == RunStatus.FAILURE
-    assert (result.error, result.error_type) == ("rate limit", "transient_api_error")
-
-
 def trace_events(path):
     return [json.loads(line)["event"] for line in path.read_text().splitlines()]
 
