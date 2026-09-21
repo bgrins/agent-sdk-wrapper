@@ -21,6 +21,7 @@ from . import (
     McpStdioServer,
     ProcessTerminatedError,
     RunFinished,
+    RunResult,
     RunStatus,
     SubagentDef,
     Text,
@@ -288,7 +289,17 @@ async def _run(args: argparse.Namespace) -> int:
             sys.stdout.write("\n")
         return rc
 
-    result = await agent.run(prompt)
+    try:
+        result = await agent.run(prompt)
+    except ProcessTerminatedError as exc:
+        if exc.result is not None:
+            _write_result(exc.result, output)
+        raise
+    _write_result(result, output)
+    return 0 if result.ok else 1
+
+
+def _write_result(result: RunResult, output: str) -> None:
     if output == "text":
         sys.stdout.write(result.final_text)
         if result.final_text and not result.final_text.endswith("\n"):
@@ -296,7 +307,6 @@ async def _run(args: argparse.Namespace) -> int:
     else:  # json
         json.dump(result.to_dict(), sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
-    return 0 if result.ok else 1
 
 
 def _stream_event_failed(event: object) -> bool:

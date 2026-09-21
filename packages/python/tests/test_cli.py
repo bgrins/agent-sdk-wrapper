@@ -526,6 +526,34 @@ def test_run_reports_process_termination(monkeypatch, capsys):
     assert "killed by signal 9" in captured.err
 
 
+@pytest.mark.parametrize("output", ["json", "text"])
+def test_run_prints_a_killed_runs_result(monkeypatch, capsys, output):
+    from agent_sdk_wrapper import ProcessTerminatedError
+
+    class KilledProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            yield Text(text="partial answer")
+            raise ProcessTerminatedError(9)
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", KilledProvider)
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt", "x", "--output", output])
+
+    captured = capsys.readouterr()
+    assert rc == 128 + 9
+    if output == "json":
+        result = json.loads(captured.out)
+        assert (result["final_text"], result["error_type"]) == (
+            "partial answer",
+            "process_terminated",
+        )
+    else:
+        assert captured.out == "partial answer\n"
+    assert "killed by signal 9" in captured.err
+
+
 def test_run_setting_source_flag_maps_to_request(monkeypatch, capsys):
     seen_requests = []
 

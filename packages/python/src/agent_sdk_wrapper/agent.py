@@ -206,12 +206,17 @@ class Agent:
         """Collect :meth:`stream` into a ``RunResult``.
 
         ``raise_on_error=True`` raises ``RunFailedError`` for a non-success result.
+        A killed runtime raises ``ProcessTerminatedError`` carrying the result.
         """
 
         run = self._prepare(prompt, overrides)
-        async with contextlib.aclosing(self._events(run)) as events:
-            async for _ in events:
-                pass
+        try:
+            async with contextlib.aclosing(self._events(run)) as events:
+                async for _ in events:
+                    pass
+        except ProcessTerminatedError as exc:
+            exc.result = run.result
+            raise
         result = run.result
         assert result is not None
         if not result.ok and raise_on_error:

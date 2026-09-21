@@ -25,7 +25,10 @@ class ProviderNotAvailableError(AgentSdkWrapperError):
 
 
 class ProcessTerminatedError(AgentSdkWrapperError):
-    """The runtime was killed by a signal. Stop the batch; do not retry in place."""
+    """The runtime was killed by a signal. Stop the batch; do not retry in place.
+
+    ``result`` is the failed ``RunResult`` when ``run()`` raised it.
+    """
 
     def __init__(
         self, signal: int, *, message: str | None = None, cause: BaseException | None = None
@@ -34,6 +37,7 @@ class ProcessTerminatedError(AgentSdkWrapperError):
             message or f"provider runtime killed by signal {signal}", cause=cause
         )
         self.signal = signal
+        self.result: RunResult | None = None
 
 
 class RunFailedError(AgentSdkWrapperError):

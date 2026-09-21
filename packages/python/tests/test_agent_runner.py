@@ -188,9 +188,11 @@ def test_process_terminated_is_recorded_then_raised(monkeypatch, tmp_path, mode)
             async for env in agent.stream("hi"):
                 streamed.append(env)
 
-    with pytest.raises(ProcessTerminatedError):
+    with pytest.raises(ProcessTerminatedError) as raised:
         asyncio.run(consume())
 
+    if mode == "run":
+        assert raised.value.result.error_type == "process_terminated"
     trace = [
         json.loads(line)["event"]
         for line in (tmp_path / "trace.jsonl").read_text().splitlines()
