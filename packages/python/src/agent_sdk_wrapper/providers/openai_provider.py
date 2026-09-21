@@ -274,8 +274,7 @@ class OpenAIProvider(ProviderAdapter):
         codex: Any = None
         try:
             api_key = None if req.cli_login == "require" else self._login_api_key(req)
-            with _runtime_config(req) as runtime_config:
-                config_overrides = runtime_config.config_overrides
+            with _runtime_config(req) as config_overrides:
                 if self._launches_codex():
                     # Shell snapshots copy the runtime's env, credentials included, into
                     # CODEX_HOME.
@@ -290,7 +289,7 @@ class OpenAIProvider(ProviderAdapter):
                 async with self._codex_client(req, config_overrides, api_key is not None) as codex:
                     process = _codex_process(codex)
                     try:
-                        async for event in self._run(codex, req, runtime_config, api_key):
+                        async for event in self._run(codex, req, api_key):
                             yield event
                     except Exception as exc:
                         await _raise_if_signaled(process, exc)
@@ -307,11 +306,7 @@ class OpenAIProvider(ProviderAdapter):
             _write_sdk_debug_log(codex, req.artifacts_dir, debug=self._debug)
 
     async def _run(
-        self,
-        codex: Any,
-        req: RunRequest,
-        runtime_config: _RuntimeConfig,
-        api_key: str | None,
+        self, codex: Any, req: RunRequest, api_key: str | None
     ) -> AsyncIterator[AgentEvent]:
         from openai_codex import ApprovalMode, Sandbox
 
@@ -336,8 +331,6 @@ class OpenAIProvider(ProviderAdapter):
             thread = await codex.thread_start(**thread_kwargs)
         yield SessionInfo(id=thread.id, model=await _thread_model(thread))
 
-        for warning in runtime_config.warnings:
-            yield WarningEvent(message=warning)
         # A caller-owned client may consume its own global notifications.
         runtime_warnings = (
             None if self._codex is not None else _RuntimeWarnings(codex, thread.id, req.include_raw)
@@ -371,11 +364,7 @@ class OpenAIProvider(ProviderAdapter):
         for name in removed:
             env[name] = ""
         config = _codex_config(
-            self._config,
-            env,
-            req.artifacts_dir,
-            debug=self._debug,
-            config_overrides=config_overrides,
+            self._config, env, debug=self._debug, config_overrides=config_overrides
         )
         async with AsyncCodex(config=config) as codex:
             yield codex
@@ -493,7 +482,7 @@ async def _stream_turn(
         if method == "item/agentMessage/delta":
             delta = getattr(payload, "delta", "") or ""
             if delta:
-                item_id = _codex_item_id(payload)
+                item_id = getattr(payload, "item_id", None)
                 text_delta_parts.setdefault(item_id, []).append(delta)
             continue
 
@@ -503,7 +492,7 @@ async def _stream_turn(
         }:
             delta = getattr(payload, "delta", "") or ""
             if delta:
-                item_id = _codex_item_id(payload)
+                item_id = getattr(payload, "item_id", None)
                 thinking_delta_parts.setdefault(item_id, []).append(delta)
             continue
 
@@ -526,7 +515,7 @@ async def _stream_turn(
             root = getattr(item, "root", item)
             root_type = getattr(root, "type", "")
             if root_type == "agentMessage":
-                item_id = _codex_item_id(root)
+                item_id = getattr(root, "id", None)
                 buffered_text = _pop_delta_buffer(text_delta_parts, item_id)
                 text = getattr(root, "text", "") or buffered_text
                 if text:
@@ -534,7 +523,7 @@ async def _stream_turn(
                     yield Text(text=text, raw=_raw(event) if req.include_raw else None)
                 continue
             if root_type == "reasoning":
-                item_id = _codex_item_id(root)
+                item_id = getattr(root, "id", None)
                 buffered_text = _pop_delta_buffer(thinking_delta_parts, item_id)
                 text = _reasoning_text(root) or buffered_text
                 # Preserve empty reasoning items: they can carry billed tokens.
@@ -810,15 +799,6 @@ def _usage_breakdown(breakdown: Any) -> dict[str, int]:
     }
 
 
-def _codex_item_id(value: Any) -> str | None:
-    item_id = getattr(value, "item_id", None)
-    if item_id is None:
-        item_id = getattr(value, "id", None)
-    if item_id is None:
-        item_id = getattr(value, "itemId", None)
-    return item_id if isinstance(item_id, str) else None
-
-
 def _pop_delta_buffer(
     buffers: dict[str | None, list[str]],
     item_id: str | None,
@@ -928,14 +908,10 @@ def _sdk_option_names() -> dict[str, frozenset[str]]:
     }
 
 
-@dataclasses.dataclass
-class _RuntimeConfig:
-    config_overrides: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
-
-
 @contextmanager
 def _runtime_config(req: RunRequest):
+    """Yield the config overrides for the request's tools, MCP servers and subagents."""
+
     web_tools_override: tuple[str, ...] = ()
     if req.web_tools is not None:
         # Codex ignores the legacy tools.web_search flag; the top-level mode controls the tool.
@@ -944,13 +920,12 @@ def _runtime_config(req: RunRequest):
         )
 
     if not req.tools and not req.subagents and not req.mcp_servers:
-        yield _RuntimeConfig(config_overrides=web_tools_override)
+        yield web_tools_override
         return
 
     with tempfile.TemporaryDirectory(prefix="agent-sdk-wrapper-codex-") as tmp:
         root = Path(tmp)
         overrides: list[str] = list(web_tools_override)
-        warnings: list[str] = []
         if req.tools:
             overrides.extend(
                 _tool_config_overrides(
@@ -971,8 +946,8 @@ def _runtime_config(req: RunRequest):
                 )
             )
         if req.subagents:
-            overrides.extend(_subagent_config_overrides(req.subagents, root, warnings))
-        yield _RuntimeConfig(tuple(overrides), tuple(warnings))
+            overrides.extend(_subagent_config_overrides(req.subagents, root))
+        yield tuple(overrides)
 
 
 def _tool_config_overrides(
@@ -1452,9 +1427,7 @@ def _split_tool_filter(spec: str) -> tuple[str | None, str]:
     return None, spec
 
 
-def _subagent_config_overrides(
-    subagents: dict[str, Any], root: Path, warnings: list[str]
-) -> list[str]:
+def _subagent_config_overrides(subagents: dict[str, Any], root: Path) -> list[str]:
     unsupported = _unsupported_subagent_controls(subagents)
     if unsupported:
         raise ConfigError(
@@ -1552,7 +1525,6 @@ def _toml_string(value: str) -> str:
 def _codex_config(
     config: Any,
     env: dict[str, str],
-    _artifacts_dir: str | Path | None,
     *,
     debug: bool = False,
     config_overrides: tuple[str, ...] = (),
@@ -1966,12 +1938,7 @@ def _codex_stderr_tail(codex: Any) -> str | None:
     client = getattr(codex, "_client", None)
     sync_client = getattr(client, "_sync", None)
     stderr_tail = getattr(sync_client, "_stderr_tail", None)
-    if callable(stderr_tail):
-        try:
-            return stderr_tail(limit=400)
-        except TypeError:
-            return stderr_tail()
-    return None
+    return stderr_tail(limit=400) if callable(stderr_tail) else None
 
 
 def _enum_value(enum_type: Any, value: Any) -> Any:
@@ -2007,7 +1974,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
     if not root_type:
         return []
     if root_type == "commandExecution":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         command = getattr(root, "command", None)
         status = getattr(root, "status", None)
         output = _command_output(root)
@@ -2026,7 +1993,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "fileChange":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         status = _status_value(getattr(root, "status", None))
         return [
             ToolCall(
@@ -2043,7 +2010,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "mcpToolCall":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         error = getattr(root, "error", None)
         return [
             ToolCall(
@@ -2061,7 +2028,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "dynamicToolCall":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         return [
             ToolCall(
                 id=item_id,
@@ -2078,7 +2045,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "collabAgentToolCall":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         status = _status_value(getattr(root, "status", None))
         return [
             ToolCall(
@@ -2109,7 +2076,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "webSearch":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         query = getattr(root, "query", None)
         action = _to_plain(getattr(root, "action", None))
         return [
@@ -2126,7 +2093,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "imageView":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         path = getattr(root, "path", None)
         return [
             ToolCall(
@@ -2142,7 +2109,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
             ),
         ]
     if root_type == "imageGeneration":
-        item_id = _item_id(event, root)
+        item_id = getattr(root, "id", None)
         status = _status_value(getattr(root, "status", None))
         output = {
             "status": status,
@@ -2179,20 +2146,10 @@ def _reasoning_text(root: Any) -> str:
 
 
 def _command_output(root: Any) -> str:
-    aggregated = getattr(root, "aggregated_output", None) or getattr(root, "aggregatedOutput", None)
-    if aggregated is not None:
-        return str(aggregated)
-    pieces: list[str] = []
-    stdout = getattr(root, "stdout", None)
-    stderr = getattr(root, "stderr", None)
-    if stdout:
-        pieces.append(str(stdout))
-    if stderr:
-        pieces.append(str(stderr))
-    status = _status_value(getattr(root, "status", None))
-    if not pieces and status:
-        pieces.append(status)
-    return "\n".join(pieces)
+    """The command's output, or its status when it printed nothing."""
+
+    output = getattr(root, "aggregated_output", None)
+    return str(output) if output else _status_value(getattr(root, "status", None))
 
 
 def _tool_name(namespace: Any, name: Any) -> str | None:
@@ -2312,17 +2269,6 @@ def _classify_codex_error(info: Any, message: str) -> str:
 
 def _status_value(status: Any) -> str:
     return str(getattr(status, "value", status) or "")
-
-
-def _item_id(event: Any, root: Any) -> str | None:
-    payload = getattr(event, "payload", None)
-    return (
-        getattr(root, "id", None)
-        or getattr(root, "item_id", None)
-        or getattr(root, "itemId", None)
-        or getattr(payload, "item_id", None)
-        or getattr(payload, "itemId", None)
-    )
 
 
 def _drop_none(values: dict[str, Any]) -> dict[str, Any]:

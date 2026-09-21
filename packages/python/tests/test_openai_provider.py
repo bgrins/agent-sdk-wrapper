@@ -652,8 +652,8 @@ def test_codex_tool_server_gets_env_names_and_a_long_timeout(tmp_path, monkeypat
         cwd=tmp_path,
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = runtime.config_overrides
+    with _runtime_config(req) as config_overrides:
+        overrides = config_overrides
         [env_vars] = [v for v in overrides if v.startswith(f"{WRAPPER_SERVER}.env_vars=")]
         assert '"PARENT_ONLY_TOKEN"' in env_vars
         assert '"REQUEST_TOKEN"' in env_vars
@@ -998,7 +998,7 @@ def test_codex_config_uses_path_codex_when_sdk_bin_missing(monkeypatch):
 
     monkeypatch.setattr(op_mod, "_path_codex_bin_when_sdk_bin_missing", lambda: "/usr/bin/codex")
 
-    config = _codex_config(None, {}, None)
+    config = _codex_config(None, {})
 
     assert config.codex_bin == "/usr/bin/codex"
 
@@ -1011,7 +1011,6 @@ def test_codex_config_lets_caller_overrides_win(monkeypatch):
     config = _codex_config(
         {"config_overrides": ("mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=5",)},
         {},
-        None,
         config_overrides=("mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=600",),
     )
 
@@ -1031,7 +1030,6 @@ def test_codex_config_rejects_launch_args_with_generated_overrides(monkeypatch):
         _codex_config(
             {"launch_args_override": ("codex", "app-server", "--listen", "stdio://")},
             {},
-            None,
             config_overrides=("features.multi_agent=true",),
         )
 
@@ -1055,8 +1053,8 @@ def test_runtime_config_builds_codex_tool_and_subagent_overrides(tmp_path):
         cwd=tmp_path,
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
+    with _runtime_config(req) as config_overrides:
+        overrides = set(config_overrides)
         assert any(
             value.startswith("mcp_servers.agent_sdk_wrapper_tools.command=")
             for value in overrides
@@ -1072,7 +1070,6 @@ def test_runtime_config_builds_codex_tool_and_subagent_overrides(tmp_path):
         assert "features.multi_agent=true" in overrides
         assert 'agents.reviewer.description="Reviews code."' in overrides
         assert any(value.startswith("agents.reviewer.config_file=") for value in overrides)
-        assert runtime.warnings == ()
 
 
 TRICKY_TEXT = 'fox \U0001f98a "quoted" \\ tab\t line\nDEL\x7f bell\x07 café'
@@ -1115,15 +1112,15 @@ def test_codex_subagent_config_file_is_valid_toml(tmp_path):
         subagents={"fox": SubagentDef(description=TRICKY_TEXT, prompt=TRICKY_TEXT)},
     )
 
-    with _runtime_config(req) as runtime:
+    with _runtime_config(req) as config_overrides:
         [config_file] = [
-            v.split("=", 1)[1] for v in runtime.config_overrides if ".config_file=" in v
+            v.split("=", 1)[1] for v in config_overrides if ".config_file=" in v
         ]
         path = tomllib.loads(f"x = {config_file}")["x"]
         with open(path, "rb") as handle:
             assert tomllib.load(handle) == {"developer_instructions": TRICKY_TEXT}
         [description] = [
-            v.split("=", 1)[1] for v in runtime.config_overrides if ".description=" in v
+            v.split("=", 1)[1] for v in config_overrides if ".description=" in v
         ]
         assert tomllib.loads(f"x = {description}")["x"] == TRICKY_TEXT
 
@@ -1144,11 +1141,11 @@ def test_codex_web_tools_coexists_with_tools(tmp_path):
         web_tools=False,
     )
 
-    with _runtime_config(req) as runtime:
-        assert 'web_search="disabled"' in runtime.config_overrides
+    with _runtime_config(req) as config_overrides:
+        assert 'web_search="disabled"' in config_overrides
         assert any(
             value.startswith("mcp_servers.agent_sdk_wrapper_tools.command=")
-            for value in runtime.config_overrides
+            for value in config_overrides
         )
 
 
@@ -1208,8 +1205,8 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         ],
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
+    with _runtime_config(req) as config_overrides:
+        overrides = set(config_overrides)
         assert 'mcp_servers.auditor.command="uv"' in overrides
         assert 'mcp_servers.auditor.args=["run", "auditor-mcp"]' in overrides
         assert f'mcp_servers.auditor.cwd="{tmp_path}"' in overrides
@@ -1258,8 +1255,8 @@ def test_runtime_config_applies_codex_tool_filters(tmp_path):
         cwd=tmp_path,
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
+    with _runtime_config(req) as config_overrides:
+        overrides = set(config_overrides)
         assert 'mcp_servers.agent_sdk_wrapper_tools.enabled_tools=["add"]' in overrides
         assert 'mcp_servers.agent_sdk_wrapper_tools.disabled_tools=["multiply"]' in overrides
 
@@ -1284,8 +1281,8 @@ def test_runtime_config_targets_one_external_mcp_server_among_many():
         ],
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
+    with _runtime_config(req) as config_overrides:
+        overrides = set(config_overrides)
         assert 'mcp_servers.repo.enabled_tools=["read_file"]' in overrides
         assert 'mcp_servers.bugs.enabled_tools=[]' in overrides
         assert 'mcp_servers.bugs.disabled_tools=["search_bugs"]' in overrides
