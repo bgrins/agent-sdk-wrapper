@@ -1148,6 +1148,37 @@ def test_anthropic_structured_run_without_structured_output_fails(monkeypatch):
     assert events[-1].error_type == "structured_output_failed"
 
 
+def test_anthropic_model_fallback_warns_and_reports_the_serving_model(monkeypatch):
+    from claude_agent_sdk import SystemMessage, TextBlock
+
+    from agent_sdk_wrapper.events import SessionInfo, Text
+
+    fallback = {
+        "type": "system",
+        "subtype": "model_fallback",
+        "trigger": "overloaded",
+        "original_model": "claude-haiku-4-5",
+        "fallback_model": "claude-sonnet-4-5",
+        "content": "Switched to Sonnet 4.5 due to high demand for Haiku 4.5",
+        "session_id": "s1",
+    }
+    events, _ = _stream(
+        monkeypatch,
+        [
+            SystemMessage(subtype="init", data={"session_id": "s1", "model": "claude-haiku-4-5"}),
+            SystemMessage(subtype="model_fallback", data=fallback),
+            _assistant(TextBlock(text="from fallback"), model="claude-sonnet-4-5"),
+        ],
+    )
+
+    assert events[:4] == [
+        SessionInfo(id="s1", model="claude-haiku-4-5"),
+        WarningEvent(message="Switched to Sonnet 4.5 due to high demand for Haiku 4.5"),
+        SessionInfo(id="s1", model="claude-sonnet-4-5"),
+        Text(text="from fallback"),
+    ]
+
+
 def test_anthropic_joins_text_frames_of_one_message(monkeypatch):
     from claude_agent_sdk import TextBlock, ThinkingBlock
 

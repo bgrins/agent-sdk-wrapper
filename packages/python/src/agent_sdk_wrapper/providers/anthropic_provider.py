@@ -508,6 +508,11 @@ class AnthropicProvider(ProviderAdapter):
                             if compacted is not None:
                                 yield compacted
                             model = data.get("model") or None
+                            if message.subtype in ("model_fallback", "model_refusal_fallback"):
+                                yield _fallback_warning(message, include_raw=req.include_raw)
+                                # A local fallback served only a subagent or side request.
+                                if data.get("scope") != "local":
+                                    model = data.get("fallback_model") or None
                             if data.get("session_id") and (
                                 not seen_session or (model and model != session_model)
                             ):
@@ -635,6 +640,14 @@ def _native_option_names() -> frozenset[str]:
 
 def _message_text(message: AssistantMessage) -> str:
     return "".join(block.text for block in message.content if isinstance(block, TextBlock))
+
+
+def _fallback_warning(message: SystemMessage, *, include_raw: bool) -> WarningEvent:
+    data = message.data
+    text = data.get("content") or (
+        f"Claude switched from {data.get('original_model')} to {data.get('fallback_model')}"
+    )
+    return WarningEvent(message=text, raw=_raw(message) if include_raw else None)
 
 
 @dataclasses.dataclass
