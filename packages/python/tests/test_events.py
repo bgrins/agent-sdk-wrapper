@@ -397,31 +397,6 @@ def test_agent_can_continue_provider_session(monkeypatch):
     assert seen_session_ids == [None, "sess-1"]
 
 
-def test_dump_context_writes_summary(monkeypatch, tmp_path):
-    from agent_sdk_wrapper.providers import base
-    from agent_sdk_wrapper.providers import openai_provider as op_mod
-
-    class FakeProvider(base.ProviderAdapter):
-        name = "openai"
-
-        async def stream(self, req):  # type: ignore[override]
-            yield SessionInfo(id=req.session_id or "sess-context")
-            yield Text(text=f"summary:{req.prompt}")
-
-    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
-
-    agent = Agent(provider="openai", continue_session=True)
-
-    import asyncio
-
-    path = tmp_path / "context.md"
-    result = asyncio.run(agent.dump_context(path, prompt="summarize"))
-
-    assert result.final_text == "summary:summarize"
-    assert path.read_text() == "summary:summarize"
-    assert agent.session_id == "sess-context"
-
-
 def test_artifacts_dir_writes_trace_manifest_and_result(monkeypatch, tmp_path):
     from agent_sdk_wrapper.artifacts import ProviderEventLogger
     from agent_sdk_wrapper.providers import base
@@ -1151,20 +1126,6 @@ def test_concurrent_runs_without_continue_session_are_allowed(monkeypatch):
 
     results = asyncio.run(scenario())
     assert [result.final_text for result in results] == ["one", "two"]
-
-
-def test_dump_context_keeps_existing_file_when_run_fails(monkeypatch, tmp_path):
-    install_fake_providers(
-        monkeypatch,
-        events=[Text(text="partial"), Error(message="failed", error_type="execution_error")],
-    )
-    path = tmp_path / "context.md"
-    path.write_text("previous summary")
-
-    result = Agent(provider="openai").dump_context_sync(path)
-
-    assert not result.ok
-    assert path.read_text() == "previous summary"
 
 
 def test_artifacts_round_trip_lone_surrogates(monkeypatch, tmp_path):

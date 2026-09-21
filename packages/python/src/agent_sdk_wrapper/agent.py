@@ -62,11 +62,6 @@ from .request import (
 )
 from .tools import ANTHROPIC_TOOL_SERVER, CODEX_TOOL_SERVER
 
-DEFAULT_CONTEXT_DUMP_PROMPT = (
-    "Summarize the current conversation as durable context for a future run. "
-    "Include goals, decisions, important files, open questions, and next steps."
-)
-
 _ALLOWED_OVERRIDES = frozenset({
     "allowed_tools",
     "cli_login",
@@ -230,34 +225,6 @@ class Agent:
 
     def run_sync(self, prompt: str, **overrides: Any) -> RunResult:
         return asyncio.run(self.run(prompt, **overrides))
-
-    async def dump_context(
-        self,
-        path: str | Path,
-        *,
-        prompt: str = DEFAULT_CONTEXT_DUMP_PROMPT,
-        **overrides: Any,
-    ) -> RunResult:
-        """Ask the current provider session for a summary and write it to ``path``.
-
-        ``path`` is left untouched when the run fails.
-        """
-
-        result = await self.run(prompt, **overrides)
-        if result.ok:
-            out = Path(path)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(result.final_text, encoding="utf-8", errors="backslashreplace")
-        return result
-
-    def dump_context_sync(
-        self,
-        path: str | Path,
-        *,
-        prompt: str = DEFAULT_CONTEXT_DUMP_PROMPT,
-        **overrides: Any,
-    ) -> RunResult:
-        return asyncio.run(self.dump_context(path, prompt=prompt, **overrides))
 
     def _prepare(self, prompt: str, overrides: dict[str, Any]) -> _Run:
         _check_overrides(overrides)
