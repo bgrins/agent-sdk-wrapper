@@ -26,7 +26,6 @@
         { "$ref": "#/$defs/thinking" },
         { "$ref": "#/$defs/tool_call" },
         { "$ref": "#/$defs/tool_result" },
-        { "$ref": "#/$defs/agent_updated" },
         { "$ref": "#/$defs/subagent_started" },
         { "$ref": "#/$defs/subagent_ended" },
         { "$ref": "#/$defs/usage" },
@@ -123,15 +122,6 @@
         "output": { "type": "string" },
         "is_error": { "type": "boolean" },
         "raw": { "$ref": "#/$defs/json_object" }
-      }
-    },
-    "agent_updated": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type", "name"],
-      "properties": {
-        "type": { "const": "agent_updated" },
-        "name": { "type": "string" }
       }
     },
     "subagent_started": {

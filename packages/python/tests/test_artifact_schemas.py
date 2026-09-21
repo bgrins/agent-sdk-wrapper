@@ -13,7 +13,6 @@ from referencing.jsonschema import DRAFT202012
 
 from agent_sdk_wrapper import (
     Agent,
-    AgentUpdated,
     Error,
     EventEnvelope,
     RunFinished,
@@ -78,7 +77,6 @@ def test_each_event_type_validates_against_trace_schema() -> None:
         Thinking(text="plan"),
         ToolCall(id="tool-1", name="repo.read_file", input={"path": "app.py"}),
         ToolResult(id="tool-1", output="contents", is_error=False),
-        AgentUpdated(name="reviewer"),
         Usage(
             usage=TokenUsage(
                 requests=1,

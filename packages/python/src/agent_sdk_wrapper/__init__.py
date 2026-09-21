@@ -14,7 +14,6 @@ from .errors import (
 )
 from .events import (
     AgentEvent,
-    AgentUpdated,
     ContextCompacted,
     Error,
     EventEnvelope,
@@ -74,7 +73,6 @@ __version__ = "0.1.0"
 __all__ = [
     "Agent",
     "AgentEvent",
-    "AgentUpdated",
     "BuiltinTools",
     "BuiltinToolsInput",
     "ConfigError",

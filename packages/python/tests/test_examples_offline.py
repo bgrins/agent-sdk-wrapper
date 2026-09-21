@@ -12,7 +12,6 @@ from types import ModuleType
 import pytest
 
 from agent_sdk_wrapper import (
-    AgentUpdated,
     RunRequest,
     SessionInfo,
     StructuredOutput,
@@ -75,7 +74,6 @@ class OfflineExampleProvider(base.ProviderAdapter):
 
         for name in req.subagents:
             _write_offline_subagent_provider_events(req, name)
-            yield AgentUpdated(name=name)
             yield ToolCall(
                 id=f"subagent-{name}",
                 name=f"agent.{name}",

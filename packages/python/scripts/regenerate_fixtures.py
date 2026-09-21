@@ -24,7 +24,6 @@ if str(SRC) not in sys.path:
 from agent_sdk_wrapper import (  # noqa: E402
     Agent,
     AgentEvent,
-    AgentUpdated,
     ConfigError,
     ProviderNotAvailableError,
     RunRequest,
@@ -179,7 +178,6 @@ async def generate_offline_fixtures(output_dir: Path) -> list[Path]:
                 provider="anthropic",
                 model="claude-haiku-4-5",
                 events=[
-                    AgentUpdated(name="reviewer"),
                     ToolCall(id="tool-1", name="repo.read_file", input={"path": "app.py"}),
                     ToolResult(id="tool-1", output="contents", is_error=False),
                     Text(text="Reviewed app.py."),

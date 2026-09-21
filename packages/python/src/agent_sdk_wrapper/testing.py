@@ -11,7 +11,6 @@ from typing import Any
 
 from .events import (
     AgentEvent,
-    AgentUpdated,
     ContextCompacted,
     Error,
     EventEnvelope,
@@ -142,8 +141,6 @@ def event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         return ToolCall(**data)
     if event_type == "tool_result":
         return ToolResult(**data)
-    if event_type == "agent_updated":
-        return AgentUpdated(**data)
     if event_type == "subagent_started":
         return SubagentStarted(**data)
     if event_type == "subagent_ended":

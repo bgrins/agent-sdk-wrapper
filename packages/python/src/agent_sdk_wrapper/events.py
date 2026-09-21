@@ -156,14 +156,6 @@ class ToolResult(_EventBase):
 
 
 @dataclass
-class AgentUpdated(_EventBase):
-    """The active (sub)agent changed."""
-
-    type: ClassVar[str] = "agent_updated"
-    name: str = ""
-
-
-@dataclass
 class SubagentStarted(_EventBase):
     """A delegated subagent task began."""
 
@@ -250,7 +242,6 @@ AgentEvent = (
     | Thinking
     | ToolCall
     | ToolResult
-    | AgentUpdated
     | SubagentStarted
     | SubagentEnded
     | Usage

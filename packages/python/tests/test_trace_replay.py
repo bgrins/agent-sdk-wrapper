@@ -11,7 +11,6 @@ import pytest
 from agent_sdk_wrapper import (
     Agent,
     AgentEvent,
-    AgentUpdated,
     ContextCompacted,
     Error,
     RunEndedReason,
@@ -43,7 +42,6 @@ SAMPLE_EVENTS = [
     Thinking(text="", redacted_bytes=12),
     ToolCall(id="t1", name="echo", input={"x": 1}),
     ToolResult(id="t1", name="echo", output="out", is_error=True),
-    AgentUpdated(name="reviewer"),
     SubagentStarted(task_id="a1", name="reviewer", description="Review"),
     SubagentEnded(task_id="a1", status="completed", summary="done"),
     Usage(usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5), cost_usd=0.5),
