@@ -339,7 +339,6 @@
 
     .event[data-type="tool_call"],
     .event[data-type="tool_result"],
-    .event[data-type="agent_updated"],
     .event[data-type="subagent_started"],
     .event[data-type="subagent_ended"] {
       border-left-color: var(--tool);
@@ -2122,14 +2121,6 @@
             title: event.error_type ? `error: ${textOf(event.error_type)}` : event.type,
             body: textOf(event.message),
           });
-        } else if (event.type === "agent_updated") {
-          items.push({
-            kind: "banner",
-            key,
-            type: event.type,
-            title: "Agent",
-            body: textOf(event.name),
-          });
         } else if (event.type === "subagent_started") {
           items.push({
             kind: "banner",
@@ -2391,7 +2382,6 @@
 
     function eventBody(event) {
       if (event.type === "thinking" && !textOf(event.text).trim()) return hiddenThinking(event);
-      if (event.type === "agent_updated") return textOf(event.name);
       if (event.type === "subagent_started") return textOf(event.description || event.task_id);
       if (event.type === "subagent_ended") return textOf(event.summary || event.task_id);
       if (event.type === "context_compacted") return `trigger: ${textOf(event.trigger) || "unknown"}`;

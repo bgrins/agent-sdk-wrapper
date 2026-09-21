@@ -919,7 +919,6 @@ test("the conversation shows every prompt, the session model, run ends and unmat
 test("timeline rows show the content of lifecycle events", async () => {
   const context = await loadViewer();
   const events = [
-    { type: "agent_updated", name: "planner" },
     { type: "subagent_started", task_id: "t1", name: "reviewer", description: "check diff" },
     { type: "subagent_ended", task_id: "t1", status: "completed", summary: "looks fine" },
     { type: "context_compacted", trigger: "auto", pre_tokens: 1200 },
@@ -929,7 +928,6 @@ test("timeline rows show the content of lifecycle events", async () => {
   assert.deepEqual(
     events.map((event) => evaluate(context, `eventBody(${JSON.stringify(event)})`)),
     [
-      "planner",
       "check diff",
       "looks fine",
       "trigger: auto",
