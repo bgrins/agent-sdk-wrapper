@@ -205,6 +205,24 @@ def test_process_terminated_is_recorded_then_raised(monkeypatch, tmp_path, mode)
         assert isinstance(streamed[-1].event, RunFinished)
 
 
+@pytest.mark.parametrize("on_cancel", ["return", "answer"])
+def test_a_provider_that_catches_the_deadline_cancel_still_times_out(monkeypatch, on_cancel):
+    async def play(req):
+        yield Text(text="partial")
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            if on_cancel == "return":
+                return
+            yield Error(message="aborted", error_type="cancelled")
+
+    install_fake_providers(monkeypatch, events=play)
+    result = Agent(provider="openai", timeout=0.2).run_sync("x")
+
+    assert (result.status, result.error_type) == (RunStatus.TIMEOUT, "timeout")
+    assert [env.event.type for env in result.events][-3:] == ["text", "error", "run_finished"]
+
+
 async def test_provider_cleanup_error_at_a_deadline_is_logged_not_escaped(
     monkeypatch, caplog
 ):

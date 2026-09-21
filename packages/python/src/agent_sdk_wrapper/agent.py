@@ -497,30 +497,34 @@ async def _close_provider(native: AsyncGenerator[AgentEvent]) -> None:
 async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None) -> Any:
     """Await the next provider event, applying the run deadline to this wait only."""
 
-    try:
-        if deadline is None:
-            return await anext(native)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _DeadlineExceeded
-        scope = asyncio.timeout(remaining)
+    if deadline is None:
         try:
-            async with scope:
-                return await anext(native)
+            return await anext(native)
         except StopAsyncIteration:
-            raise
-        except TimeoutError:
-            if scope.expired():
-                raise _DeadlineExceeded from None
-            raise
-        except Exception as exc:
-            # Cleanup that fails while the deadline cancels the provider hides the timeout.
-            if scope.expired():
-                get_logger().warning("provider failed while stopping at the deadline: %s", exc)
-                raise _DeadlineExceeded from exc
-            raise
+            return _END
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _DeadlineExceeded
+    scope = asyncio.timeout(remaining)
+    try:
+        async with scope:
+            event = await anext(native)
     except StopAsyncIteration:
-        return _END
+        event = _END
+    except TimeoutError:
+        if scope.expired():
+            raise _DeadlineExceeded from None
+        raise
+    except Exception as exc:
+        # Cleanup that fails while the deadline cancels the provider hides the timeout.
+        if scope.expired():
+            get_logger().warning("provider failed while stopping at the deadline: %s", exc)
+            raise _DeadlineExceeded from exc
+        raise
+    if scope.expired():
+        # The provider caught the deadline's cancel and ended or answered anyway.
+        raise _DeadlineExceeded
+    return event
 
 
 def _interrupted_error(exc: BaseException) -> Error:
