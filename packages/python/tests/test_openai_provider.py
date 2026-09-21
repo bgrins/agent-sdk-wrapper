@@ -1086,6 +1086,7 @@ def test_codex_config_values_are_valid_toml():
     value = {"text": TRICKY_TEXT, "list": [TRICKY_TEXT, 1, 2.5, True], TRICKY_TEXT: "key"}
 
     assert tomllib.loads(f"x = {_toml_literal(value)}")["x"] == value
+    assert tomllib.loads(f"x = {_toml_literal(('x.py', 'A'))}")["x"] == ["x.py", "A"]
     with pytest.raises(ConfigError, match="surrogate"):
         _toml_literal("\ud83d")
 

@@ -1498,7 +1498,7 @@ def _toml_literal(value: Any) -> str:
         return _toml_string(value)
     if isinstance(value, (int, float)):
         return str(value)
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
     if isinstance(value, dict):
         items = [
