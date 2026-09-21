@@ -146,7 +146,7 @@ def _sse(index: int, step: dict[str, Any]) -> str:
                 "input_tokens": input_tokens,
                 "input_tokens_details": {"cached_tokens": 0},
                 "output_tokens": output_tokens,
-                "output_tokens_details": {"reasoning_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": step.get("reasoning", 0)},
                 "total_tokens": input_tokens + output_tokens,
             },
         },
@@ -634,6 +634,22 @@ async def test_an_exhausted_context_window_reports_no_usage(mock_api, codex_home
 
     assert result.error_type == "context_window_exceeded"
     assert result.usage is None
+
+
+async def test_reasoning_tokens_without_a_reasoning_item_yield_empty_thinking(
+    mock_api, codex_home, tmp_path
+):
+    mock_api.plan = [{"text": "answer", "reasoning": 7}]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+
+    assert result.ok, result.error
+    events = [e.event for e in result.events if e.event.type in ("thinking", "usage")]
+    assert [(e.type, getattr(e, "text", None)) for e in events] == [
+        ("thinking", ""),
+        ("usage", None),
+    ]
+    assert events[1].usage.reasoning_output_tokens == 7
 
 
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):

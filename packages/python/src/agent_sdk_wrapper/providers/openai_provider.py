@@ -477,6 +477,7 @@ async def _stream_turn(
     texts: list[str] = []
     usage = _TurnUsage()
     model_output = False
+    reasoned = False
     started_calls: set[str] = set()
     latest_plan: list[Any] | None = None
     # A non-retried error notification precedes the failed turn/completed; emit one Error.
@@ -541,6 +542,7 @@ async def _stream_turn(
                 buffered_text = _pop_delta_buffer(thinking_delta_parts, item_id)
                 text = _reasoning_text(root) or buffered_text
                 # Preserve empty reasoning items: they can carry billed tokens.
+                reasoned = True
                 yield Thinking(text=text, raw=_raw(event) if req.include_raw else None)
                 continue
             if root_type == "plan":
@@ -599,9 +601,12 @@ async def _stream_turn(
                 texts.append(text)
                 yield Text(text=text)
             for text in _drain_delta_buffers(thinking_delta_parts):
+                reasoned = True
                 yield Thinking(text=text)
             usage_event = usage.event(req.include_raw)
             if usage_event is not None:
+                if usage_event.usage.reasoning_output_tokens and not reasoned:
+                    yield Thinking(text="")
                 yield usage_event
             turn_info = _field(payload, "turn", "turn")
             status = _status_value(_field(turn_info, "status", "status"))
