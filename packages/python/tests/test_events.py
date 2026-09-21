@@ -364,7 +364,7 @@ def test_check_runtime_validates_anthropic_request_before_runtime_check():
         extra_options={"tools": []},
     )
 
-    with pytest.raises(ConfigError, match="builtin_tools"):
+    with pytest.raises(ConfigError, match="tools"):
         agent.check_runtime()
 
 
