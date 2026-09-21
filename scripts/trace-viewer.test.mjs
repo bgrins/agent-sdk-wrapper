@@ -940,20 +940,23 @@ test("timeline rows show the content of lifecycle events", async () => {
 test("the summary, conversation and timeline show the first error and its type", async () => {
   const context = await loadViewer();
   const error = (message, error_type) => ({ type: "error", message, error_type });
-  const rows = [
-    { type: "run_started", provider: "anthropic" },
-    error("prompt is too long", "context_window_exceeded"),
-    error("cleanup failed", "provider_exception"),
-    { type: "run_finished", status: "failure", ended_reason: "error", duration_ms: 5 },
-  ].map((event, sequence) => ({ run_id: "r", sequence, event }));
-  context.files = [new File([traceText(rows)], "trace.jsonl")];
-  await vm.runInContext("loadFiles(files)", context);
-  const badges = evaluate(
-    context,
-    "runBadgesEl.children.map((node) => node.textContent)",
-  );
-  assert.ok(badges.includes("context_window_exceeded: prompt is too long"));
-  assert.ok(!badges.some((text) => text.includes("cleanup failed")));
+  // Trace-only runs that time out or are cancelled report their error too.
+  for (const status of ["timeout", "cancelled", "failure"]) {
+    const rows = [
+      { type: "run_started", provider: "anthropic" },
+      error("prompt is too long", "context_window_exceeded"),
+      error("cleanup failed", "provider_exception"),
+      { type: "run_finished", status, ended_reason: "error", duration_ms: 5 },
+    ].map((event, sequence) => ({ run_id: "r", sequence, event }));
+    context.files = [new File([traceText(rows)], "trace.jsonl")];
+    await vm.runInContext("loadFiles(files)", context);
+    const badges = evaluate(
+      context,
+      "runBadgesEl.children.map((node) => node.textContent)",
+    );
+    assert.ok(badges.includes("context_window_exceeded: prompt is too long"), status);
+    assert.ok(!badges.some((text) => text.includes("cleanup failed")), status);
+  }
   assert.deepEqual(
     evaluate(
       context,

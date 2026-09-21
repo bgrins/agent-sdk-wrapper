@@ -1803,7 +1803,7 @@
       const durations = trace.filter((row) => row.event?.type === "run_finished" && Number.isFinite(row.event.duration_ms));
       const reported = current.findLast((row) => row.event?.type === "session_info" && row.event.model);
       // Like RunResult, report the run's first error.
-      const failed = finished?.status === "failure"
+      const failed = finished?.status !== "success"
         ? current.find((row) => row.event?.type === "error")?.event
         : undefined;
       return {
