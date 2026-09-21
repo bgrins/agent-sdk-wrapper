@@ -153,6 +153,18 @@ def test_anthropic_options_reject_partial_messages():
         AnthropicProvider()._build_options(req)
 
 
+def test_anthropic_max_thinking_tokens_reaches_the_cli():
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    options = AnthropicProvider(cli_path="claude")._build_options(
+        RunRequest(provider="anthropic", prompt="x", extra_options={"max_thinking_tokens": 0})
+    )
+    command = SubprocessCLITransport("x", options)._build_command()
+
+    assert command[command.index("--max-thinking-tokens") + 1] == "0"
+    assert "--thinking" not in command
+
+
 def test_anthropic_subagents_without_a_model_inherit_the_parent_model():
     from agent_sdk_wrapper import INHERIT_MODEL
 

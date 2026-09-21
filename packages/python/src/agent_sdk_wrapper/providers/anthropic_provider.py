@@ -376,7 +376,8 @@ class AnthropicProvider(ProviderAdapter):
             }
         if builtin is not None:
             kwargs["tools"] = builtin
-        if "thinking" not in extra:
+        # The SDK ranks thinking above max_thinking_tokens, so a default would hide it.
+        if "thinking" not in extra and "max_thinking_tokens" not in extra:
             kwargs["thinking"] = dict(_DEFAULT_THINKING)
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         kwargs.update(extra)
