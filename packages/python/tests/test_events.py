@@ -1228,6 +1228,44 @@ def test_artifacts_run_start_drops_previous_result(monkeypatch, tmp_path):
     assert at_start["trace_run_ids"] == {at_start["run_id"]}
 
 
+def test_artifacts_run_start_drops_previous_sdk_files(monkeypatch, tmp_path):
+    from agent_sdk_wrapper.artifacts import sdk_dir_for
+
+    async def writes_a_debug_log(req):
+        (sdk_dir_for(req.artifacts_dir) / "debug.log").write_text("first run")
+        yield Text(text="ok")
+
+    artifacts_dir = tmp_path / "artifacts"
+    install_fake_providers(monkeypatch, events=writes_a_debug_log)
+    Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("first")
+    install_fake_providers(monkeypatch, events=[Text(text="ok")])
+    Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("second")
+
+    manifest = json.loads((artifacts_dir / "manifest.json").read_text())
+    assert "sdk.debug.log" not in manifest["files"]
+    assert not (artifacts_dir / "sdk").exists()
+
+
+def test_manifest_records_the_outcome_and_reported_model(monkeypatch, tmp_path):
+    install_fake_providers(
+        monkeypatch,
+        events=[
+            SessionInfo(id="s1", model="gpt-5-2026-01-01"),
+            Error(message="hit the limit", error_type="max_turns"),
+        ],
+    )
+
+    Agent(provider="openai", model="gpt-5", artifacts_dir=tmp_path).run_sync("hi")
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert {key: manifest[key] for key in ("model", "status", "ended_reason", "error_type")} == {
+        "model": "gpt-5-2026-01-01",
+        "status": "failure",
+        "ended_reason": "max_turns",
+        "error_type": "max_turns",
+    }
+
+
 def test_artifact_json_files_are_replaced_atomically(tmp_path):
     import threading
 

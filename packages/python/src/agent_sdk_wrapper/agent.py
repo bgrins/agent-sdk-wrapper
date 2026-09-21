@@ -482,12 +482,14 @@ class Agent:
                         artifacts_dir,
                         run_id=run_id,
                         provider=req.provider,
-                        model=req.model,
+                        model=run.result.model,
                         status=status.value,
+                        ended_reason=ended_reason.value,
                         trace_file=trace_path,
                         result_file=result_path,
                         duration_ms=duration_ms,
                         error=error_msg,
+                        error_type=error_type,
                         extra_files=collect_side_files(artifacts_dir),
                     )
 

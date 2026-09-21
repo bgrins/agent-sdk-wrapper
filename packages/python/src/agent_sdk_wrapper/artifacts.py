@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import uuid
 from collections.abc import Callable
 from enum import Enum
@@ -154,6 +155,11 @@ def clear_stale_artifacts(artifacts_dir: Path) -> None:
     """Remove files from a previous run that the new run would not overwrite first."""
     result_file_for(artifacts_dir).unlink(missing_ok=True)
     provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
+    sdk_dir = artifacts_dir / "sdk"
+    if sdk_dir.is_dir() and not sdk_dir.is_symlink():
+        shutil.rmtree(sdk_dir)
+    else:
+        sdk_dir.unlink(missing_ok=True)
 
 
 def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
@@ -187,9 +193,11 @@ def write_manifest(
     model: str | None,
     status: str,
     trace_file: str | Path | None,
+    ended_reason: str | None = None,
     result_file: str | Path | None = None,
     duration_ms: int | None = None,
     error: str | None = None,
+    error_type: str | None = None,
     extra_files: dict[str, str | Path] | None = None,
 ) -> Path:
     files: dict[str, str] = {}
@@ -207,9 +215,11 @@ def write_manifest(
         "provider": provider,
         "model": model,
         "status": status,
+        "ended_reason": ended_reason,
         "updated_at": utcnow_iso(),
         "duration_ms": duration_ms,
         "error": error,
+        "error_type": error_type,
         "files": files,
     }
     path = manifest_file_for(artifacts_dir)

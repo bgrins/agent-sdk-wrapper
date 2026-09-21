@@ -157,18 +157,26 @@ def test_generated_artifacts_validate_schemas(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
 
     artifacts_dir = tmp_path / "artifacts"
-    result = asyncio.run(Agent(provider="openai", artifacts_dir=artifacts_dir).run("ignored"))
+    manifests = []
+
+    def read_manifest(env: EventEnvelope) -> None:
+        manifests.append(json.loads((artifacts_dir / "manifest.json").read_text()))
+
+    result = asyncio.run(
+        Agent(provider="openai", artifacts_dir=artifacts_dir, on_event=read_manifest).run("x")
+    )
+    manifests.append(json.loads((artifacts_dir / "manifest.json").read_text()))
 
     assert result.ok
+    assert (manifests[0]["status"], manifests[-1]["status"]) == ("running", "success")
     trace_validator = validator("agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json")
     manifest_validator = validator("agent-sdk-wrapper.manifest.v1.schema.json")
     result_validator = validator("agent-sdk-wrapper.run-result.v1.schema.json")
 
     for line in (artifacts_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines():
         trace_validator.validate(json.loads(line))
-    manifest_validator.validate(
-        json.loads((artifacts_dir / "manifest.json").read_text(encoding="utf-8"))
-    )
+    for manifest in (manifests[0], manifests[-1]):
+        manifest_validator.validate(manifest)
     result_validator.validate(
         json.loads((artifacts_dir / "result.json").read_text(encoding="utf-8"))
     )

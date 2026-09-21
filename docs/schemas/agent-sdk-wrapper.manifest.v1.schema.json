@@ -11,9 +11,11 @@
     "provider",
     "model",
     "status",
+    "ended_reason",
     "updated_at",
     "duration_ms",
     "error",
+    "error_type",
     "files"
   ],
   "properties": {
@@ -36,6 +38,18 @@
     "status": {
       "enum": ["running", "success", "failure", "timeout", "cancelled"]
     },
+    "ended_reason": {
+      "enum": [
+        null,
+        "unknown",
+        "success",
+        "max_turns",
+        "timeout",
+        "refused",
+        "error",
+        "cancelled"
+      ]
+    },
     "updated_at": {
       "type": "string",
       "format": "date-time"
@@ -45,6 +59,9 @@
       "minimum": 0
     },
     "error": {
+      "type": ["string", "null"]
+    },
+    "error_type": {
       "type": ["string", "null"]
     },
     "files": {
