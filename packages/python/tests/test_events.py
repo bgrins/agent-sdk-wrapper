@@ -236,6 +236,24 @@ def test_parse_model_spec_accepts_provider_prefixes():
         "claude-haiku-4-5",
     )
     assert parse_model_spec("gpt-5") == (None, "gpt-5")
+    assert parse_model_spec(" Codex : gpt-5 ") == ("openai", "gpt-5")
+    with pytest.raises(ConfigError, match="provider:model"):
+        parse_model_spec("anthropic:")
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("anthropic", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+        ("anthropic", "arn:aws:bedrock:us-east-1:123456789012:inference-profile/x"),
+        ("openai", "ft:gpt-4o:acme:custom:abc123"),
+        ("openai", "qwen2.5-coder:7b"),
+    ],
+)
+def test_model_ids_with_colons_are_not_provider_prefixes(provider, model):
+    assert parse_model_spec(model) == (None, model)
+    assert Agent(provider=provider, model=model).model == model
+    assert Agent(provider=provider, model=f"{provider}:{model}").model == model
 
 
 def test_provider_model_spec_conflict_raises():

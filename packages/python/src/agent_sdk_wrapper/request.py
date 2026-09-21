@@ -54,7 +54,11 @@ def normalize_provider(provider: ProviderInput) -> Provider | None:
 
 
 def parse_model_spec(model: str | None) -> tuple[Provider | None, str | None]:
-    """Parse optional ``provider:model`` syntax without inferring bare names."""
+    """Parse optional ``provider:model`` syntax without inferring bare names.
+
+    Only a known provider name before the first colon is a prefix, so model IDs
+    such as ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` pass through whole.
+    """
 
     if model is None:
         return None, None
@@ -65,11 +69,11 @@ def parse_model_spec(model: str | None) -> tuple[Provider | None, str | None]:
         return None, None
 
     prefix, sep, name = spec.partition(":")
-    if not sep:
+    provider = _PROVIDER_ALIASES.get(prefix.strip().lower())
+    if not sep or provider is None:
         return None, spec
-    provider = normalize_provider(prefix)
     model_name = name.strip()
-    if provider is None or model_name == "":
+    if model_name == "":
         raise ConfigError(f"invalid model spec {model!r}; expected 'provider:model'")
     return provider, model_name
 
