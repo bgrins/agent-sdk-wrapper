@@ -23,7 +23,7 @@ import { type Recorded, type Step, startMock } from "./mock.js";
 // is in docs/fixtures/CONFORMANCE.md.
 type Options = Record<string, unknown>;
 type CaseProvider = "anthropic" | "codex";
-export type Mode = "offline" | "live";
+type Mode = "offline" | "live";
 interface Match {
   request?: number;
   path?: string;
@@ -33,7 +33,7 @@ interface Match {
   excludes?: string;
   absent?: boolean;
 }
-export interface Expect {
+interface Expect {
   status?: string;
   error_type?: string;
   final_text?: string;
@@ -64,7 +64,7 @@ interface Setup {
   codex_login?: "chatgpt" | "api_key";
   codex_provider?: "builtin";
 }
-export interface Case {
+interface Case {
   id: string;
   provider: CaseProvider;
   options?: Options;
@@ -231,7 +231,7 @@ const thread = (key: keyof CodexThreadOptions) => (value: unknown) => ({
 });
 const webTools = ["WebSearch", "WebFetch"];
 
-export const pythonOptions: Record<string, Entry> = {
+const pythonOptions: Record<string, Entry> = {
   provider: request("provider"),
   model: request("model"),
   effort: request("effort"),
@@ -352,7 +352,7 @@ const copy = (fragment: Fragment): Fragment =>
   );
 
 /** Map Python-named options; throws for an option TypeScript lacks. */
-export function mapOptions(options: Options, ctx: Context): Fragment {
+function mapOptions(options: Options, ctx: Context): Fragment {
   const fragment: Fragment = {};
   const visit = (name: string, value: unknown) => {
     const entry = pythonOptions[name];
@@ -496,7 +496,7 @@ function withSession(value: unknown, session: string): unknown {
 }
 
 /** What one run produced. */
-export interface Outcome {
+interface Outcome {
   result?: RunResult;
   thrown?: unknown;
   envelopes: EventEnvelope[];
@@ -506,7 +506,7 @@ export interface Outcome {
 }
 
 /** Run every turn of a plan and check its expectations. */
-export async function runCase(plan: Plan, mode: Mode): Promise<Outcome[]> {
+export async function runCase(plan: Plan, mode: Mode): Promise<void> {
   const { provider } = plan;
   const root = await mkdtemp(join(tmpdir(), "agent-sdk-wrapper-conformance-"));
   const mock =
@@ -587,11 +587,9 @@ export async function runCase(plan: Plan, mode: Mode): Promise<Outcome[]> {
     let agent: Agent | undefined;
     let base: Fragment = {};
     let session: string | null | undefined;
-    const outcomes: Outcome[] = [];
     for (const [index, turn] of plan.turns.entries()) {
       const ctx = (options: Options) => ({ provider, root, options, natives });
       const outcome: Outcome = { envelopes: [], natives: [], requests: [] };
-      outcomes.push(outcome);
       const seen = {
         requests: mock?.requests.length ?? 0,
         natives: natives.length,
@@ -637,7 +635,6 @@ export async function runCase(plan: Plan, mode: Mode): Promise<Outcome[]> {
       }
       session = outcome.result?.session_id;
     }
-    return outcomes;
   } finally {
     await mock?.close();
     // A cancelled Claude CLI can still be exiting, and writing, when its run returns.
