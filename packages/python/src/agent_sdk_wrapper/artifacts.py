@@ -220,9 +220,10 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def _relpath(path: str | Path, base: Path) -> str:
-    path = Path(path)
+    """Relative to the manifest's directory, or absolute when outside it."""
+    path = Path(path).resolve()
     try:
-        return path.relative_to(base).as_posix()
+        return path.relative_to(base.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
 

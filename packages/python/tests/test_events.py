@@ -1196,6 +1196,16 @@ def test_a_trace_file_that_cannot_open_leaves_the_previous_artifacts(monkeypatch
     assert json.loads((artifacts_dir / "result.json").read_text())["run_id"] == first.run_id
 
 
+def test_manifest_trace_path_outside_the_artifacts_dir_is_absolute(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=[Text(text="ok")])
+    monkeypatch.chdir(tmp_path)
+
+    Agent(provider="openai", artifacts_dir="out", trace_file="logs/t.jsonl").run_sync("hi")
+
+    trace = json.loads((tmp_path / "out" / "manifest.json").read_text())["files"]["trace"]
+    assert trace == (tmp_path / "logs" / "t.jsonl").resolve().as_posix()
+
+
 def test_manifest_records_the_outcome_and_reported_model(monkeypatch, tmp_path):
     install_fake_providers(
         monkeypatch,
