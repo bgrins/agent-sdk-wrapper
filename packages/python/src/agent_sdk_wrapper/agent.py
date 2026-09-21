@@ -352,18 +352,23 @@ class Agent:
             try:
                 artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
                 trace_path = _resolve_trace_path(trace_path, artifacts_dir)
-                if artifacts_dir is not None:
-                    # Remove the previous result before the new trace replaces the old one.
-                    clear_stale_artifacts(artifacts_dir)
-                    write_manifest(
-                        artifacts_dir,
-                        run_id=run_id,
-                        provider=req.provider,
-                        model=req.model,
-                        status="running",
-                        trace_file=trace_path,
-                    )
-                writer = TraceWriter(trace_path)
+                # Open the trace first so a bad trace path leaves the previous run's files.
+                trace = TraceWriter(trace_path)
+                try:
+                    if artifacts_dir is not None:
+                        clear_stale_artifacts(artifacts_dir)
+                        write_manifest(
+                            artifacts_dir,
+                            run_id=run_id,
+                            provider=req.provider,
+                            model=req.model,
+                            status="running",
+                            trace_file=trace_path,
+                        )
+                except OSError:
+                    trace.close()
+                    raise
+                writer = trace
             except OSError as exc:
                 raise ConfigError(f"could not prepare the run's output files: {exc}") from exc
             yield record(

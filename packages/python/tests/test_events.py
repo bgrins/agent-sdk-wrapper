@@ -1180,6 +1180,22 @@ def test_artifacts_run_start_drops_previous_result(monkeypatch, tmp_path):
     assert at_start["trace_run_ids"] == {at_start["run_id"]}
 
 
+def test_a_trace_file_that_cannot_open_leaves_the_previous_artifacts(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=[Text(text="ok")])
+    artifacts_dir = tmp_path / "artifacts"
+    first = Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("first")
+    (tmp_path / "file").write_text("")
+
+    with pytest.raises(ConfigError, match="output files"):
+        Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync(
+            "second", trace_file=tmp_path / "file" / "trace.jsonl"
+        )
+
+    manifest = json.loads((artifacts_dir / "manifest.json").read_text())
+    assert (manifest["run_id"], manifest["status"]) == (first.run_id, "success")
+    assert json.loads((artifacts_dir / "result.json").read_text())["run_id"] == first.run_id
+
+
 def test_manifest_records_the_outcome_and_reported_model(monkeypatch, tmp_path):
     install_fake_providers(
         monkeypatch,
