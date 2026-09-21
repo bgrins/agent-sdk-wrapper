@@ -1343,11 +1343,14 @@
       button.addEventListener("click", () => switchView(button.dataset.view));
     });
 
-    discoverResults();
+    const discovered = discoverResults();
     if (window.location.protocol !== "file:") {
-      setInterval(() => {
-        if (autoRefresh.checked && !document.hidden) discoverResults();
+      // Wait after each poll so a slow scan never runs back to back.
+      const poll = () => setTimeout(async () => {
+        if (autoRefresh.checked && !document.hidden) await discoverResults();
+        poll();
       }, 2000);
+      discovered.finally(poll);
     } else {
       autoRefresh.checked = false;
       autoRefresh.disabled = true;

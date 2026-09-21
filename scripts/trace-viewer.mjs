@@ -20,6 +20,7 @@ const urlPath = (path) => path.split("/").map(encodeURIComponent).join("/");
 export const MAX_RUNS = 500;
 // Bounds one scan; the depth limit normally keeps real scans far below it.
 export const MAX_DIRECTORIES = 5000;
+const PARALLEL_READS = 16;
 
 async function listRuns(directory, depth) {
   // Read every directory within the depth limit, then keep the newest runs, so
@@ -30,58 +31,15 @@ async function listRuns(directory, depth) {
   let capped = false;
   for (let level = [""]; level.length && !capped; ) {
     const next = [];
-    for (const relative of level) {
-      if (scanned === MAX_DIRECTORIES) {
-        capped = true;
-        break;
-      }
-      scanned++;
-      let entries;
-      try {
-        entries = await readdir(resolve(directory, relative), {
-          withFileTypes: true,
-        });
-      } catch (error) {
-        // An unreadable or replaced directory must not hide the other runs.
-        if (!relative && error.code !== "ENOENT") throw error;
-        continue;
-      }
-      const prefix = relative ? `${relative}/` : "";
-      const hasManifest = entries.some(
-        (entry) => entry.name === "manifest.json" && entry.isFile(),
-      );
-      const traceCount = entries.filter(
-        (entry) =>
-          entry.isFile() &&
-          (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
-      ).length;
-      const descend =
-        depth > 0 && (!relative || relative.split("/").length < depth);
-      await Promise.all(
-        entries.map(async (entry) => {
-          if (entry.name.startsWith(".")) return;
-          const path = prefix + entry.name;
-          const isRun =
-            entry.isFile() &&
-            (hasManifest
-              ? entry.name === "manifest.json"
-              : entry.name === "trace.jsonl" ||
-                entry.name.endsWith(".trace.jsonl"));
-          if (!isRun && !(descend && entry.isDirectory())) return;
-          const info = await lstat(resolve(directory, path)).catch(() => null);
-          if (info?.isDirectory() && !isRun)
-            return next.push({ path, modified: info.mtimeMs });
-          if (!isRun || !info?.isFile() || info.nlink !== 1) return;
-          runs.push({
-            label:
-              !hasManifest && traceCount > 1 ? path : relative || entry.name,
-            trace: hasManifest ? null : `/results/${urlPath(path)}`,
-            manifest: hasManifest ? `/results/${urlPath(path)}` : null,
-            updated_at: info.mtime.toISOString(),
-          });
-        }),
-      );
-    }
+    const batch = level.slice(0, MAX_DIRECTORIES - scanned);
+    capped = batch.length < level.length;
+    scanned += batch.length;
+    let index = 0;
+    const worker = async () => {
+      while (index < batch.length)
+        await readRunDirectory(directory, batch[index++], depth, runs, next);
+    };
+    await Promise.all(Array.from({ length: PARALLEL_READS }, worker));
     level = next
       .sort((a, b) => b.modified - a.modified)
       .map((entry) => entry.path);
@@ -92,6 +50,54 @@ async function listRuns(directory, depth) {
     found: runs.length,
     scanned: capped ? scanned : null,
   };
+}
+
+// Adds a directory's runs to `runs` and its subdirectories to `next`.
+async function readRunDirectory(directory, relative, depth, runs, next) {
+  let entries;
+  try {
+    entries = await readdir(resolve(directory, relative), {
+      withFileTypes: true,
+    });
+  } catch (error) {
+    // An unreadable or replaced directory must not hide the other runs.
+    if (!relative && error.code !== "ENOENT") throw error;
+    return;
+  }
+  const prefix = relative ? `${relative}/` : "";
+  const hasManifest = entries.some(
+    (entry) => entry.name === "manifest.json" && entry.isFile(),
+  );
+  const traceCount = entries.filter(
+    (entry) =>
+      entry.isFile() &&
+      (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
+  ).length;
+  const descend =
+    depth > 0 && (!relative || relative.split("/").length < depth);
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (entry.name.startsWith(".")) return;
+      const path = prefix + entry.name;
+      const isRun =
+        entry.isFile() &&
+        (hasManifest
+          ? entry.name === "manifest.json"
+          : entry.name === "trace.jsonl" ||
+            entry.name.endsWith(".trace.jsonl"));
+      if (!isRun && !(descend && entry.isDirectory())) return;
+      const info = await lstat(resolve(directory, path)).catch(() => null);
+      if (info?.isDirectory() && !isRun)
+        return next.push({ path, modified: info.mtimeMs });
+      if (!isRun || !info?.isFile() || info.nlink !== 1) return;
+      runs.push({
+        label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
+        trace: hasManifest ? null : `/results/${urlPath(path)}`,
+        manifest: hasManifest ? `/results/${urlPath(path)}` : null,
+        updated_at: info.mtime.toISOString(),
+      });
+    }),
+  );
 }
 
 const inlineHashes = (html, tag) =>
@@ -142,6 +148,7 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
   if (!Number.isInteger(depth) || depth < 0 || depth > 20)
     throw new Error("Trace directory depth must be 0–20");
   directory = resolve(directory);
+  let scan = null;
   return createServer(async (request, response) => {
     const send = (status, type, body, headers) => {
       response.writeHead(status, {
@@ -177,7 +184,11 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
         });
       }
       if (path === "/api/runs") {
-        const { runs, found, scanned } = await listRuns(directory, depth);
+        // Pages polling at once share one scan.
+        scan ??= listRuns(directory, depth).finally(() => {
+          scan = null;
+        });
+        const { runs, found, scanned } = await scan;
         // Each header appears only when its limit shortened the list.
         const headers = {};
         if (found > runs.length) headers["x-runs-found"] = String(found);

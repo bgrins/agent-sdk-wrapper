@@ -17,6 +17,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import vm from "node:vm";
 import {
   contentSecurityPolicy,
@@ -352,6 +353,51 @@ test("a newer deep run is listed ahead of older shallow runs", async (t) => {
   assert.equal(runs[0].label, "jobs/a/b/fresh");
 });
 
+test("concurrent index requests share one scan that reads a few directories at a time", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-scan-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const jobs = 40;
+  await Promise.all(
+    Array.from({ length: jobs }, (_, index) => mkdir(join(root, `job-${index}`))),
+  );
+  let arrived = 0;
+  const base = await listen(t, root, {}, (directory, options) =>
+    createTraceServer(directory, options).on("request", () => arrived++),
+  );
+  const readdir = fs.readdir;
+  let rootReads = 0;
+  let reading = 0;
+  let most = 0;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const mocked = t.mock.method(fs, "readdir", async (path, ...args) => {
+    if (path === root) {
+      rootReads++;
+      await gate;
+    }
+    most = Math.max(most, ++reading);
+    try {
+      return await readdir(path, ...args);
+    } finally {
+      reading--;
+    }
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const responses = [get(base, "/api/runs"), get(base, "/api/runs")];
+  while (arrived < 2) await setImmediate();
+  release();
+  for (const response of await Promise.all(responses))
+    assert.equal(response.status, 200);
+  assert.equal(rootReads, 1);
+  assert.ok(most > 1 && most < jobs, `${most} directories read at once`);
+});
+
 // freebsd stands in for platforms with neither O_NOFOLLOW_ANY nor /proc.
 for (const platform of [process.platform, "freebsd"]) {
   test(`a symlinked ancestor swapped in after path checks is not followed on ${platform}`, async (t) => {
@@ -507,7 +553,7 @@ const VIEWS = [
   "raw-view",
 ];
 
-async function loadViewer(href) {
+async function loadViewer(href, globals = {}) {
   const html = await readFile(
     new URL("../docs/trace-viewer.html", import.meta.url),
     "utf8",
@@ -536,10 +582,10 @@ async function loadViewer(href) {
     },
     window: { location: { protocol: "file:" } },
     localStorage: { getItem() {} },
-    setInterval() {},
     URL,
     URLSearchParams,
     Blob,
+    ...globals,
   });
   vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   if (href) {
@@ -1088,4 +1134,30 @@ test("a click during a poll never shows the previous run as the selection", asyn
   await click;
   assert.doesNotMatch(visibleTrace(context), /RUN A/);
   assert.match(vm.runInContext("loadErrorEl.textContent", context), /503/);
+});
+
+test("the page schedules the next poll only after the last one finishes", async () => {
+  const href = "http://localhost/docs/trace-viewer.html?index=/api/runs";
+  const timers = [];
+  const pending = [];
+  const context = await loadViewer(undefined, {
+    window: { location: { href, origin: "http://localhost", search: "?index=/api/runs" } },
+    fetch: () => new Promise((resolve) => pending.push(resolve)),
+    setTimeout: (callback) => timers.push(callback),
+    setInterval: (callback) => timers.push(callback),
+  });
+  const answer = async () => {
+    pending.shift()(new Response("[]"));
+    for (let turn = 0; turn < 10; turn++) await setImmediate();
+  };
+  assert.equal(pending.length, 1);
+  assert.equal(timers.length, 0, "No poll while the first scan runs");
+  await answer();
+  assert.equal(timers.length, 1);
+  vm.runInContext("autoRefresh.checked = true", context);
+  timers.shift()();
+  assert.equal(pending.length, 1);
+  assert.equal(timers.length, 0, "No poll while this scan runs");
+  await answer();
+  assert.equal(timers.length, 1);
 });
