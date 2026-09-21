@@ -52,7 +52,7 @@ def tool_description(fn: Callable[..., Any]) -> str:
 def _parameters(fn: Callable[..., Any]) -> list[inspect.Parameter]:
     params = []
     for name, param in inspect.signature(fn).parameters.items():
-        if name in ("self", "cls") or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             continue
         if param.kind is param.POSITIONAL_ONLY:
             # Tool arguments arrive by name, so every call would fail.
@@ -181,7 +181,7 @@ def tool_caller(fn: Callable[..., Any]) -> Callable[[dict[str, Any]], Awaitable[
                     result = await result
             text = result if isinstance(result, str) else json.dumps(_jsonable(result))
         except Exception as exc:  # surface as a tool error, keep the loop alive
-            return f"Error: {exc}", True
+            return f"Error: {str(exc) or type(exc).__name__}", True
         return text, False
 
     return call

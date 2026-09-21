@@ -124,6 +124,26 @@ def test_invalid_arguments_return_a_tool_error_without_calling():
     assert calls == []
 
 
+def test_parameters_named_self_or_cls_are_arguments_of_a_plain_function():
+    def css(self: str, cls: str) -> str:
+        return f"{self}.{cls}"
+
+    class Styles:
+        def css(self, cls: str) -> str:
+            return f"bound.{cls}"
+
+    assert json_schema_for(css)["required"] == ["self", "cls"]
+    assert _call(css, {"self": "div", "cls": "btn"})["content"][0]["text"] == "div.btn"
+    assert json_schema_for(Styles().css)["required"] == ["cls"]
+
+
+def test_an_exception_without_a_message_reports_its_type():
+    def fn() -> str:
+        raise KeyError
+
+    assert _call(fn, {})["content"][0]["text"] == "Error: KeyError"
+
+
 async def test_sync_tool_runs_off_the_event_loop():
     import asyncio
     import threading
