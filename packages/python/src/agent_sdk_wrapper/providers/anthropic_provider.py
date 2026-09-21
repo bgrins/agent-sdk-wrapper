@@ -593,9 +593,10 @@ class AnthropicProvider(ProviderAdapter):
         except CLINotFoundError as exc:
             raise ProviderNotAvailableError(str(exc), cause=exc) from exc
         except CLIConnectionError as exc:
-            raise TransientError(
-                f"connection to Claude Code runtime failed: {exc}", cause=exc
-            ) from exc
+            msg = f"connection to Claude Code runtime failed: {exc}"
+            if classify(str(exc)) == TRANSIENT:
+                raise TransientError(msg, cause=exc) from exc
+            raise AgentSdkWrapperError(msg, cause=exc) from exc
         except ProcessError as exc:
             stderr = "\n".join(stderr_tail)
             msg = f"{exc}\n{stderr}" if stderr else str(exc)

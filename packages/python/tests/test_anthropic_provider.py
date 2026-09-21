@@ -579,6 +579,35 @@ def test_anthropic_signal_killed_runtime_raises_process_terminated(
     assert excinfo.value.signal == signal
 
 
+@pytest.mark.parametrize(
+    ("text", "error_type"),
+    [
+        ("Failed to start Claude Code: [Errno 13] Permission denied", "provider_exception"),
+        (
+            "Failed to start Claude Code: [Errno 35] Resource temporarily unavailable",
+            "transient_api_error",
+        ),
+    ],
+)
+def test_anthropic_connection_errors_are_transient_only_when_classified_so(
+    monkeypatch, text, error_type
+):
+    import claude_agent_sdk
+    from claude_agent_sdk import CLIConnectionError
+
+    from agent_sdk_wrapper import Agent
+
+    async def fake_query(*, prompt, options):
+        raise CLIConnectionError(text)
+        yield  # pragma: no cover - generator marker
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    result = asyncio.run(Agent(provider="anthropic").run("x"))
+
+    assert result.error_type == error_type
+    assert text in result.error
+
+
 def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeypatch):
     import claude_agent_sdk
     from claude_agent_sdk import (
