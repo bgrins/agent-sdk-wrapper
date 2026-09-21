@@ -35,8 +35,10 @@ AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 npm run test:integration
 
 Set `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY`; live tests make billed calls.
 Missing keys/flags skip tests. Python Compose sets its flag; TypeScript requires
-the flag above. Override models with `AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL` or
-`AGENT_SDK_WRAPPER_TS_OPENAI_MODEL`. Compose loads `.env`; host commands do not.
+the flag above. Override models with `AGENT_SDK_WRAPPER_ANTHROPIC_MODEL` or
+`AGENT_SDK_WRAPPER_OPENAI_MODEL` (Python, which defaults to `claude-haiku-4-5` and
+`gpt-5.6-luna`) and `AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL` or
+`AGENT_SDK_WRAPPER_TS_OPENAI_MODEL` (TypeScript). Compose loads `.env`; host commands do not.
 On the host, an unset model follows inherited `ANTHROPIC_MODEL` and
 `ANTHROPIC_DEFAULT_*_MODEL`; set the overrides above when those are exported.
 

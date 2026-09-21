@@ -42,7 +42,8 @@
 - `final_text` is the last `Text`; adapters emit one `Text` per contiguous text run of
   an assistant message, even across frames.
 - Changes to Python `_tool_server_script()` or `mcp` require the real offline
-  MCP handshake test. The generated server uses mcp 2's `MCPServer`.
+  MCP handshake test. The generated server uses mcp 2's low-level `Server` with
+  `agent_sdk_wrapper.tools` schemas and calls.
 - Fault tests use local mock endpoints: Claude `ANTHROPIC_BASE_URL` via `env`;
   Codex `model_providers.<id>.base_url`. Runtimes retry 429/5xx internally; set
   `CLAUDE_CODE_MAX_RETRIES=0` or Codex `request_max_retries`/`stream_max_retries=0`
