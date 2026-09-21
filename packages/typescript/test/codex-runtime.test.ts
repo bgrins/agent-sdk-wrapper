@@ -61,7 +61,7 @@ async function files(dir: string): Promise<string[]> {
     .map((entry) => join(entry.parentPath, entry.name));
 }
 
-test("Codex runs write no API key under CODEX_HOME", async (t) => {
+test("Codex runs keep the API key out of CODEX_HOME and shell commands", async (t) => {
   const key = "sk-wrapper-test-SECRET";
   const root = await mkdtemp(join(tmpdir(), "agent-sdk-wrapper-codex-home-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -69,7 +69,8 @@ test("Codex runs write no API key under CODEX_HOME", async (t) => {
   const cwd = join(root, "work");
   await mkdir(home);
   await mkdir(cwd);
-  // A shell call makes Codex snapshot the login shell's environment.
+  // A shell call can snapshot the login shell's environment; printing it would copy the
+  // key into the rollout.
   const server = responses([
     [
       {
@@ -77,7 +78,7 @@ test("Codex runs write no API key under CODEX_HOME", async (t) => {
         id: "fc_0",
         call_id: "call_0",
         name: "exec_command",
-        arguments: JSON.stringify({ cmd: "echo hi" }),
+        arguments: JSON.stringify({ cmd: "env" }),
       },
     ],
     [
@@ -120,8 +121,16 @@ test("Codex runs write no API key under CODEX_HOME", async (t) => {
       },
       thread: { skipGitRepoCheck: true, approvalPolicy: "never" },
     },
-  }).run("Run echo hi.");
+  }).run("Run env.");
   assert.equal(run.status, "success", run.error ?? "");
+  const output = run.events.flatMap((env) =>
+    env.event.type === "tool_result" ? [env.event.output ?? ""] : [],
+  );
+  assert.ok(
+    output.some((text) => text.includes("PATH=")),
+    "env ran",
+  );
+  assert.ok(!output.some((text) => text.includes(key)));
   const leaked = [];
   for (const path of await files(home))
     if ((await readFile(path)).includes(key)) leaked.push(path);

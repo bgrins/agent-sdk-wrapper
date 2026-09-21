@@ -124,7 +124,11 @@ export class CodexAdapter implements ProviderAdapter {
         // Shell snapshots write the child env, credentials included, to CODEX_HOME.
         features: { shell_snapshot: false },
         ...(req.cliLogin !== "require"
-          ? { cli_auth_credentials_store: "ephemeral" }
+          ? {
+              cli_auth_credentials_store: "ephemeral",
+              // The SDK passes the key as CODEX_API_KEY; hide it from model commands.
+              shell_environment_policy: { set: { CODEX_API_KEY: "" } },
+            }
           : {}),
       },
     };
