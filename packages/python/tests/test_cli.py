@@ -346,7 +346,8 @@ tool_approval_modes = { search = "approve" }
     assert req.cwd == tmp_path
     assert req.effort == "high"
     assert req.builtin_tools == "none"
-    assert req.allowed_tools == ["repo.read_file", "repo.search"]
+    # A flag replaces the config value; env and option maps merge by key.
+    assert req.allowed_tools == ["repo.search"]
     assert req.disallowed_tools == ["repo.delete_file"]
     assert req.env == {"MODE": "config", "TOKEN": "cli-token"}
     assert req.extra_options == {"sandbox": {"mode": "workspace-write"}}
@@ -444,10 +445,10 @@ def test_stream_rejects_json_output(monkeypatch, capsys):
 @pytest.mark.parametrize(
     ("line", "message"),
     [
-        ('timeout = "30"', "config field timeout must be a number"),
-        ('max_turns = "3"', "config field max_turns must be an integer"),
-        ("model = 5", "config field model must be a string"),
-        ("output = 1", "config field output must be a string"),
+        ('timeout = "30"', "timeout must be a positive number of seconds"),
+        ('max_turns = "3"', "max_turns must be a positive integer"),
+        ("model = 5", "model must be a string"),
+        ("output = 1", "config field output must be one of"),
     ],
 )
 def test_run_rejects_mistyped_config_values(monkeypatch, tmp_path, capsys, line, message):
@@ -575,3 +576,36 @@ def test_run_treats_a_null_max_turns_config_as_no_limit(monkeypatch, tmp_path, c
     assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 0
     capsys.readouterr()
     assert seen_requests[0].max_turns is None
+
+
+def test_run_builds_subagents_from_config(monkeypatch, tmp_path, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    config = tmp_path / "agent.toml"
+    config.write_text(
+        'provider = "codex"\n[subagents.reviewer]\ndescription = "Reviews"\nprompt = "Review."\n',
+        encoding="utf-8",
+    )
+
+    assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 0
+    capsys.readouterr()
+    assert seen_requests[0].subagents["reviewer"].description == "Reviews"
+
+
+def test_run_rejects_an_invalid_mcp_server_entry(tmp_path, capsys):
+    config = tmp_path / "agent.toml"
+    config.write_text(
+        'provider = "codex"\n[[mcp_servers]]\nname = "repo"\ncommand = "x"\nbogus = 1\n',
+        encoding="utf-8",
+    )
+
+    assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 2
+    assert "invalid config" in capsys.readouterr().err

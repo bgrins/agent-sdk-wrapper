@@ -122,5 +122,10 @@ fallback, a warning precedes a new `SessionInfo`.
 
 CLI: `uv run agent-sdk-wrapper run --provider codex --prompt "Say hello" --output jsonl`.
 `--stream` requires `--output text`; `--cli-login` and repeatable `--setting-source`
-set those options. Exit codes: 1 failed run, 2 invalid settings, 128+N killed runtime.
+set those options. `--config` reads a TOML or JSON file whose keys are `Agent` keywords
+(except tools, `output_schema`, callbacks and `continue_session`) plus `prompt`,
+`prompt_file`, `output` and `stream`; `mcp_servers` entries are `McpStdioServer` or, with a
+`url`, `McpHttpServer` fields. Relative paths resolve against the file. Flags replace its
+values, except that `--env`, `--provider-option` and `--extra-option` merge by key.
+Exit codes: 1 failed run, 2 invalid settings, 128+N killed runtime.
 Run tests with `uv run pytest`; see [validation](../typescript/VALIDATION.md) for Compose and live tests.
