@@ -1361,8 +1361,9 @@ def _common_mcp_config(
         config["enabled_tools"] = enabled_tools
     if disabled_tools:
         config["disabled_tools"] = disabled_tools
+    # Configured servers are trusted, as on Claude, where their tools are pre-approved.
+    config["default_tools_approval_mode"] = server.default_tools_approval_mode or "approve"
     for key in (
-        "default_tools_approval_mode",
         "required",
         "enabled",
         "startup_timeout_sec",

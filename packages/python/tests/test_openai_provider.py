@@ -1228,6 +1228,8 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         assert "mcp_servers.auditor.startup_timeout_sec=5" in overrides
         assert "mcp_servers.auditor.tool_timeout_sec=30" in overrides
         assert 'mcp_servers.remote.url="https://example.test/mcp"' in overrides
+        # A server without a mode is approved, as the Claude adapter pre-approves MCP tools.
+        assert 'mcp_servers.remote.default_tools_approval_mode="approve"' in overrides
         assert 'mcp_servers.remote.http_headers={ "X-Test" = "1" }' in overrides
         assert (
             'mcp_servers.remote.env_http_headers={ "Authorization" = "REMOTE_TOKEN" }'

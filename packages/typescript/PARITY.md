@@ -74,8 +74,9 @@ in that session.
   `model_refusal_fallback` notices, because its SDK drops `supersedes` and `aborted` frames.
 - Custom system prompts persist across resume in both runtimes; Codex ignores a new
   `system_prompt` on resume. Start a new session to change instructions.
-- Under `approval_mode="deny_all"`, external Codex MCP tools need
-  `default_tools_approval_mode="approve"`; otherwise every call is rejected.
+- Configured MCP servers are trusted: Claude pre-approves their tools, and Python Codex
+  defaults `default_tools_approval_mode` to `"approve"` (otherwise the default
+  `auto_review` asks the model to judge each call, and `deny_all` rejects every call).
 - Codex defers MCP tools behind its tool search; prompts may need to tell the model to search.
 - Runtimes retry before the wrapper sees an error. By default the Claude CLI retries 429, 5xx, 529 and 401 ten times over about 3 minutes, and
   each retry becomes a warning; `CLAUDE_CODE_MAX_RETRIES` in `env` sets the count. Codex
