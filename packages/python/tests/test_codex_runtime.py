@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from agent_sdk_wrapper import Agent, McpStdioServer, RunResult, SubagentDef
+from agent_sdk_wrapper import Agent, McpStdioServer, RunResult, SubagentDef, TokenUsage
 
 pytest.importorskip("codex_cli_bin")
 
@@ -138,22 +138,26 @@ def _sse(index: int, step: dict[str, Any]) -> str:
             }
         )
     input_tokens, output_tokens = step.get("usage", (100, 10))
+    completed = {
+        "type": "response.completed",
+        "response": {
+            "id": response_id,
+            "usage": {
+                "input_tokens": input_tokens,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": output_tokens,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": input_tokens + output_tokens,
+            },
+        },
+    }
+    if "failed" in step:
+        failed = {"id": response_id, "status": "failed", "error": step["failed"]}
+        completed = {"type": "response.failed", "response": failed}
     events = [
         {"type": "response.created", "response": {"id": response_id}},
         *({"type": "response.output_item.done", "item": item} for item in items),
-        {
-            "type": "response.completed",
-            "response": {
-                "id": response_id,
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "input_tokens_details": {"cached_tokens": 0},
-                    "output_tokens": output_tokens,
-                    "output_tokens_details": {"reasoning_tokens": 0},
-                    "total_tokens": input_tokens + output_tokens,
-                },
-            },
-        },
+        completed,
     ]
     return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
 
@@ -590,6 +594,46 @@ async def test_session_reports_the_model_and_mcp_startup_failures(
     assert [e.model for e in events if e.type == "session_info"] == [MODEL]
     warnings = [e.message for e in events if e.type == "warning"]
     assert any("`broken` failed to start" in message for message in warnings), warnings
+
+
+async def test_turns_of_a_continued_thread_report_only_their_own_requests(
+    mock_api, codex_home, tmp_path
+):
+    # Codex repeats the thread's unchanged usage before each failed attempt.
+    failed = {"failed": {"code": "server_error", "message": "boom"}}
+    agent = codex_agent(
+        mock_api,
+        codex_home,
+        tmp_path,
+        "model_providers.mock.stream_max_retries=1",
+        continue_session=True,
+    )
+    usages = []
+    for plan in (
+        [{"text": "one", "usage": (100, 10)}],
+        [failed, {"text": "two", "usage": (300, 30)}],
+        [failed],
+    ):
+        mock_api.plan = plan
+        mock_api.requests.clear()
+        usages.append((await agent.run("hi")).usage)
+
+    assert usages == [
+        TokenUsage(input_tokens=100, output_tokens=10, total_tokens=110, requests=1),
+        TokenUsage(input_tokens=300, output_tokens=30, total_tokens=330, requests=1),
+        None,
+    ]
+
+
+async def test_an_exhausted_context_window_reports_no_usage(mock_api, codex_home, tmp_path):
+    mock_api.plan = [
+        {"failed": {"code": "context_length_exceeded", "message": "Input exceeds the window."}}
+    ]
+
+    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+
+    assert result.error_type == "context_window_exceeded"
+    assert result.usage is None
 
 
 async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):

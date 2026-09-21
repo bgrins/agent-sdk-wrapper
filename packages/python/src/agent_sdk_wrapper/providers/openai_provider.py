@@ -77,6 +77,18 @@ _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PROVIDER_ENV_KEY_RE = re.compile(r"model_providers\.[^.]+\.env_key")
 _DEFAULT_REASONING_SUMMARY = "auto"
+# Notifications that show the model responded, unless their item is the turn's input.
+_MODEL_OUTPUT_METHODS = frozenset(
+    {
+        "item/started",
+        "item/completed",
+        "item/agentMessage/delta",
+        "item/reasoning/textDelta",
+        "item/reasoning/summaryTextDelta",
+        "turn/plan/updated",
+    }
+)
+_INPUT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt"})
 _WRAPPER_TOOL_TIMEOUT_SEC = 600
 
 
@@ -464,6 +476,7 @@ async def _stream_turn(
     thinking_delta_parts: dict[str | None, list[str]] = {}
     texts: list[str] = []
     usage = _TurnUsage()
+    model_output = False
     started_calls: set[str] = set()
     latest_plan: list[Any] | None = None
     # A non-retried error notification precedes the failed turn/completed; emit one Error.
@@ -476,6 +489,10 @@ async def _stream_turn(
                 yield warning
         method = getattr(event, "method", "")
         payload = getattr(event, "payload", None)
+        if method in _MODEL_OUTPUT_METHODS:
+            item = getattr(payload, "item", None)
+            item_type = getattr(getattr(item, "root", item), "type", None)
+            model_output = model_output or item_type not in _INPUT_ITEM_TYPES
         if method == "item/agentMessage/delta":
             delta = getattr(payload, "delta", "") or ""
             if delta:
@@ -551,7 +568,7 @@ async def _stream_turn(
             continue
 
         if method == "thread/tokenUsage/updated":
-            usage.add(getattr(payload, "token_usage", None) or getattr(payload, "tokenUsage", None))
+            usage.add(payload.token_usage, after_output=model_output)
             continue
 
         if method == "model/rerouted":
@@ -740,58 +757,56 @@ def _validate_supported(req: RunRequest) -> None:
         )
 
 
-_USAGE_FIELDS = {
-    "input_tokens": ("inputTokens", "input_tokens"),
-    "cache_read_tokens": ("cachedInputTokens", "cached_input_tokens"),
-    "cache_write_tokens": ("cacheWriteInputTokens", "cache_write_input_tokens"),
-    "output_tokens": ("outputTokens", "output_tokens"),
-    "reasoning_output_tokens": ("reasoningOutputTokens", "reasoning_output_tokens"),
-    "total_tokens": ("totalTokens", "total_tokens"),
-}
-
-
 @dataclasses.dataclass
 class _TurnUsage:
     """Per-turn usage from the thread's cumulative ``total`` and per-request ``last``.
 
-    The first update's ``total - last`` is the thread's usage before this turn,
-    which covers resumed history without state kept across runs. Native output
-    already includes reasoning and ``totalTokens`` is input plus output.
+    An update that changes ``total`` reports one request, whose usage is ``last``,
+    so resumed history is excluded without state kept across runs. Codex repeats the
+    unchanged usage when a request fails and reports an exhausted context window
+    with an empty ``last``; neither is a request. With no earlier total to compare,
+    a repeat can open a resumed turn, so the first update counts only after the
+    model produced output.
     """
 
-    before: dict[str, int] | None = None
+    usage: dict[str, int] = dataclasses.field(default_factory=dict)
+    requests: int = 0
     total: dict[str, int] | None = None
-    updates: int = 0
     raw: dict[str, Any] | None = None
 
-    def add(self, token_usage: Any) -> None:
-        data = _to_plain(token_usage)
-        if not isinstance(data, dict):
+    def add(self, token_usage: Any, *, after_output: bool) -> None:
+        total = _usage_breakdown(token_usage.total)
+        last = _usage_breakdown(token_usage.last)
+        if not last["total_tokens"]:
             return
-        total = _usage_breakdown(data.get("total", data))
-        last = _usage_breakdown(data["last"]) if "last" in data else total
-        if self.before is None:
-            self.before = {key: total[key] - last[key] for key in total}
+        if total != self.total and (self.total is not None or after_output):
+            for key, value in last.items():
+                self.usage[key] = self.usage.get(key, 0) + value
+            self.requests += 1
         self.total = total
-        self.updates += 1
-        self.raw = data
+        self.raw = _raw(token_usage)
 
     def event(self, include_raw: bool) -> Usage | None:
-        if self.total is None or self.before is None:
+        if not self.requests:
             return None
-        delta = {key: max(0, self.total[key] - self.before[key]) for key in self.total}
-        # Count usage updates as a proxy for model requests.
         return Usage(
-            usage=TokenUsage(**delta, requests=self.updates),
+            usage=TokenUsage(**self.usage, requests=self.requests),
             raw=self.raw if include_raw else None,
         )
 
 
-def _usage_breakdown(data: Any) -> dict[str, int]:
-    values = {key: _int_field(data, *aliases) for key, aliases in _USAGE_FIELDS.items()}
-    if not values["total_tokens"]:
-        values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
-    return values
+def _usage_breakdown(breakdown: Any) -> dict[str, int]:
+    """Normalize a ``TokenUsageBreakdown``; output already includes reasoning."""
+
+    # totalTokens is not always input plus output: a full context window reports its size.
+    return {
+        "input_tokens": breakdown.input_tokens,
+        "cache_read_tokens": breakdown.cached_input_tokens,
+        "cache_write_tokens": breakdown.cache_write_input_tokens or 0,
+        "output_tokens": breakdown.output_tokens,
+        "reasoning_output_tokens": breakdown.reasoning_output_tokens,
+        "total_tokens": breakdown.input_tokens + breakdown.output_tokens,
+    }
 
 
 def _codex_item_id(value: Any) -> str | None:
@@ -2215,19 +2230,6 @@ def _plan_text(plan: list[Any]) -> str:
         done = _status_value(_field(step, "status", "status")) == "completed"
         lines.append(f"- [{'x' if done else ' '}] {_field(step, 'step', 'step')}")
     return "\n".join(lines)
-
-
-def _int_field(data: Any, *keys: str) -> int:
-    if not isinstance(data, dict):
-        return 0
-    for key in keys:
-        value = data.get(key)
-        if value is not None:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return 0
-    return 0
 
 
 def _parse_json(text: str) -> Any:

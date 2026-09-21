@@ -81,6 +81,25 @@ def notification(method: str, payload: dict[str, Any]) -> Any:
     return Notification(method=method, payload=NOTIFICATION_MODELS[method].model_validate(payload))
 
 
+def usage_breakdown(
+    input_tokens: int, output_tokens: int, *, cached: int = 0, reasoning: int = 0, total: int = 0
+) -> dict[str, int]:
+    return {
+        "inputTokens": input_tokens,
+        "cachedInputTokens": cached,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": reasoning,
+        "totalTokens": total or input_tokens + output_tokens,
+    }
+
+
+def token_usage(last: dict[str, int], total: dict[str, int] | None = None) -> Any:
+    usage = {"last": last, "total": total or last, "modelContextWindow": 258400}
+    return notification(
+        "thread/tokenUsage/updated", {"threadId": "t", "turnId": "u", "tokenUsage": usage}
+    )
+
+
 def failed_turn(error: dict[str, Any]) -> Any:
     return notification(
         "turn/completed",
@@ -196,20 +215,7 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
                 )
             ),
         ),
-        SimpleNamespace(
-            method="thread/tokenUsage/updated",
-            payload=SimpleNamespace(
-                token_usage={
-                    "total": {
-                        "inputTokens": 10,
-                        "outputTokens": 3,
-                        "totalTokens": 13,
-                        "cachedInputTokens": 2,
-                        "reasoningOutputTokens": 4,
-                    }
-                }
-            ),
-        ),
+        token_usage(usage_breakdown(10, 3, cached=2)),
         SimpleNamespace(
             method="turn/completed",
             payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
@@ -232,7 +238,6 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
         output_tokens=3,
         total_tokens=13,
         cache_read_tokens=2,
-        reasoning_output_tokens=4,
         requests=1,
     )
     structured = next(event for event in out if isinstance(event, StructuredOutput))
@@ -1490,6 +1495,30 @@ async def test_codex_usage_of_a_resumed_turn_excludes_thread_history():
         cache_read_tokens=12672,
         requests=1,
     )
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_ignores_repeated_totals_and_a_full_context_window():
+    # Codex 0.154: a request, then a failed one that repeats the usage and fills the window.
+    req = RunRequest(provider="openai", prompt="ignored")
+    tool_call = codex_frames("tool-turn.provider-events.jsonl")[:2]
+    first = usage_breakdown(200, 20)
+    history = usage_breakdown(300, 30)
+    full = usage_breakdown(0, 0, total=258400)
+    error = {"codexErrorInfo": "contextWindowExceeded", "message": "Codex ran out of room"}
+    events = [
+        *tool_call,
+        token_usage(first, history),
+        token_usage(first, history),
+        token_usage({**full, "totalTokens": 258100}, full),
+        notification("error", {"error": error, "threadId": "t", "turnId": "u", "willRetry": False}),
+        failed_turn(error),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    [usage] = [event.usage for event in out if isinstance(event, Usage)]
+    assert usage == TokenUsage(input_tokens=200, output_tokens=20, total_tokens=220, requests=1)
 
 
 @pytest.mark.asyncio
