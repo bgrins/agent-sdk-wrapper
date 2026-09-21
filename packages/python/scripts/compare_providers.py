@@ -84,7 +84,6 @@ async def run_scenario(
         model=model,
         artifacts_dir=artifacts_dir,
         max_turns=8,
-        max_retries=1,
         **spec,  # type: ignore[arg-type]
     )
     try:

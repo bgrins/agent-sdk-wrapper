@@ -311,7 +311,6 @@ export class AnthropicAdapter implements ProviderAdapter {
             message:
               "Claude message retractions are not implemented in the v1 event contract; partial output must not be treated as a completed answer",
             error_type: "provider_protocol_error",
-            retryable: false,
             ...raw,
           };
           continue;
@@ -483,7 +482,6 @@ const cancelled = (): ErrorEvent => ({
   type: "error",
   message: "Run cancelled",
   error_type: "cancelled",
-  retryable: false,
 });
 const assistantErrorTypes: Partial<Record<SDKAssistantMessageError, string>> = {
   authentication_failed: "authentication_failed",
@@ -523,7 +521,6 @@ function resultError(
     type: "error",
     message: text,
     error_type,
-    retryable: error_type === "transient_api_error",
   });
   // Same order as Python: cancellation, turn limit, refusal, terminal reason, subtype.
   if (reason === "aborted_streaming" || reason === "aborted_tools")

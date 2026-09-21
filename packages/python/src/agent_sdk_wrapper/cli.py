@@ -76,7 +76,6 @@ def _parser() -> argparse.ArgumentParser:
         help="Reasoning effort tier. Unsupported provider/tier combinations are rejected.",
     )
     run.add_argument("--timeout", default=None, type=float)
-    run.add_argument("--max-retries", default=None, type=int)
     run.add_argument("--include-raw", action="store_true", default=None)
     run.add_argument(
         "--builtin-tool",
@@ -249,9 +248,6 @@ async def _run(args: argparse.Namespace) -> int:
         ),
         effort=args.effort or _config_str(config, "effort"),
         timeout=args.timeout if args.timeout is not None else _config_number(config, "timeout"),
-        max_retries=args.max_retries
-        if args.max_retries is not None
-        else _config_int(config, "max_retries", 0),
         include_raw=bool(
             args.include_raw
             if args.include_raw is not None
@@ -347,7 +343,6 @@ _CONFIG_KEYS = {
     "env",
     "extra_options",
     "include_raw",
-    "max_retries",
     "max_turns",
     "mcp_servers",
     "model",

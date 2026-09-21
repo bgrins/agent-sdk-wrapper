@@ -51,7 +51,7 @@ SAMPLE_EVENTS = [
     StructuredOutput(value={"ok": True}),
     ContextCompacted(trigger="auto", pre_tokens=100),
     WarningEvent(message="slow"),
-    Error(message="bad", error_type="max_turns", retryable=True),
+    Error(message="bad", error_type="max_turns"),
     RunFinished(status=RunStatus.FAILURE, duration_ms=5, ended_reason=RunEndedReason.MAX_TURNS),
 ]
 
@@ -102,8 +102,7 @@ def test_trace_fixture_replays_to_expected_result(monkeypatch, trace_path: Path)
             model=replay.model,
             cwd=replay.cwd,
             system_prompt=replay.system_prompt,
-            max_retries=0,
-        ).run(replay.prompt)
+            ).run(replay.prompt)
     )
 
     assert run_result_summary(result) == replay.expected

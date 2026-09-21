@@ -2,7 +2,7 @@
 
 Native Python and TypeScript interfaces for the **Claude Agent SDK** and **Codex SDK**.
 The SDKs manage tools, sessions and agent loops. The wrapper adds provider selection,
-validation, normalized events/results and retries. Install either language independently.
+validation and normalized events/results. Install either language independently.
 
 | Package | Guide |
 |---|---|

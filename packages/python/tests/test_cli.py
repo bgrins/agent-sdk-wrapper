@@ -275,7 +275,6 @@ provider = "openai"
 model = "gpt-5"
 system_prompt = "system from config"
 cwd = "."
-max_retries = 0
 effort = "high"
 continue_session = true
 builtin_tools = "none"
@@ -348,7 +347,6 @@ tool_approval_modes = { search = "approve" }
     assert req.model == "gpt-5"
     assert req.system_prompt == "system from config"
     assert req.cwd == tmp_path
-    assert req.max_retries == 0
     assert req.effort == "high"
     assert req.continue_session is True
     assert req.builtin_tools == "none"
@@ -469,35 +467,6 @@ def test_run_rejects_empty_prompt_with_prompt_file(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "pass only one of --prompt / --prompt-file" in captured.err
-
-
-@pytest.mark.parametrize(("max_retries", "rc"), [("1", 0), ("0", 1)])
-def test_jsonl_output_honors_max_retries(monkeypatch, capsys, max_retries, rc):
-    from agent_sdk_wrapper import TransientError
-    from agent_sdk_wrapper import agent as agent_mod
-
-    calls = []
-
-    class FlakyProvider(base.ProviderAdapter):
-        name = "openai"
-
-        async def stream(self, req):  # type: ignore[override]
-            calls.append(req.attempt)
-            if len(calls) == 1:
-                raise TransientError("rate limit")
-            yield Text(text="recovered")
-
-    monkeypatch.setattr(op_mod, "OpenAIProvider", FlakyProvider)
-    monkeypatch.setattr(agent_mod, "_backoff", lambda attempt: 0)
-
-    code = cli.main(
-        ["run", "--provider", "openai", "--prompt", "x", "--max-retries", max_retries]
-    )
-
-    lines = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
-    assert code == rc
-    assert len(calls) == int(max_retries) + 1
-    assert lines[-1]["status"] == ("success" if rc == 0 else "failure")
 
 
 def test_jsonl_output_keeps_lone_surrogates(monkeypatch, capsys):

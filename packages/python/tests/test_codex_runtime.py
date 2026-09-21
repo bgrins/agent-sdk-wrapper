@@ -220,7 +220,6 @@ def codex_agent(
         provider="codex",
         model=MODEL,
         cwd=cwd,
-        max_retries=0,
         timeout=60,
         provider_options={
             "api_key": "sk-mock-key",
@@ -294,7 +293,6 @@ def login_agent(api: MockResponses, home: Path, cwd: Path, cli_login: str) -> Ag
         provider="codex",
         model=MODEL,
         cwd=cwd,
-        max_retries=0,
         timeout=60,
         cli_login=cli_login,
         provider_options={"config": codex_config(api, home)},
@@ -505,7 +503,7 @@ async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home
 
     assert not result.ok
     errors = [e.event for e in result.events if e.event.type == "error"]
-    assert [(e.error_type, e.retryable) for e in errors] == [("authentication_failed", False)]
+    assert [e.error_type for e in errors] == ["authentication_failed"]
     assert "401 Unauthorized" in errors[0].message
 
 
@@ -620,7 +618,6 @@ async def test_cli_login_deny_accepts_a_per_thread_provider_without_openai_auth(
         provider="codex",
         model=MODEL,
         cwd=tmp_path,
-        max_retries=0,
         timeout=60,
         provider_options={"config": config, "model_provider": "mock"},
     )

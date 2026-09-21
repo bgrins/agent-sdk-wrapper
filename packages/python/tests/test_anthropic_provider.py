@@ -200,9 +200,9 @@ def test_every_native_option_a_first_class_field_sets_is_owned(tmp_path):
     }
     # Fields that never reach ClaudeAgentOptions, or reach it only through env.
     not_native = {
-        "provider", "prompt", "env", "timeout", "max_retries", "include_raw",
+        "provider", "prompt", "env", "timeout", "include_raw",
         "include_events_in_result", "artifacts_dir", "on_provider_event",
-        "continue_session", "extra_options", "cli_login", "run_id", "attempt",
+        "continue_session", "extra_options", "cli_login", "run_id",
     }
     new_fields = {f.name for f in dataclasses.fields(RunRequest)} - not_native
     assert new_fields == set(first_class), "classify new RunRequest fields here"
@@ -459,7 +459,6 @@ def test_anthropic_max_turns_result_reports_max_turns_not_a_generic_error():
 
     assert error is not None
     assert error.error_type == "max_turns"
-    assert error.retryable is False
 
 
 def test_anthropic_refusal_reports_refused():
@@ -472,17 +471,16 @@ def test_anthropic_refusal_reports_refused():
 
 
 @pytest.mark.parametrize("status", [409, 429, 501, 503, 529])
-def test_anthropic_retryable_api_status_is_marked_retryable(status):
+def test_anthropic_transient_api_statuses(status):
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 
     error = _result_error(_result(is_error=True, api_error_status=status))
 
     assert error is not None
     assert error.error_type == "transient_api_error"
-    assert error.retryable is True
 
 
-def test_anthropic_client_error_is_not_retryable():
+def test_anthropic_client_error_is_an_invalid_request():
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 
     error = _result_error(
@@ -490,7 +488,7 @@ def test_anthropic_client_error_is_not_retryable():
     )
 
     assert error is not None
-    assert error.retryable is False
+    assert error.error_type == "invalid_request"
     assert error.message == "bad request"
 
 
@@ -644,7 +642,6 @@ def test_anthropic_error_type_ignores_a_normal_stop_reason():
 
     assert error is not None
     assert error.error_type == "invalid_request"
-    assert error.retryable is False
 
 
 def test_anthropic_error_type_falls_back_to_an_error_subtype():
@@ -876,45 +873,42 @@ def test_anthropic_synthetic_error_message_is_a_classified_failure_not_text(monk
     )
     assert not any(isinstance(event, Text) for event in events)
     error = next(event for event in events if isinstance(event, Error))
-    assert (error.error_type, error.retryable) == ("authentication_failed", False)
+    assert error.error_type == "authentication_failed"
     assert error.message == "Not logged in · Please run /login"
 
 
 @pytest.mark.parametrize(
-    ("result", "error_type", "retryable"),
+    ("result", "error_type"),
     [
-        ({"is_error": True, "result": "API Error: Connection error."}, "transient_api_error", True),
-        ({"is_error": True, "result": "Connection refused"}, "transient_api_error", True),
-        ({"is_error": True, "result": "something odd"}, "transient_api_error", True),
+        ({"is_error": True, "result": "API Error: Connection error."}, "transient_api_error"),
+        ({"is_error": True, "result": "Connection refused"}, "transient_api_error"),
+        ({"is_error": True, "result": "something odd"}, "transient_api_error"),
         (
             {"is_error": True, "terminal_reason": "malformed_tool_use_exhausted"},
             "execution_error",
-            False,
         ),
         (
             {"is_error": True, "terminal_reason": "prompt_too_long"},
             "context_window_exceeded",
-            False,
         ),
-        ({"subtype": "error_max_budget_usd", "is_error": True}, "max_budget", False),
+        ({"subtype": "error_max_budget_usd", "is_error": True}, "max_budget"),
         (
             {"subtype": "error_max_structured_output_retries", "is_error": True},
             "structured_output_failed",
-            False,
         ),
-        ({"is_error": True, "terminal_reason": "aborted_tools"}, "cancelled", False),
-        ({"is_error": True, "api_error_status": 401}, "authentication_failed", False),
+        ({"is_error": True, "terminal_reason": "aborted_tools"}, "cancelled"),
+        ({"is_error": True, "api_error_status": 401}, "authentication_failed"),
     ],
 )
 def test_anthropic_result_errors_use_structured_signals_and_keep_evidence(
-    result, error_type, retryable
+    result, error_type
 ):
     from agent_sdk_wrapper.providers.anthropic_provider import _result_error
 
     error = _result_error(_result(**result))
 
     assert error is not None
-    assert (error.error_type, error.retryable) == (error_type, retryable)
+    assert error.error_type == error_type
 
 
 def test_anthropic_omits_subagent_scoped_messages(monkeypatch):
@@ -1174,7 +1168,7 @@ def test_anthropic_keeps_a_finished_answer_when_the_runtime_then_fails(monkeypat
         raise ProcessError("Command failed with exit code 1", exit_code=1)
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
-    result = asyncio.run(Agent(provider="anthropic", max_retries=2).run("x"))
+    result = asyncio.run(Agent(provider="anthropic").run("x"))
 
     assert result.final_text == "final answer"
     assert result.status == "failure"
@@ -1207,7 +1201,7 @@ def test_anthropic_a_recovered_api_error_does_not_classify_a_later_failure(monke
         ],
     )
     error = next(event for event in events if isinstance(event, Error))
-    assert (error.error_type, error.retryable) == ("billing_error", False)
+    assert error.error_type == "billing_error"
 
 
 @pytest.mark.parametrize(

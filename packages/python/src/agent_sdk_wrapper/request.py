@@ -241,7 +241,6 @@ class RunRequest:
 
     # Run-level controls.
     timeout: float | None = None  # seconds, wall-clock for the whole run
-    max_retries: int = 0  # whole-run retries on transient errors (backoff)
     include_raw: bool = False
     include_events_in_result: bool = True
     artifacts_dir: str | Path | None = None
@@ -271,4 +270,3 @@ class RunRequest:
     cli_login: CliLogin = "deny"
     # Set by Agent for provider-event logs.
     run_id: str | None = None
-    attempt: int = 0

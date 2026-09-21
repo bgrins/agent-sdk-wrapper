@@ -20,7 +20,6 @@ regenerate_fixtures = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(regenerate_fixtures)
 EXPECTED_FIXTURES = {
     "provider_error.trace.jsonl",
-    "retry.trace.jsonl",
     "stream.trace.jsonl",
     "structured_output.trace.jsonl",
     "success.trace.jsonl",

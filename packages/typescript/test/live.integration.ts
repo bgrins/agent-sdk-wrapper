@@ -56,7 +56,6 @@ for (const provider of [
         providerOptions,
         model,
         cwd,
-        maxRetries: 0,
         continueSession: true,
         signal: controller.signal,
       };

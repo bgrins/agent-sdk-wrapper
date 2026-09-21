@@ -45,7 +45,6 @@ overridden per field, without deep merging. One active run per Agent.
 |---|---|
 | `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings; conflicts fail |
 | `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider |
-| `maxRetries`, `retryDelayMs` | Default 0 retries, delay doubling from 250 ms to 30 s; retry only before text, thinking or tool events, and never once a resumed session has started |
 | `signal` | Cancellation or `AbortSignal.timeout(ms)`; ignored after the terminal frame |
 | `cliLogin` | `"deny"` (default) or Codex-only `"require"` for the runtime's stored login |
 | `traceFile` | Write normalized JSONL during `run()` or `stream()` |
@@ -55,7 +54,8 @@ overridden per field, without deep merging. One active run per Agent.
 `EventEnvelope` has `run_id`, zero-based `sequence`, `timestamp` and `event`.
 Events cover run boundaries, sessions, completed text/thinking, tool activity,
 usage, warnings and errors. `RunResult` contains status, text, usage/cost,
-session ID and events. `final_text` is the last assistant message. For Claude,
+session ID, the first error and its `error_type`, and events. `final_text` is the last
+assistant message. Runs are never retried; see [retrying](PARITY.md#retrying). For Claude,
 `session_info.model` reports the model the runtime used; Codex exec doesn't expose it. `error_type` uses the
 [shared vocabulary](PARITY.md#error-types). `collectRun` rejects incomplete or
 misordered streams.
@@ -64,7 +64,7 @@ misordered streams.
 Setup throws `ConfigError`, `RuntimeUnavailableError` or `ProviderError`; runtime
 failures usually produce failed results. Signal-killed processes record the failure,
 then throw `ProcessTerminatedError`; a kill after the caller's abort is cancelled.
-Trace I/O or serialization failures throw `TraceWriteError` without retrying inference.
+Trace I/O or serialization failures throw `TraceWriteError`.
 Implement `ProviderAdapter` for custom validation, runtime checks and streaming.
 
 ## Capabilities

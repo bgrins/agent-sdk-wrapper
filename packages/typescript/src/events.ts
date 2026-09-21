@@ -31,7 +31,6 @@ export type ErrorEvent = Raw & {
   type: "error";
   message: string;
   error_type: string;
-  retryable: boolean;
 };
 export type ProviderEvent =
   | (Raw & { type: "text"; text: string })
@@ -90,5 +89,6 @@ export interface RunResult {
   session_id: string | null;
   artifacts_dir: null;
   error: string | null;
+  error_type: string | null;
   events: EventEnvelope[];
 }

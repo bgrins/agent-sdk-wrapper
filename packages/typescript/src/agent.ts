@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
 import {
   ConfigError,
   ProcessTerminatedError,
@@ -28,17 +27,10 @@ import {
 } from "./request.js";
 import { TraceWriter } from "./trace.js";
 
-const progressEvents = new Set<AgentEvent["type"]>([
-  "text",
-  "thinking",
-  "tool_call",
-  "tool_result",
-]);
 const cancelledError = (): ErrorEvent => ({
   type: "error",
   message: "Run cancelled",
   error_type: "cancelled",
-  retryable: false,
 });
 function errorEvent(cause: unknown): ErrorEvent {
   return {
@@ -54,7 +46,6 @@ function errorEvent(cause: unknown): ErrorEvent {
             : cause instanceof RuntimeUnavailableError
               ? "runtime_unavailable"
               : "provider_exception",
-    retryable: cause instanceof TransientError,
   };
 }
 
@@ -160,102 +151,42 @@ export class Agent {
         });
       };
       let failure: ErrorEvent | undefined;
-      for (let attempt = 0; ; attempt++) {
-        let progressed = false;
-        let sessionSeen = false;
-        let held: ErrorEvent | undefined;
-        let threw = false;
-        let thrown: unknown;
-        failure = undefined;
-        // A resumed session already holds this prompt; retrying would repeat it.
-        const canRetry = () =>
-          !progressed &&
-          !(req.sessionId && sessionSeen) &&
-          attempt < req.maxRetries &&
-          !req.signal?.aborted;
-        try {
-          req.signal?.throwIfAborted();
-          for await (const event of adapter.stream(req, {
-            onNativeEvent: (native) => req.onProviderEvent?.(native),
-          })) {
-            // Progress or another error rules out a retry; show the held error first.
-            if (
-              held &&
-              (progressEvents.has(event.type) || event.type === "error")
-            ) {
-              yield frame(held);
-              held = undefined;
-            }
-            if (progressEvents.has(event.type)) progressed = true;
-            if (event.type === "error") {
-              // Hold a retryable error until the attempt ends; a retry replaces it with a warning.
-              if (!failure && event.retryable && canRetry()) {
-                failure = held = event;
-                continue;
-              }
-              failure ??= event;
-            }
-            if (event.type === "session_info") {
-              sessionSeen = true;
-              this.sessions.set(req.provider, event.id);
-              this.latestSession = event.id;
-            }
-            yield frame(event);
+      let threw = false;
+      let thrown: unknown;
+      try {
+        req.signal?.throwIfAborted();
+        for await (const event of adapter.stream(req, {
+          onNativeEvent: (native) => req.onProviderEvent?.(native),
+        })) {
+          if (event.type === "error") failure ??= event;
+          if (event.type === "session_info") {
+            this.sessions.set(req.provider, event.id);
+            this.latestSession = event.id;
           }
-        } catch (cause) {
-          if (cause instanceof TraceWriteError) throw cause;
-          // A runtime killed by the caller's abort was cancelled, not terminated.
-          const terminated =
-            cause instanceof ProcessTerminatedError && !req.signal?.aborted;
-          if (terminated || cause instanceof ConfigError) {
-            if (held) yield frame(held);
-            const error: ErrorEvent = {
-              type: "error",
-              message: cause.message,
-              error_type: terminated ? "process_terminated" : "invalid_request",
-              retryable: false,
-            };
-            yield frame(error);
-            yield finished(held ?? error);
-            throw cause;
-          }
-          threw = true;
-          thrown = cause;
+          yield frame(event);
         }
-        // The provider's terminal error wins over a later cleanup error.
-        const retryReason =
-          held?.message ??
-          (!failure && thrown instanceof TransientError
-            ? thrown.message
-            : undefined);
-        let error: ErrorEvent | undefined;
-        if (retryReason !== undefined && canRetry()) {
-          const ms = Math.min(
-            req.retryDelayMs * 2 ** Math.min(attempt, 20),
-            30_000,
-          );
-          yield frame({
-            type: "warning",
-            message: `Transient failure; retry ${attempt + 1}/${req.maxRetries} in ${ms}ms: ${retryReason}`,
-          });
-          try {
-            await delay(ms, undefined, { signal: req.signal });
-          } catch {
-            /* cancellation is normalized below */
-          }
-          if (!req.signal?.aborted) continue;
-          error = cancelledError();
-        } else if (held && req.signal?.aborted) {
-          yield frame({ type: "warning", message: held.message });
-          error = cancelledError();
-        } else if (held) error = held;
-        else if (!failure && threw)
-          error = req.signal?.aborted ? cancelledError() : errorEvent(thrown);
-        if (error) {
-          failure = error;
+      } catch (cause) {
+        if (cause instanceof TraceWriteError) throw cause;
+        // A runtime killed by the caller's abort was cancelled, not terminated.
+        const terminated =
+          cause instanceof ProcessTerminatedError && !req.signal?.aborted;
+        if (terminated || cause instanceof ConfigError) {
+          const error: ErrorEvent = {
+            type: "error",
+            message: cause.message,
+            error_type: terminated ? "process_terminated" : "invalid_request",
+          };
           yield frame(error);
+          yield finished(failure ?? error);
+          throw cause;
         }
-        break;
+        threw = true;
+        thrown = cause;
+      }
+      // The provider's terminal error wins over a later cleanup error.
+      if (!failure && threw) {
+        failure = req.signal?.aborted ? cancelledError() : errorEvent(thrown);
+        yield frame(failure);
       }
       yield finished(failure);
     } finally {
@@ -301,6 +232,7 @@ export async function collectRun(
         session_id: null,
         artifacts_dir: null,
         error: null,
+        error_type: null,
         events: [],
       };
     } else if (event.type === "run_started")
@@ -312,7 +244,10 @@ export async function collectRun(
       result.session_id = event.id;
       if (event.model) result.model = event.model;
     }
-    if (event.type === "error") result.error ??= event.message;
+    if (event.type === "error" && result.error === null) {
+      result.error = event.message;
+      result.error_type = event.error_type;
+    }
     if (event.type === "usage") {
       result.usage ??= emptyUsage();
       for (const key of Object.keys(

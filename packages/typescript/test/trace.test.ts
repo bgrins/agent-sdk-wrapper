@@ -18,7 +18,6 @@ import {
   type ProviderAdapter,
   RuntimeUnavailableError,
   TraceWriteError,
-  TransientError,
 } from "../src/index.js";
 
 function directory(t: TestContext): string {
@@ -72,19 +71,16 @@ test("trace files are visible during streaming and retain resumed calls in separ
   assert.notEqual(third.run_id, events[0]?.run_id);
 });
 
-test("trace records retries, normalized failure and cancellation", async (t) => {
+test("trace records normalized failure and cancellation", async (t) => {
   const root = directory(t);
-  let calls = 0;
   const agent = new Agent(
-    { provider: "openai", maxRetries: 1, retryDelayMs: 0 },
+    { provider: "openai" },
     {
       openai: provider(async function* () {
-        if (++calls === 1) throw new TransientError("temporary");
         yield {
           type: "error",
           message: "refused",
           error_type: "refused",
-          retryable: false,
         };
       }),
     },
@@ -94,11 +90,10 @@ test("trace records retries, normalized failure and cancellation", async (t) => 
     traceFile: join(root, "failure.jsonl"),
   });
   assert.equal(failed.status, "failure");
-  assert.equal(calls, 2);
   assert.deepEqual(readTrace(join(root, "failure.jsonl")), failed.events);
   assert.deepEqual(
     failed.events.map((env) => env.event.type),
-    ["run_started", "warning", "error", "run_finished"],
+    ["run_started", "error", "run_finished"],
   );
   const abort = new AbortController();
   abort.abort();
@@ -146,7 +141,6 @@ test("breaking iteration and killed runtimes preserve partial traces and release
     type: "error",
     message: "killed",
     error_type: "process_terminated",
-    retryable: false,
   });
   assert.equal(
     killed[3]?.type === "run_finished" && killed[3].status,
@@ -178,7 +172,7 @@ test("trace validation and runtime checks leave files untouched", async (t) => {
   assert.equal(existsSync(path), false);
 });
 
-test("trace I/O and serialization failures propagate without provider retries", async (t) => {
+test("trace I/O and serialization failures propagate", async (t) => {
   const root = directory(t);
   const path = join(root, "trace.jsonl");
   let calls = 0;
@@ -186,7 +180,7 @@ test("trace I/O and serialization failures propagate without provider retries", 
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   const agent = new Agent(
-    { provider: "openai", maxRetries: 3, traceFile: path },
+    { provider: "openai", traceFile: path },
     {
       openai: provider(async function* () {
         calls++;

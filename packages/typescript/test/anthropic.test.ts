@@ -290,21 +290,18 @@ test("Claude fallback usage preserves hidden thinking without double counting or
     );
   }
 });
-for (const [overrides, expectedType, retryable] of [
+for (const [overrides, expectedType] of [
   [
     { is_error: true, api_error_status: 429, result: "overloaded" },
     "transient_api_error",
-    true,
   ],
   [
     { is_error: true, api_error_status: 401, result: "bad credentials" },
     "authentication_failed",
-    false,
   ],
   [
     { is_error: true, api_error_status: null, result: "connection dropped" },
     "transient_api_error",
-    true,
   ],
   [
     {
@@ -313,7 +310,6 @@ for (const [overrides, expectedType, retryable] of [
       result: "connection dropped",
     },
     "transient_api_error",
-    true,
   ],
   [
     {
@@ -322,9 +318,8 @@ for (const [overrides, expectedType, retryable] of [
       result: "budget exhausted",
     },
     "max_budget",
-    false,
   ],
-  [{ stop_reason: "refusal", result: "declined" }, "refused", false],
+  [{ stop_reason: "refusal", result: "declined" }, "refused"],
 ] as const)
   test(`Claude terminal ${expectedType} fails without needing an exception`, async () => {
     const { agent } = harness([result(overrides)], {}, new Error("cleanup"));
@@ -335,10 +330,6 @@ for (const [overrides, expectedType, retryable] of [
     assert.equal(
       errors[0]?.event.type === "error" && errors[0].event.error_type,
       expectedType,
-    );
-    assert.equal(
-      errors[0]?.event.type === "error" && errors[0].event.retryable,
-      retryable,
     );
   });
 for (const reason of ["aborted_streaming", "aborted_tools"] as const)
@@ -363,7 +354,6 @@ for (const reason of ["aborted_streaming", "aborted_tools"] as const)
       type: "error",
       message: "Run cancelled",
       error_type: "cancelled",
-      retryable: false,
     });
     assert.equal(closed(), 1);
   });
@@ -402,7 +392,6 @@ test("Claude retractions fail explicitly through either native notification", as
   ]) {
     const raw: unknown[] = [];
     const { agent, captured, closed } = harness(messages, {
-      maxRetries: 2,
       onProviderEvent: (event) => {
         raw.push(event);
       },
@@ -617,28 +606,27 @@ for (const [error, status, reason, message, expected] of [
           type: "error",
           message,
           error_type: expected,
-          retryable: expected === "transient_api_error",
         },
       ],
     );
   });
-test("Claude retries transient failures reported through synthetic messages", async () => {
+test("Claude synthetic API failures become one transient error", async () => {
   const message = "API Error: 529 overloaded";
-  const { agent, captured } = harness(
-    [
-      init("claude-test"),
-      assistant(
-        [textBlock(message)],
-        { error: "server_error" },
-        { model: "<synthetic>" },
-      ),
-      result({ is_error: true, api_error_status: 529, result: message }),
-    ],
-    { maxRetries: 1, retryDelayMs: 0 },
+  const { agent, captured } = harness([
+    init("claude-test"),
+    assistant(
+      [textBlock(message)],
+      { error: "server_error" },
+      { model: "<synthetic>" },
+    ),
+    result({ is_error: true, api_error_status: 529, result: message }),
+  ]);
+  const run = await agent.run("fail");
+  assert.equal(captured.length, 1);
+  assert.deepEqual(
+    [run.error, run.error_type],
+    [message, "transient_api_error"],
   );
-  const run = await agent.run("retry");
-  assert.equal(captured.length, 2);
-  assert.equal(run.error, message);
   assert.equal(
     run.events.filter((env) => env.event.type === "error").length,
     1,
@@ -853,15 +841,15 @@ const errorsOf = (run: RunResult) =>
   run.events
     .map((env) => env.event)
     .filter((event): event is ErrorEvent => event.type === "error");
-test("Claude keeps a finished answer when the runtime then fails, and does not retry it", async () => {
-  const { agent, captured } = harness(
+test("Claude keeps a finished answer when the runtime then fails", async () => {
+  const { agent } = harness(
     [assistant([textBlock("final answer")])],
-    { maxRetries: 2, retryDelayMs: 0 },
+    {},
     new TransientError("overloaded"),
   );
   const run = await agent.run("answer");
   assert.equal(run.final_text, "final answer");
-  assert.equal(captured.length, 1);
+  assert.equal(run.error_type, "transient_api_error");
 });
 test("Claude hook stops and deferred tools end successful runs", async () => {
   for (const reason of [
@@ -894,27 +882,23 @@ test("Claude accepts every cloud-provider flag as credentials", async () => {
     assert.equal(run.status, "success", flag);
   }
 });
-test("Claude max_output_tokens is not retried as a dropped connection", async () => {
-  const { agent, captured } = harness(
-    [
-      assistant(
-        [textBlock("Output limit reached")],
-        { error: "max_output_tokens" },
-        { model: "<synthetic>" },
-      ),
-      result({
-        is_error: true,
-        terminal_reason: "completed",
-        result: "Output limit reached",
-      }),
-    ],
-    { maxRetries: 2, retryDelayMs: 0 },
-  );
+test("Claude max_output_tokens is an execution error, not a dropped connection", async () => {
+  const { agent } = harness([
+    assistant(
+      [textBlock("Output limit reached")],
+      { error: "max_output_tokens" },
+      { model: "<synthetic>" },
+    ),
+    result({
+      is_error: true,
+      terminal_reason: "completed",
+      result: "Output limit reached",
+    }),
+  ]);
   const run = await agent.run("limit");
-  assert.equal(captured.length, 1);
   assert.deepEqual(
-    errorsOf(run).map((event) => [event.error_type, event.retryable]),
-    [["execution_error", false]],
+    errorsOf(run).map((event) => event.error_type),
+    ["execution_error"],
   );
 });
 test("Claude status frames do not split one message's text", async () => {

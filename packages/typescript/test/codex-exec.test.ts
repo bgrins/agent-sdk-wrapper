@@ -175,7 +175,6 @@ test("a fatal Codex failure yields one classified error despite the exit code", 
       type: "error",
       message,
       error_type: "authentication_failed",
-      retryable: false,
     },
   ]);
   assert.equal(run.status, "failure");

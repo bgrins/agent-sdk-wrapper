@@ -35,7 +35,6 @@ from agent_sdk_wrapper import (  # noqa: E402
     TokenUsage,
     ToolCall,
     ToolResult,
-    TransientError,
     Usage,
     normalize_provider,
 )
@@ -54,7 +53,6 @@ TRACE_SCHEMA_NAME = "agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json"
 BASE_TIME = datetime(2026, 5, 31, tzinfo=UTC)
 OFFLINE_FIXTURE_NAMES = {
     "provider_error.trace.jsonl",
-    "retry.trace.jsonl",
     "stream.trace.jsonl",
     "structured_output.trace.jsonl",
     "success.trace.jsonl",
@@ -113,21 +111,6 @@ class StaticProvider(ProviderAdapter):
             yield event
 
 
-class RetryOnceProvider(ProviderAdapter):
-    """Fake provider that fails once, then succeeds."""
-
-    name = "openai"
-
-    def __init__(self) -> None:
-        self.attempts = 0
-
-    async def stream(self, req: RunRequest):
-        self.attempts += 1
-        if self.attempts == 1:
-            raise TransientError("rate limit")
-        yield Text(text="Recovered.")
-
-
 class UnavailableProvider(ProviderAdapter):
     """Fake provider that behaves like a missing runtime."""
 
@@ -158,18 +141,6 @@ def patched_provider(
         yield
     finally:
         openai_mod.OpenAIProvider = original  # type: ignore[assignment]
-
-
-@contextlib.contextmanager
-def deterministic_retry_delay() -> Iterator[None]:
-    from agent_sdk_wrapper import agent as agent_mod
-
-    original = agent_mod._backoff
-    agent_mod._backoff = lambda attempt: 0.0  # type: ignore[assignment]
-    try:
-        yield
-    finally:
-        agent_mod._backoff = original  # type: ignore[assignment]
 
 
 async def generate_offline_fixtures(output_dir: Path) -> list[Path]:
@@ -214,13 +185,6 @@ async def generate_offline_fixtures(output_dir: Path) -> list[Path]:
                     Text(text="Reviewed app.py."),
                 ],
             ),
-        ),
-        (
-            "retry.trace.jsonl",
-            "golden-retry",
-            2,
-            789,
-            _run_retry_fixture,
         ),
         (
             "provider_error.trace.jsonl",
@@ -275,22 +239,15 @@ def _run_static_fixture(
 ) -> Callable[[Path], Any]:
     async def generate(path: Path) -> None:
         with patched_provider(provider, lambda: StaticProvider(provider, events)):
-            agent = Agent(provider=provider, model=model, max_retries=0)
+            agent = Agent(provider=provider, model=model)
             await agent.run("offline fixture", trace_file=path)
 
     return generate
 
 
-async def _run_retry_fixture(path: Path) -> None:
-    provider = RetryOnceProvider()
-    with deterministic_retry_delay(), patched_provider("openai", lambda: provider):
-        agent = Agent(provider="openai", max_retries=1)
-        await agent.run("offline retry fixture", trace_file=path)
-
-
 async def _run_provider_error_fixture(path: Path) -> None:
     with patched_provider("anthropic", UnavailableProvider):
-        agent = Agent(provider="anthropic", max_retries=0)
+        agent = Agent(provider="anthropic")
         await agent.run("offline provider error fixture", trace_file=path)
 
 
@@ -302,7 +259,7 @@ async def _run_stream_fixture(path: Path) -> None:
         Usage(usage=TokenUsage(input_tokens=3, output_tokens=1, total_tokens=4)),
     ]
     with patched_provider("openai", lambda: StaticProvider("openai", events)):
-        agent = Agent(provider="openai", model="gpt-5-mini", max_retries=0)
+        agent = Agent(provider="openai", model="gpt-5-mini")
         async for _ in agent.stream("offline stream fixture", trace_file=path):
             pass
 
@@ -440,7 +397,6 @@ async def generate_live_fixtures(
             provider=provider,
             model=model,
             system_prompt="Follow the user's formatting instruction exactly.",
-            max_retries=0,
         )
         result = await agent.run(
             "Reply with exactly LIVE_FIXTURE_PONG and nothing else.",

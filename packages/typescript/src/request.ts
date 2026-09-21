@@ -21,8 +21,6 @@ export interface AgentDefaults {
   cwd?: string;
   sessionId?: string;
   continueSession?: boolean;
-  maxRetries?: number;
-  retryDelayMs?: number;
   includeRaw?: boolean;
   signal?: AbortSignal;
   providerOptions?: ProviderOptions;
@@ -46,8 +44,6 @@ export interface RunRequest extends AgentDefaults {
 }
 export interface ResolvedRequest extends RunRequest {
   provider: Provider;
-  maxRetries: number;
-  retryDelayMs: number;
   continueSession: boolean;
   includeRaw: boolean;
   cliLogin: CliLogin;
@@ -60,8 +56,6 @@ const keys = new Set([
   "cwd",
   "sessionId",
   "continueSession",
-  "maxRetries",
-  "retryDelayMs",
   "includeRaw",
   "signal",
   "providerOptions",
@@ -143,13 +137,6 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
     if (input[key] !== undefined && typeof input[key] !== "boolean")
       throw new ConfigError(`${key} must be boolean`);
   }
-  for (const key of ["maxRetries", "retryDelayMs"] as const) {
-    if (
-      input[key] !== undefined &&
-      (!Number.isSafeInteger(input[key]) || (input[key] ?? 0) < 0)
-    )
-      throw new ConfigError(`${key} must be a non-negative integer`);
-  }
   if (
     input.cliLogin !== undefined &&
     input.cliLogin !== "deny" &&
@@ -193,8 +180,6 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
   return {
     ...input,
     ...resolved,
-    maxRetries: input.maxRetries ?? 0,
-    retryDelayMs: input.retryDelayMs ?? 250,
     continueSession: input.continueSession ?? false,
     includeRaw: input.includeRaw ?? false,
     cliLogin: input.cliLogin ?? "deny",

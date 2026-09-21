@@ -32,7 +32,7 @@
 - `RunStarted` includes prompt and system prompt. Preserve empty/redacted
   `Thinking` events when reasoning occurred; both providers reason by default.
 - Classify terminal provider failures even when the SDK never raises:
-  specific `error_type` and `retryable`, not a generic error. Use the PARITY.md
+  a specific `error_type`, not a generic error. Use the PARITY.md
   vocabulary and prefer structured native signals over message text.
 - Signal-killed runtimes record a `process_terminated` error, then raise
   `ProcessTerminatedError`; never retry them.
@@ -42,7 +42,9 @@
 - `final_text` is the last `Text`; adapters emit one `Text` per contiguous text run of
   an assistant message, even across frames.
 - Changes to Python `_tool_server_script()` or `mcp` require the real offline
-  MCP handshake test. The generated server supports `FastMCP` and `MCPServer`.
+  MCP handshake test. The generated server uses mcp 2's `MCPServer`.
 - Fault tests use local mock endpoints: Claude `ANTHROPIC_BASE_URL` via `env`;
-  Codex `model_providers.<id>.base_url`. Use 4xx for terminal paths; runtimes
-  internally retry 429/5xx. Neither SDK provides fault injection.
+  Codex `model_providers.<id>.base_url`. Runtimes retry 429/5xx internally; set
+  `CLAUDE_CODE_MAX_RETRIES=0` or Codex `request_max_retries`/`stream_max_retries=0`
+  for fast failures. A failed Claude stream still gets one non-streaming request.
+  Neither SDK provides fault injection.

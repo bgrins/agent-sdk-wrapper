@@ -8,7 +8,6 @@ a subset of Python's API.
 |---|---|---|
 | Requests | Keyword overrides; snake_case | Prompt or request object; camelCase; whole-field replacement |
 | Provider selection | Fixed per Agent; explicit provider takes precedence | Per-run selection; conflicting model/provider rejected |
-| Wrapper retries | Default 0, jittered backoff capped at 8 s; `run`, `stream` and CLI | Default 0, `retryDelayMs` doubling to 30 s |
 | Concurrency | Concurrent runs allowed; `continue_session` keeps the last reported session | One active run per Agent |
 | Codex session model | Reported | Not exposed by `codex exec` |
 | Codex key check | Skipped with a custom `model_provider` | Required, including with `baseUrl` |
@@ -27,11 +26,7 @@ a subset of Python's API.
 | Redacted thinking | Size from the thinking signature | Size from `redacted_thinking` blocks |
 | `cli_login="require"` check | Codex account type after startup | `codex login status` before startup |
 
-Both stop retrying after a progress event, and never retry a resumed session that has
-started. Progress events are text, thinking, tool calls and results, plus Python's
-subagent, structured-output, compaction and agent events. Retryable error events
-are held back and become warnings when retried. Signal-killed runtimes record a
-`process_terminated` error, then raise; they are never retried.
+Signal-killed runtimes record a `process_terminated` error, then raise.
 
 `cli_login` defaults to `deny`: stored logins are never used and credentials are
 never persisted. Claude rejects `require`.
@@ -43,7 +38,7 @@ Unsupported options fail validation; native permission policies are not intercha
 
 | `error_type` | Meaning |
 |---|---|
-| `transient_api_error` | 408, 409, 429, 5xx, overload, high demand or dropped connection; the only retryable type |
+| `transient_api_error` | 408, 409, 429, 5xx, overload, high demand or dropped connection |
 | `authentication_failed`, `permission_denied` | Missing or rejected credentials; access denied |
 | `invalid_request`, `model_not_found`, `context_window_exceeded` | Request rejected |
 | `billing_error`, `usage_limit_exceeded`, `max_budget` | Spending or quota limits |
@@ -51,6 +46,14 @@ Unsupported options fail validation; native permission policies are not intercha
 | `structured_output_failed`, `execution_error` | Structured output or runtime execution failures |
 | `provider_protocol_error`, `runtime_unavailable`, `process_terminated`, `provider_exception` | Wrapper-level failures |
 | `api_error_<status>` | Other HTTP statuses |
+
+## Retrying
+
+Neither package retries a run; the runtimes already retry API errors with backoff.
+`RunResult.error_type` is the first error's type. A caller that runs again after
+`transient_api_error` should first check the events: a run that started a tool call
+may repeat its side effects, and running a resumed session again repeats the prompt
+in that session.
 
 ## Shared limits
 
@@ -62,13 +65,12 @@ Unsupported options fail validation; native permission policies are not intercha
   its SDK drops `supersedes` and `aborted` frames.
 - Claude custom prompts persist across resume by default. Start a new session to change instructions.
 - Codex defers MCP tools behind its tool search; prompts may need to tell the model to search.
-- Runtimes retry before the wrapper sees an error, and wrapper retries repeat theirs. By
-  default the Claude CLI retries 429, 5xx, 529 and 401 ten times over about 3 minutes, and
+- Runtimes retry before the wrapper sees an error. By default the Claude CLI retries 429, 5xx, 529 and 401 ten times over about 3 minutes, and
   each retry becomes a warning; `CLAUDE_CODE_MAX_RETRIES` in `env` sets the count. Codex
   retries 5xx and dropped streams (`request_max_retries`, `stream_max_retries` on a custom
   `model_providers` entry), but not HTTP 429.
-- Codex drops the body of an HTTP 429, so an exhausted API quota is reported as a rate
-  limit and retried.
+- Codex drops the body of an HTTP 429, so an exhausted API quota is reported as
+  `transient_api_error`.
 - When Codex retries a stream after a message completed, both messages are Text events.
 - Claude reports `rate_limit_event` only for claude.ai logins, so API-key runs get no
   rate-limit warnings.

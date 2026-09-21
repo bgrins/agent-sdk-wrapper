@@ -1635,7 +1635,6 @@ async def test_codex_failed_turn_yields_one_classified_error():
     assert out[0].message == "Reconnecting... 1/5"
     assert out[1].message == "Selected model is at capacity."
     assert out[1].error_type == "transient_api_error"
-    assert out[1].retryable is True
 
 
 @pytest.mark.asyncio
@@ -1776,7 +1775,6 @@ async def test_codex_failed_turns_are_classified(error, error_type):
     assert [type(event) for event in out] == [Error]
     assert out[0].message == error["message"]
     assert out[0].error_type == error_type
-    assert out[0].retryable is (error_type == "transient_api_error")
 
 
 @pytest.mark.asyncio

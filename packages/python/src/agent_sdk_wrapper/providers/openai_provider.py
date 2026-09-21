@@ -418,7 +418,6 @@ async def _stream_turn(
         req.artifacts_dir,
         req.on_provider_event,
         run_id=req.run_id,
-        attempt=req.attempt,
     )
     text_delta_parts: dict[str | None, list[str]] = {}
     thinking_delta_parts: dict[str | None, list[str]] = {}
@@ -2245,9 +2244,7 @@ def _error_event(error: Any, raw: dict[str, Any] | None = None) -> Error:
     message = _turn_error_text(error)
     info = _field(error, "codex_error_info", "codexErrorInfo")
     error_type = _classify_codex_error(info, message)
-    return Error(
-        message=message, error_type=error_type, retryable=error_type == _TRANSIENT, raw=raw
-    )
+    return Error(message=message, error_type=error_type, raw=raw)
 
 
 def _turn_error_text(error: Any) -> str:

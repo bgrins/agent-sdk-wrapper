@@ -1,12 +1,10 @@
-"""Provider-independent errors. ``transient`` marks retryable failures."""
+"""Provider-independent errors."""
 
 from __future__ import annotations
 
 
 class AgentSdkWrapperError(Exception):
     """Base class for every error this library raises."""
-
-    transient: bool = False
 
     def __init__(self, message: str, *, cause: BaseException | None = None) -> None:
         super().__init__(message)
@@ -22,9 +20,7 @@ class ProviderNotAvailableError(AgentSdkWrapperError):
 
 
 class TransientError(AgentSdkWrapperError):
-    """A retryable failure (rate limit, timeout, transient upstream 5xx)."""
-
-    transient = True
+    """A transient provider failure (rate limit, timeout, upstream 5xx, dropped connection)."""
 
 
 class ProcessTerminatedError(AgentSdkWrapperError):

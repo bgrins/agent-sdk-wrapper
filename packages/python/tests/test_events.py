@@ -801,15 +801,15 @@ def test_run_result_distinguishes_max_turns_from_generic_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("exc", "error_type", "retryable"),
+    ("exc", "error_type"),
     [
-        (ProviderNotAvailableError("missing runtime"), "runtime_unavailable", False),
-        (TransientError("rate limit"), "transient_api_error", True),
-        (RuntimeError("sdk bug"), "provider_exception", False),
+        (ProviderNotAvailableError("missing runtime"), "runtime_unavailable"),
+        (TransientError("rate limit"), "transient_api_error"),
+        (RuntimeError("sdk bug"), "provider_exception"),
     ],
 )
 def test_run_records_internal_errors_in_result_and_trace(
-    monkeypatch, tmp_path, exc, error_type, retryable
+    monkeypatch, tmp_path, exc, error_type
 ):
     from agent_sdk_wrapper.providers import base
     from agent_sdk_wrapper.providers import openai_provider as op_mod
@@ -825,7 +825,7 @@ def test_run_records_internal_errors_in_result_and_trace(
     monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
 
     trace_file = tmp_path / "trace.jsonl"
-    agent = Agent(provider="openai", max_retries=0, trace_file=trace_file)
+    agent = Agent(provider="openai", trace_file=trace_file)
 
     import asyncio
 
@@ -833,69 +833,32 @@ def test_run_records_internal_errors_in_result_and_trace(
 
     assert result.status == RunStatus.FAILURE
     assert result.ended_reason == RunEndedReason.ERROR
-    assert result.error == str(exc)
+    assert (result.error, result.error_type) == (str(exc), error_type)
     [error] = [event.event for event in result.events if isinstance(event.event, Error)]
-    assert (error.error_type, error.retryable) == (error_type, retryable)
+    assert error.error_type == error_type
     assert len(trace_file.read_text().splitlines()) == len(result.events)
 
 
-def test_run_records_retry_warning_in_result_and_trace(monkeypatch, tmp_path):
-    from agent_sdk_wrapper import agent as agent_mod
+def test_a_transient_failure_after_text_keeps_the_text(monkeypatch, tmp_path):
     from agent_sdk_wrapper.providers import base
     from agent_sdk_wrapper.providers import openai_provider as op_mod
 
     class FakeProvider(base.ProviderAdapter):
         name = "openai"
-        calls = 0
 
         async def stream(self, req):  # type: ignore[override]
-            FakeProvider.calls += 1
-            if FakeProvider.calls == 1:
-                raise TransientError("rate limit")
-            yield Text(text="ok")
-
-    monkeypatch.setattr(agent_mod, "_backoff", lambda attempt: 0)
-    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
-    FakeProvider.calls = 0
-
-    trace_file = tmp_path / "trace.jsonl"
-    agent = Agent(provider="openai", max_retries=1, trace_file=trace_file)
-
-    import asyncio
-
-    result = asyncio.run(agent.run("ignored"))
-
-    assert result.status == RunStatus.SUCCESS
-    assert result.ended_reason == RunEndedReason.SUCCESS
-    assert FakeProvider.calls == 2
-    assert [event.event.type for event in result.events].count("warning") == 1
-    assert len(trace_file.read_text().splitlines()) == len(result.events)
-
-
-def test_run_does_not_retry_transient_after_partial_events(monkeypatch, tmp_path):
-    from agent_sdk_wrapper.providers import base
-    from agent_sdk_wrapper.providers import openai_provider as op_mod
-
-    class FakeProvider(base.ProviderAdapter):
-        name = "openai"
-        calls = 0
-
-        async def stream(self, req):  # type: ignore[override]
-            FakeProvider.calls += 1
             yield Text(text="partial")
             raise TransientError("lost connection")
 
     monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
-    FakeProvider.calls = 0
 
     trace_file = tmp_path / "trace.jsonl"
-    agent = Agent(provider="openai", max_retries=3, trace_file=trace_file)
+    agent = Agent(provider="openai", trace_file=trace_file)
 
     import asyncio
 
     result = asyncio.run(agent.run("ignored"))
 
-    assert FakeProvider.calls == 1
     assert result.status == RunStatus.FAILURE
     assert result.ended_reason == RunEndedReason.ERROR
     assert result.final_text == "partial"
@@ -1010,7 +973,7 @@ def test_provider_timeout_error_is_not_the_run_deadline(monkeypatch):
 
     install_fake_providers(monkeypatch, events=raises_timeout)
 
-    result = Agent(provider="openai", timeout=60, max_retries=0).run_sync("hi")
+    result = Agent(provider="openai", timeout=60).run_sync("hi")
 
     assert result.status == RunStatus.FAILURE
     assert result.error == "socket read timed out"
@@ -1053,7 +1016,7 @@ def test_stream_raises_config_error_before_iterating(tmp_path):
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"timeout": "30"}, {"timeout": 0}, {"max_retries": -1}, {"max_retries": 1.5}],
+    [{"timeout": "30"}, {"timeout": 0}, {"max_turns": 0}, {"max_turns": True}],
 )
 def test_run_rejects_invalid_run_limits(monkeypatch, overrides):
     install_fake_providers(monkeypatch)

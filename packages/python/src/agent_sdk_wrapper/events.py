@@ -233,8 +233,6 @@ class Error(_EventBase):
     type: ClassVar[str] = "error"
     message: str = ""
     error_type: str | None = None
-    # Retry classification, including provider errors that do not raise.
-    retryable: bool = False
     raw: dict[str, Any] | None = None
 
 
@@ -305,6 +303,7 @@ class RunResult:
     session_id: str | None = None
     artifacts_dir: str | None = None
     error: str | None = None
+    error_type: str | None = None
     events: list[EventEnvelope] = field(default_factory=list)
 
     @property
@@ -329,6 +328,7 @@ class RunResult:
             "session_id": self.session_id,
             "artifacts_dir": self.artifacts_dir,
             "error": self.error,
+            "error_type": self.error_type,
             "events": [e.to_dict() for e in self.events],
         }
 

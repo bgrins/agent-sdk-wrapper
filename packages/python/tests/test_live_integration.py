@@ -163,7 +163,6 @@ async def test_live_basic_text(live_provider: LiveProvider) -> None:
         provider=live_provider.provider,
         model=live_provider.model,
         system_prompt="Follow the user's formatting instruction exactly.",
-        max_retries=0,
     )
 
     result = await agent.run(
@@ -186,7 +185,6 @@ async def test_live_callable_tools(live_provider: LiveProvider) -> None:
             "Use the provided add and double tools for arithmetic; find them with tool "
             "search if they are not listed. Never use the shell."
         ),
-        max_retries=0,
     )
 
     result = await agent.run(
@@ -215,7 +213,6 @@ async def test_live_structured_tool_handoff_chain(
             "You are an intake agent. Use the available tools for arithmetic and "
             "release-signal lookup. Return only structured output matching the schema."
         ),
-        max_retries=0,
     )
 
     intake = await intake_agent.run(
@@ -244,7 +241,6 @@ async def test_live_structured_tool_handoff_chain(
             "the handoff id. Accept it only when score is 12 and the signal "
             "mentions docker."
         ),
-        max_retries=0,
     )
     verifier = await verifier_agent.run(
         "Review this handoff and return a structured decision:\n"
@@ -279,7 +275,6 @@ async def test_live_external_mcp(live_provider: LiveProvider) -> None:
             "Use the read_brief MCP tool when asked to inspect a brief; find it with tool "
             "search if it is not listed. Never use the shell."
         ),
-        max_retries=0,
     )
 
     result = await agent.run(
@@ -299,7 +294,6 @@ async def test_live_session_resume(live_provider: LiveProvider) -> None:
         provider=live_provider.provider,
         model=live_provider.model,
         continue_session=True,
-        max_retries=0,
     )
 
     first = await agent.run(
@@ -333,7 +327,6 @@ async def test_live_subagent(live_provider: LiveProvider) -> None:
                 model=model,
             )
         },
-        max_retries=0,
     )
 
     result = await agent.run(

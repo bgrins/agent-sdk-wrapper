@@ -59,7 +59,6 @@ try {
     model: request.model,
     cwd: "/job/work",
     continueSession: true,
-    maxRetries: 0,
     signal: AbortSignal.timeout(150000),
     providerOptions,
   });

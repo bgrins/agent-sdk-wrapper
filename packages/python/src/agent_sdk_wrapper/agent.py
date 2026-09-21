@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
-import random
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -32,7 +31,6 @@ from .errors import (
 from .events import (
     AgentEvent,
     AgentUpdated,
-    ContextCompacted,
     Error,
     EventEnvelope,
     RunEndedReason,
@@ -42,15 +40,12 @@ from .events import (
     RunStatus,
     SessionInfo,
     StructuredOutput,
-    SubagentEnded,
-    SubagentStarted,
     Text,
     Thinking,
     TokenUsage,
     ToolCall,
     ToolResult,
     Usage,
-    WarningEvent,
     utcnow_iso,
 )
 from .logging import TraceWriter, get_logger
@@ -87,7 +82,6 @@ _ALLOWED_OVERRIDES = frozenset({
     "extra_options",
     "include_events_in_result",
     "include_raw",
-    "max_retries",
     "max_turns",
     "mcp_servers",
     "model",
@@ -105,19 +99,6 @@ _ALLOWED_OVERRIDES = frozenset({
     "trace_file",
     "web_tools",
 })
-
-# Events that show an attempt did work; after one, the attempt is never retried.
-_PROGRESS_EVENTS = (
-    Text,
-    Thinking,
-    ToolCall,
-    ToolResult,
-    StructuredOutput,
-    SubagentStarted,
-    SubagentEnded,
-    ContextCompacted,
-    AgentUpdated,
-)
 
 _ENDED_REASONS = {
     "max_turns": RunEndedReason.MAX_TURNS,
@@ -165,7 +146,6 @@ class Agent:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
-        max_retries: int = 0,
         include_raw: bool = False,
         include_events_in_result: bool = True,
         builtin_tools: Sequence[str] | str | None = None,
@@ -199,7 +179,6 @@ class Agent:
         self.cwd = cwd
         self.env = dict(env or {})
         self.timeout = timeout
-        self.max_retries = max_retries
         self.include_raw = include_raw
         self.include_events_in_result = include_events_in_result
         self.builtin_tools = normalize_builtin_tools(builtin_tools)
@@ -307,9 +286,6 @@ class Agent:
             isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns < 1
         ):
             raise ConfigError(f"max_turns must be a positive integer, got {max_turns!r}")
-        max_retries = pick("max_retries", self.max_retries)
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
-            raise ConfigError(f"max_retries must be a non-negative integer, got {max_retries!r}")
 
         return RunRequest(
             provider=self.provider,
@@ -329,7 +305,6 @@ class Agent:
             cwd=pick("cwd", self.cwd),
             env=dict(pick("env", self.env)),
             timeout=timeout,
-            max_retries=max_retries,
             include_raw=bool(pick("include_raw", self.include_raw)),
             include_events_in_result=bool(
                 pick("include_events_in_result", self.include_events_in_result)
@@ -356,19 +331,17 @@ class Agent:
         req.run_id = run_id
         if not run.session_overridden:
             req.session_id = self.session_id
-        original_session_id = req.session_id
         on_event = run.on_event
         include_events = req.include_events_in_result
         seq = _SeqGen()
         state = _ResultState()
         result_events: list[EventEnvelope] = []
-        # Retryable errors wait here until the attempt either retries or makes progress.
-        held: list[Error] = []
         start = time.monotonic()
         deadline = None if req.timeout is None else start + req.timeout
         status = RunStatus.SUCCESS
         ended_reason = RunEndedReason.SUCCESS
         error_msg: str | None = None
+        error_type: str | None = None
         duration_ms = 0
         finished = False
         writer: TraceWriter | None = None
@@ -376,12 +349,13 @@ class Agent:
         trace_path = run.trace_path
 
         def record(event: AgentEvent) -> EventEnvelope:
-            nonlocal status, ended_reason, error_msg
+            nonlocal status, ended_reason, error_msg, error_type
             assert writer is not None
             if req.continue_session and isinstance(event, SessionInfo) and event.id:
                 self.session_id = event.id
             if isinstance(event, Error) and error_msg is None:
                 error_msg = event.message or "provider reported an error"
+                error_type = event.error_type
                 ended_reason = _ended_reason_from_error_type(event.error_type)
                 status = _status_for(ended_reason)
             env = EventEnvelope(run_id, seq.next(), utcnow_iso(), event)
@@ -396,11 +370,6 @@ class Agent:
                     get_logger().exception("on_event callback raised; continuing run")
             return env
 
-        def flush_held() -> list[EventEnvelope]:
-            envs = [record(event) for event in held]
-            held.clear()
-            return envs
-
         def finish() -> EventEnvelope:
             nonlocal duration_ms, finished
             duration_ms = _elapsed_ms(start)
@@ -409,11 +378,6 @@ class Agent:
             )
             finished = True
             return env
-
-        def hold_as_warnings() -> None:
-            for event in held:
-                record(WarningEvent(message=event.message))
-            held.clear()
 
         try:
             artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
@@ -440,95 +404,44 @@ class Agent:
                 )
             )
 
+            native = _provider_events(self._provider, req)
+            error: Exception | None = None
+            reported = False
             try:
-                attempt = 0
-                while True:
-                    req.attempt = attempt
-                    req.session_id = original_session_id
-                    progressed = failed = reported = session_seen = False
-                    error: Exception | None = None
-                    native = _provider_events(self._provider, req)
-                    try:
-                        while True:
-                            try:
-                                ev = await _next_event(native, deadline)
-                            except (ProcessTerminatedError, ConfigError, _DeadlineExceeded):
-                                raise
-                            except Exception as exc:
-                                error = exc
-                                break
-                            if ev is _END:
-                                break
-                            if (
-                                isinstance(ev, Error)
-                                and ev.retryable
-                                and not (progressed or failed)
-                                and attempt < req.max_retries
-                            ):
-                                held.append(ev)
-                                continue
-                            if held and isinstance(ev, (*_PROGRESS_EVENTS, Error)):
-                                failed = True
-                                for env in flush_held():
-                                    yield env
-                            progressed = progressed or isinstance(ev, _PROGRESS_EVENTS)
-                            failed = failed or isinstance(ev, Error)
-                            reported = reported or isinstance(ev, Error)
-                            session_seen = session_seen or isinstance(ev, SessionInfo)
-                            yield record(ev)
-                    except BaseException:
-                        # The original failure wins; never yield while being closed.
-                        await _close_provider(native, log_errors=True)
-                        raise
-                    cleanup_error = await _close_provider(native)
-                    if isinstance(cleanup_error, (ProcessTerminatedError, ConfigError)):
-                        raise cleanup_error
-                    if error is None:
-                        error = cleanup_error
-
-                    transient = isinstance(error, TransientError)
-                    retryable = (bool(held) or transient) and (error is None or transient)
-                    # A resumed session already holds this prompt; retrying would repeat it.
-                    resumed = original_session_id is not None and session_seen
-                    if (
-                        retryable
-                        and not (progressed or failed or resumed)
-                        and attempt < req.max_retries
-                    ):
-                        reason = held[0].message if held else str(error)
-                        held.clear()
-                        delay = _backoff(attempt)
-                        yield record(
-                            WarningEvent(
-                                message=(
-                                    f"transient error, retrying in {delay:.1f}s "
-                                    f"(attempt {attempt + 1}/{req.max_retries}): {reason}"
-                                )
-                            )
-                        )
-                        await _retry_sleep(delay, deadline)
-                        attempt += 1
-                        continue
-
-                    if held:
-                        for env in flush_held():
-                            yield env
-                    # The provider's own terminal error wins over a later exception.
-                    if error is not None and not reported:
-                        yield record(_error_event(error))
-                    break
+                try:
+                    while True:
+                        try:
+                            ev = await _next_event(native, deadline)
+                        except (ProcessTerminatedError, ConfigError, _DeadlineExceeded):
+                            raise
+                        except Exception as exc:
+                            error = exc
+                            break
+                        if ev is _END:
+                            break
+                        reported = reported or isinstance(ev, Error)
+                        yield record(ev)
+                except BaseException:
+                    # The original failure wins; never yield while being closed.
+                    await _close_provider(native, log_errors=True)
+                    raise
+                cleanup_error = await _close_provider(native)
+                if isinstance(cleanup_error, (ProcessTerminatedError, ConfigError)):
+                    raise cleanup_error
+                if error is None:
+                    error = cleanup_error
+                # The provider's own terminal error wins over a later exception.
+                if error is not None and not reported:
+                    yield record(_error_event(error))
             except _DeadlineExceeded:
-                for env in flush_held():
-                    yield env
                 yield record(
                     Error(message=f"run timed out after {req.timeout}s", error_type="timeout")
                 )
                 status = RunStatus.TIMEOUT
                 ended_reason = RunEndedReason.TIMEOUT
                 error_msg = "timeout"
+                error_type = "timeout"
             except (ProcessTerminatedError, ConfigError) as exc:
-                for env in flush_held():
-                    yield env
                 yield record(_error_event(exc))
                 yield finish()
                 raise
@@ -536,18 +449,17 @@ class Agent:
             yield finish()
         except GeneratorExit:
             if writer is not None and not finished:
-                hold_as_warnings()
                 if error_msg is None:
                     record(Error(message="stream closed before completion", error_type="cancelled"))
                 finish()
             raise
         except asyncio.CancelledError:
             if writer is not None and not finished:
-                hold_as_warnings()
                 record(Error(message="run cancelled", error_type="cancelled"))
                 status = RunStatus.CANCELLED
                 ended_reason = RunEndedReason.CANCELLED
                 error_msg = "cancelled"
+                error_type = "cancelled"
                 finish()
             raise
         finally:
@@ -565,6 +477,7 @@ class Agent:
                     duration_ms=duration_ms,
                     artifacts_dir=_as_str(artifacts_dir),
                     error_msg=error_msg,
+                    error_type=error_type,
                 )
                 if artifacts_dir is not None:
                     result_path = write_result_artifact(artifacts_dir, run.result)
@@ -592,11 +505,6 @@ class _SeqGen:
         n = self._n
         self._n += 1
         return n
-
-
-def _backoff(attempt: int, *, base: float = 0.5, cap: float = 8.0) -> float:
-    """Decorrelated exponential backoff with jitter."""
-    return min(cap, base * (2**attempt)) * (0.5 + random.random() / 2)
 
 
 def _elapsed_ms(start: float) -> int:
@@ -663,17 +571,10 @@ async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None)
         return _END
 
 
-async def _retry_sleep(delay: float, deadline: float | None) -> None:
-    if deadline is not None and time.monotonic() + delay >= deadline:
-        await asyncio.sleep(max(0.0, deadline - time.monotonic()))
-        raise _DeadlineExceeded
-    await asyncio.sleep(delay)
-
-
 def _error_event(exc: BaseException) -> Error:
     message = str(exc) or type(exc).__name__
     if isinstance(exc, TransientError):
-        return Error(message=message, error_type="transient_api_error", retryable=True)
+        return Error(message=message, error_type="transient_api_error")
     if isinstance(exc, ProcessTerminatedError):
         return Error(message=message, error_type="process_terminated")
     if isinstance(exc, ProviderNotAvailableError):
@@ -751,6 +652,7 @@ class _ResultState:
         duration_ms: int,
         artifacts_dir: str | None,
         error_msg: str | None,
+        error_type: str | None,
     ) -> RunResult:
         return RunResult(
             run_id=run_id,
@@ -766,6 +668,7 @@ class _ResultState:
             session_id=self.session_id,
             artifacts_dir=artifacts_dir,
             error=error_msg,
+            error_type=error_type,
             events=events,
         )
 

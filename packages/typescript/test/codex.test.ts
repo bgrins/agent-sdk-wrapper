@@ -249,7 +249,6 @@ test("Codex turn.failed is the one terminal typed failure, not also a warning", 
         type: "error",
         message,
         error_type: "authentication_failed",
-        retryable: false,
       },
     ],
   );
@@ -310,8 +309,7 @@ test("Codex transient error events are classified and item errors remain warning
     failure.events.some(
       (env) =>
         env.event.type === "error" &&
-        env.event.error_type === "transient_api_error" &&
-        env.event.retryable,
+        env.event.error_type === "transient_api_error",
     ),
   );
   const success = await harness([
@@ -324,7 +322,7 @@ test("Codex transient error events are classified and item errors remain warning
   assert.equal(success.status, "success");
   assert.ok(success.events.some((env) => env.event.type === "warning"));
 });
-test("Codex truncated streams fail; signal exits throw without retrying", async () => {
+test("Codex truncated streams fail; signal exits throw", async () => {
   const truncated = await harness([{ type: "turn.started" }]).agent.run(
     "truncated",
   );
@@ -332,7 +330,7 @@ test("Codex truncated streams fail; signal exits throw without retrying", async 
   assert.match(truncated.error ?? "", /without turn.completed/);
   const killed = harness(
     [],
-    { maxRetries: 5 },
+    {},
     new Error("Codex Exec exited with signal SIGTERM:"),
   );
   await assert.rejects(killed.agent.run("killed"), ProcessTerminatedError);

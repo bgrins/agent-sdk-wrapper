@@ -40,7 +40,6 @@ async def main():
         model=request["model"],
         cwd="/job/work",
         continue_session=True,
-        max_retries=0,
         timeout=150,
     )
     if request["provider"] == "anthropic":

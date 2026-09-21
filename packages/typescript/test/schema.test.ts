@@ -43,6 +43,7 @@ const resultFields = {
   session_id: true,
   artifacts_dir: true,
   error: true,
+  error_type: true,
   events: true,
 } satisfies Record<keyof RunResult, true>;
 

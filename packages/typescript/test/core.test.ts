@@ -134,7 +134,6 @@ test("message classification uses the canonical vocabulary", () => {
   ]) {
     const error = classify(message ?? "", "fallback");
     assert.equal(error.error_type, expected, message);
-    assert.equal(error.retryable, expected === "transient_api_error", message);
   }
   assert.equal(
     classify("overloaded", "fallback", 529).error_type,
@@ -158,9 +157,6 @@ test("unknown, reserved, malformed and cross-provider options fail before availa
     { artifactsDir: "out" },
     { subagents: {} },
     { builtinTools: [] },
-    { maxRetries: -1 },
-    { maxRetries: Number.NaN },
-    { retryDelayMs: 0.5 },
     { includeRaw: "yes" },
     { continueSession: 1 },
     { effort: "none" },
@@ -256,7 +252,6 @@ test("sessions persist after stream/run/failure, explicit resume wins, providers
       type: "error",
       message: "terminal",
       error_type: "turn_failed",
-      retryable: false,
     };
   });
   const agent = new Agent(
@@ -287,7 +282,7 @@ test("constructor session ID is available before the first run", async () => {
   assert.equal(agent.sessionId, "saved");
   assert.equal((await agent.run("resume")).session_id, "saved");
 });
-test("retries are opt-in by default", async () => {
+test("a transient failure ends the run with its type", async () => {
   let calls = 0;
   const agent = new Agent(
     { provider: "codex" },
@@ -299,165 +294,44 @@ test("retries are opt-in by default", async () => {
       }),
     },
   );
-  assert.equal((await agent.run("no automatic retry")).status, "failure");
+  const result = await agent.run("no retry");
   assert.equal(calls, 1);
-});
-test("retries transient startup failures with ordered warnings then succeeds", async () => {
-  let calls = 0;
-  const agent = new Agent(
-    { provider: "openai", maxRetries: 2, retryDelayMs: 0 },
-    {
-      openai: fake(async function* () {
-        if (++calls < 3) throw new TransientError("overloaded");
-        yield { type: "text", text: "ok" };
-      }),
-    },
-  );
-  const result = await agent.run("retry");
-  assert.equal(calls, 3);
-  assert.deepEqual(
-    result.events.map((env) => env.event.type),
-    ["run_started", "warning", "warning", "text", "run_finished"],
-  );
-});
-test("retry exhaustion emits a typed retryable failure", async () => {
-  let calls = 0;
-  const agent = new Agent(
-    { provider: "openai", maxRetries: 1, retryDelayMs: 0 },
-    {
-      // biome-ignore lint/correctness/useYield: model an async stream failing before its first frame
-      openai: fake(async function* () {
-        calls++;
-        throw new TransientError("overloaded");
-      }),
-    },
-  );
-  const result = await agent.run("retry");
-  assert.equal(calls, 2);
   assert.equal(result.status, "failure");
-  assert.deepEqual(result.events.at(-2)?.event, {
-    type: "error",
-    message: "overloaded",
-    error_type: "transient_api_error",
-    retryable: true,
-  });
+  assert.deepEqual(
+    [result.error, result.error_type],
+    ["unavailable", "transient_api_error"],
+  );
 });
-for (const progress of ["normalized", "terminal"] as const)
-  test(`does not retry after ${progress} progress`, async () => {
-    let calls = 0;
-    const agent = new Agent(
-      { provider: "openai", maxRetries: 5, retryDelayMs: 0 },
-      {
-        openai: fake(async function* () {
-          calls++;
-          if (progress === "normalized")
-            yield { type: "text", text: "partial" };
-          if (progress === "terminal")
-            yield {
-              type: "error",
-              message: "real failure",
-              error_type: "max_turns",
-              retryable: false,
-            };
-          throw new TransientError("cleanup failure");
-        }),
-      },
-    );
-    const result = await agent.run("retry");
-    assert.equal(calls, 1);
-    assert.equal(result.status, "failure");
-    if (progress === "terminal") {
-      assert.equal(result.error, "real failure");
-      assert.equal(result.ended_reason, "max_turns");
-    }
-  });
-test("retryable error events retry after non-progress frames of a new session", async () => {
-  const seen: (string | undefined)[] = [];
+test("a provider error wins over a later exception", async () => {
   const agent = new Agent(
-    { provider: "openai", maxRetries: 1, retryDelayMs: 0 },
+    { provider: "openai" },
     {
-      openai: fake(async function* (req, context) {
-        seen.push(req.sessionId);
-        context.onNativeEvent({ type: "thread.started" });
-        if (seen.length === 1) {
-          yield { type: "session_info", id: "failed-attempt" };
-          yield { type: "warning", message: "reconnecting" };
-          yield {
-            type: "usage",
-            usage: { ...emptyUsage(), input_tokens: 5, total_tokens: 5 },
-          };
-          yield {
-            type: "error",
-            message: "overloaded",
-            error_type: "transient_api_error",
-            retryable: true,
-          };
-          return;
-        }
-        yield { type: "text", text: "ok" };
+      openai: fake(async function* () {
+        yield { type: "text", text: "partial" };
+        yield {
+          type: "error",
+          message: "real failure",
+          error_type: "max_turns",
+        };
+        throw new TransientError("cleanup failure");
       }),
     },
   );
-  const result = await agent.run("retry");
-  assert.deepEqual(seen, [undefined, undefined]);
-  assert.equal(result.status, "success");
-  assert.equal(result.usage?.input_tokens, 5);
+  const result = await agent.run("limit");
+  assert.equal(result.final_text, "partial");
   assert.deepEqual(
-    result.events.map((env) => env.event.type),
-    [
-      "run_started",
-      "session_info",
-      "warning",
-      "usage",
-      "warning",
-      "text",
-      "run_finished",
-    ],
+    [result.error, result.error_type, result.ended_reason],
+    ["real failure", "max_turns", "max_turns"],
   );
-  assert.match(
-    result.events[4]?.event.type === "warning"
-      ? result.events[4].event.message
-      : "",
-    /retry 1\/1 .*overloaded/,
+  assert.equal(
+    result.events.filter((env) => env.event.type === "error").length,
+    1,
   );
 });
-test("retryable error events are emitted when retries are exhausted or progress occurred", async () => {
-  for (const progress of [false, true]) {
-    let calls = 0;
-    const agent = new Agent(
-      { provider: "openai", maxRetries: progress ? 3 : 1, retryDelayMs: 0 },
-      {
-        openai: fake(async function* () {
-          calls++;
-          if (progress) yield { type: "thinking", text: "plan" };
-          yield {
-            type: "error",
-            message: "overloaded",
-            error_type: "transient_api_error",
-            retryable: true,
-          };
-        }),
-      },
-    );
-    const result = await agent.run("retry");
-    assert.equal(calls, progress ? 1 : 2);
-    assert.equal(result.status, "failure");
-    assert.deepEqual(result.events.at(-2)?.event, {
-      type: "error",
-      message: "overloaded",
-      error_type: "transient_api_error",
-      retryable: true,
-    });
-    assert.equal(
-      result.events.filter((env) => env.event.type === "error").length,
-      1,
-    );
-  }
-});
-test("signal-killed runtimes record the failure, then throw without retrying", async () => {
+test("signal-killed runtimes record the failure, then throw", async () => {
   let calls = 0;
   const agent = new Agent(
-    { provider: "openai", maxRetries: 5 },
+    { provider: "openai" },
     {
       // biome-ignore lint/correctness/useYield: model a runtime killed before its first frame
       openai: fake(async function* () {
@@ -482,7 +356,6 @@ test("signal-killed runtimes record the failure, then throw without retrying", a
     type: "error",
     message: "SIGTERM",
     error_type: "process_terminated",
-    retryable: false,
   });
   const finished = seen[2]?.event;
   assert.equal(finished?.type === "run_finished" && finished.status, "failure");
@@ -503,23 +376,6 @@ test("a runtime killed after the caller's abort is cancelled", async () => {
   );
   const result = await agent.run("abort");
   assert.equal(result.status, "cancelled");
-});
-test("aborted runs finish cancelled, including cancellation during backoff", async () => {
-  const controller = new AbortController();
-  const agent = new Agent(
-    { provider: "openai", signal: controller.signal, maxRetries: 2 },
-    {
-      // biome-ignore lint/correctness/useYield: model an async stream failing before its first frame
-      openai: fake(async function* () {
-        throw new TransientError("retry");
-      }),
-    },
-  );
-  const result = await collectRun(agent.stream("abort"), (envelope) => {
-    if (envelope.event.type === "warning") controller.abort();
-  });
-  assert.equal(result.status, "cancelled");
-  assert.equal(result.ended_reason, "cancelled");
 });
 test("a native failure after the caller's abort is cancelled once", async () => {
   const controller = new AbortController();
@@ -664,30 +520,29 @@ test("only real signal names mark a runtime as terminated", () => {
     ) instanceof ProcessTerminatedError,
   );
 });
-test("a later error shows a held retryable error and prevents a retry", async () => {
-  let calls = 0;
+test("the first error sets the result error; later errors are kept", async () => {
   const agent = new Agent(
-    { provider: "openai", maxRetries: 2, retryDelayMs: 0 },
+    { provider: "openai" },
     {
       openai: fake(async function* () {
-        calls++;
         yield {
           type: "error",
           message: "busy",
           error_type: "transient_api_error",
-          retryable: true,
         };
         yield {
           type: "error",
           message: "denied",
           error_type: "permission_denied",
-          retryable: false,
         };
       }),
     },
   );
-  const run = await agent.run("held");
-  assert.equal(calls, 1);
+  const run = await agent.run("errors");
+  assert.deepEqual(
+    [run.error, run.error_type],
+    ["busy", "transient_api_error"],
+  );
   assert.deepEqual(
     run.events
       .map((env) => env.event)
@@ -695,27 +550,6 @@ test("a later error shows a held retryable error and prevents a retry", async ()
       .map((event) => event.error_type),
     ["transient_api_error", "permission_denied"],
   );
-});
-test("a resumed session is not retried once it has started", async () => {
-  let calls = 0;
-  const agent = new Agent(
-    { provider: "openai", maxRetries: 2, retryDelayMs: 0, sessionId: "orig" },
-    {
-      openai: fake(async function* () {
-        calls++;
-        yield { type: "session_info", id: "orig" };
-        yield {
-          type: "error",
-          message: "overloaded",
-          error_type: "transient_api_error",
-          retryable: true,
-        };
-      }),
-    },
-  );
-  const run = await agent.run("resume");
-  assert.equal(calls, 1);
-  assert.equal(run.error, "overloaded");
 });
 test("any upper-case signal name marks a runtime as terminated", () => {
   assert.ok(
@@ -742,16 +576,15 @@ test("high demand, 408 and 409 are transient; exit codes 130/137/143 are kills",
       ProcessTerminatedError,
   );
 });
-test("a kill after a held retryable error keeps the held error", async () => {
+test("a kill after a provider error records both", async () => {
   const agent = new Agent(
-    { provider: "openai", maxRetries: 2, retryDelayMs: 0 },
+    { provider: "openai" },
     {
       openai: fake(async function* () {
         yield {
           type: "error",
           message: "overloaded",
           error_type: "transient_api_error",
-          retryable: true,
         };
         throw new ProcessTerminatedError("killed by SIGKILL");
       }),
@@ -784,29 +617,4 @@ test("a mid-stream ConfigError is recorded and finishes the run before it throws
     ConfigError,
   );
   assert.deepEqual(types.slice(-2), ["error", "run_finished"]);
-});
-test("an abort while a retryable error is held is a cancelled run", async () => {
-  const controller = new AbortController();
-  const agent = new Agent(
-    {
-      provider: "openai",
-      maxRetries: 1,
-      retryDelayMs: 0,
-      signal: controller.signal,
-    },
-    {
-      openai: fake(async function* () {
-        yield {
-          type: "error",
-          message: "overloaded",
-          error_type: "transient_api_error",
-          retryable: true,
-        };
-        controller.abort();
-      }),
-    },
-  );
-  const run = await agent.run("abort");
-  assert.equal(run.status, "cancelled");
-  assert.ok(run.events.some((env) => env.event.type === "warning"));
 });

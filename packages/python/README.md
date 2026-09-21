@@ -46,26 +46,24 @@ Constructor keywords are defaults; `run()` and `stream()` accept per-call overri
 | `tools`, `mcp_servers`, `subagents` | Callable tools, external MCP and subagents |
 | `output_schema` | Validated structured output |
 | `session_id`, `continue_session` | Explicit resume or automatic continuation |
-| `max_retries`, `timeout`, `max_turns` | Wrapper retries (default 0), provider-wait deadline and action limit |
+| `timeout`, `max_turns` | Provider-wait deadline and turn limit |
 | `cli_login`, `setting_sources` | Stored-login policy; Claude on-disk settings (default none) |
 | `provider_options`, `extra_options` | Provider-specific settings; unsupported combinations fail |
 
 `run()` and `stream()` raise `ConfigError` for invalid settings before any event.
 Other failures produce failed results; check `result.status`, or use
 `raise_on_error=True` for `RunFailedError`. Signal-killed runtimes are recorded,
-then raise `ProcessTerminatedError`. With `max_retries`, a run retries, with jittered
-exponential backoff capped at 8 s, only for transient errors and retryable error events, only before its first progress
-event (text, thinking, tools, subagents, structured output, compaction, agent
-changes), and never once a resumed session has started. The runtimes already retry
-API errors, and these retries repeat theirs ([limits](../typescript/PARITY.md#shared-limits)). `timeout` is a deadline from
+then raise `ProcessTerminatedError`. Runs are never retried; the runtimes retry API
+errors themselves ([limits](../typescript/PARITY.md#shared-limits)). `timeout` is a deadline from
 the start of the run: consumer code is never cancelled, but the next provider wait
 after it fails with `timeout`. Concurrent runs on one Agent are allowed; with
 `continue_session` the Agent keeps the last session a run reported. `check_runtime()`
 validates settings, runtime and credentials. `run_sync()` works outside an event loop.
 
-`result.final_text` is the last assistant message. `Error.error_type` uses the
-[shared vocabulary](../typescript/PARITY.md#error-types); only
-`transient_api_error` is retryable.
+`result.final_text` is the last assistant message. `result.error_type` is the first
+error's type, from the [shared vocabulary](../typescript/PARITY.md#error-types).
+`transient_api_error` marks a failure worth running again; see
+[retrying](../typescript/PARITY.md#retrying) for what a re-run repeats.
 
 | Capability | Claude | Codex |
 |---|---|---|
@@ -100,7 +98,7 @@ See [examples](examples/) and [API differences](../typescript/PARITY.md).
 - `on_provider_event`: native envelopes; `.raw` is the SDK object, `.message` is serialized.
 - `trace_file`: normalized JSONL.
 - `artifacts_dir`: trace, result, manifest and native-event files. Native-event lines
-  carry `run_id` and `attempt`; each run replaces the file.
+  carry `run_id`; each run replaces the file.
 
 From the repository root, run `npm run trace-viewer -- packages/python/results`.
 Open the printed URL and select a trace.

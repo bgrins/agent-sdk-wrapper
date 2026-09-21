@@ -102,7 +102,7 @@ _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
     "system_prompt": lambda req: req.system_prompt is not None,
 }
 
-# Statuses below 500 that are retryable; every 5xx is too.
+# Transient statuses below 500; every 5xx is transient too.
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 _STATUS_ERRORS = {
     400: "invalid_request",
@@ -443,7 +443,6 @@ class AnthropicProvider(ProviderAdapter):
             req.artifacts_dir,
             req.on_provider_event,
             run_id=req.run_id,
-            attempt=req.attempt,
         )
 
         try:
@@ -797,7 +796,6 @@ def _result_error(
     return Error(
         message=detail or "run reported an error",
         error_type=error_type,
-        retryable=error_type == "transient_api_error",
     )
 
 

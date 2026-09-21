@@ -210,12 +210,11 @@
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "message", "retryable"],
+      "required": ["type", "message"],
       "properties": {
         "type": { "const": "error" },
         "message": { "type": "string" },
         "error_type": { "type": "string" },
-        "retryable": { "type": "boolean" },
         "raw": { "$ref": "#/$defs/json_object" }
       }
     },

@@ -129,7 +129,6 @@ export function classify(
     type: "error",
     message,
     error_type: errorType,
-    retryable: errorType === "transient_api_error",
   };
 }
 export function nativeError(cause: unknown): AgentSdkWrapperError {
@@ -157,7 +156,7 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
     "provider_exception",
     typeof data?.status === "number" ? data.status : undefined,
   );
-  return error.retryable
+  return error.error_type === "transient_api_error"
     ? new TransientError(message, { cause })
     : new ProviderError(message, error.error_type, { cause });
 }
