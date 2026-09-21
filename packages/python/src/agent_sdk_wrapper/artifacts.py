@@ -8,7 +8,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import shutil
 import uuid
 from collections.abc import Callable
 from enum import Enum
@@ -93,12 +92,6 @@ def manifest_file_for(artifacts_dir: Path) -> Path:
     return artifacts_dir / "manifest.json"
 
 
-def sdk_dir_for(artifacts_dir: str | Path) -> Path:
-    path = Path(artifacts_dir) / "sdk"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def provider_events_file_for(artifacts_dir: str | Path) -> Path:
     path = Path(artifacts_dir)
     path.mkdir(parents=True, exist_ok=True)
@@ -155,11 +148,6 @@ def clear_stale_artifacts(artifacts_dir: Path) -> None:
     """Remove files from a previous run that the new run would not overwrite first."""
     result_file_for(artifacts_dir).unlink(missing_ok=True)
     provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
-    sdk_dir = artifacts_dir / "sdk"
-    if sdk_dir.is_dir() and not sdk_dir.is_symlink():
-        shutil.rmtree(sdk_dir)
-    else:
-        sdk_dir.unlink(missing_ok=True)
 
 
 def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
@@ -168,14 +156,6 @@ def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
     provider_events = artifacts_dir / "provider-events.jsonl"
     if provider_events.exists():
         files["provider_events"] = provider_events
-
-    sdk_dir = artifacts_dir / "sdk"
-    if not sdk_dir.exists():
-        return files
-    for path in sorted(sdk_dir.rglob("*")):
-        if path.is_file():
-            rel = path.relative_to(artifacts_dir).as_posix()
-            files[rel.replace("/", ".")] = path
     return files
 
 

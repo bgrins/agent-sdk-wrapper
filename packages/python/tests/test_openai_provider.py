@@ -31,12 +31,10 @@ from agent_sdk_wrapper import (
 from agent_sdk_wrapper.providers.openai_provider import (
     OpenAIProvider,
     _codex_config,
-    _codex_env,
     _codex_output_schema,
     _runtime_config,
     _stream_turn,
     _validate_supported,
-    _write_sdk_debug_log,
 )
 
 
@@ -119,9 +117,9 @@ def test_codex_options_default_to_auto_reasoning_summary():
 
 
 def test_codex_options_pass_native_effort_through():
-    req = RunRequest(provider="openai", prompt="ignored")
+    req = RunRequest(provider="openai", prompt="ignored", effort="max")
 
-    _, turn_options = OpenAIProvider(effort="max")._build_options(req, None, None)
+    _, turn_options = OpenAIProvider()._build_options(req, None, None)
 
     assert turn_options["effort"] == "max"
 
@@ -161,14 +159,6 @@ def test_codex_sandbox_is_a_thread_mode_not_a_turn_policy():
 
     assert thread_options["sandbox"] is Sandbox.workspace_write
     assert "sandbox" not in turn_options
-
-
-def test_codex_options_allow_summary_constructor_override():
-    req = RunRequest(provider="openai", prompt="ignored")
-
-    _, turn_options = OpenAIProvider(summary="none")._build_options(req, None, None)
-
-    assert turn_options["summary"] == "none"
 
 
 def test_codex_options_allow_turn_summary_override_and_disable():
@@ -278,7 +268,6 @@ async def test_codex_stream_writes_provider_events_sidecar(tmp_path):
     assert lines[0]["message"]["method"] == "item/agentMessage/delta"
     assert lines[0]["message"]["payload"]["delta"] == "hello"
     assert [event.to_dict() for event in provider_events] == lines
-    assert not (tmp_path / "sdk").exists()
 
 
 @pytest.mark.asyncio
@@ -794,14 +783,13 @@ def _options_request(**kwargs: Any) -> RunRequest:
         ({"thread_options": {"include_turns": True}}, {}, "thread_start options: include_turns"),
         ({"turn_options": {"output_format": "json"}}, {}, "turn options: output_format"),
         ({}, {"extra_options": {"thread": {}}}, "extra_options keys: thread"),
-        ({"ephemeral": True}, {"session_id": "t"}, "ephemeral"),
-        ({"ephemeral": True}, {"continue_session": True}, "ephemeral"),
+        ({"thread_options": {"ephemeral": True}}, {"session_id": "t"}, "ephemeral"),
+        ({"thread_options": {"ephemeral": True}}, {"continue_session": True}, "ephemeral"),
         (
             {},
             {"continue_session": True, "extra_options": {"thread_options": {"ephemeral": True}}},
             "ephemeral",
         ),
-        ({"ephemeral": True, "thread_id": "t"}, {}, "ephemeral"),
         ({"codex": object()}, {"web_tools": False}, "launch Codex"),
         ({"sandbox": "workspace"}, {}, "invalid Sandbox value"),
         ({"approval_mode": "sometimes"}, {}, "invalid ApprovalMode value"),
@@ -827,8 +815,8 @@ def test_codex_accepts_sdk_native_options():
     from openai_codex import ApprovalMode, Sandbox
 
     provider = OpenAIProvider(
-        ephemeral=False,
         thread_options={
+            "ephemeral": False,
             "base_instructions": "Be brief.",
             "service_tier": "flex",
             "sandbox": "workspace-write",
@@ -959,37 +947,6 @@ def test_codex_filters_reject_unknown_unqualified_tool_when_all_tools_known():
 
     with pytest.raises(ConfigError, match="non-wrapper tools: write_file"):
         _validate_supported(req)
-
-
-def test_write_sdk_debug_log(tmp_path):
-    class SyncClient:
-        def _stderr_tail(self, *, limit: int = 400) -> str:
-            return f"tail:{limit}"
-
-    codex = SimpleNamespace(_client=SimpleNamespace(_sync=SyncClient()))
-
-    path = _write_sdk_debug_log(codex, tmp_path, debug=True)
-
-    assert path == tmp_path / "sdk" / "openai-codex.debug.log"
-    assert "tail:400" in path.read_text()
-
-
-def test_write_sdk_debug_log_skips_without_debug(tmp_path):
-    codex = SimpleNamespace()
-
-    path = _write_sdk_debug_log(codex, tmp_path)
-
-    assert path is None
-    assert not (tmp_path / "sdk").exists()
-
-
-def test_codex_env_sets_debug_only_when_enabled():
-    assert _codex_env({}) == {}
-
-    env = _codex_env({"RUST_LOG": "info"}, debug=True)
-
-    assert env["RUST_LOG"] == "info"
-    assert env["RUST_BACKTRACE"] == "1"
 
 
 def test_codex_config_uses_path_codex_when_sdk_bin_missing(monkeypatch):

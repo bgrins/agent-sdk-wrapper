@@ -25,7 +25,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
-from ..artifacts import ProviderEventLogger, sdk_dir_for
+from ..artifacts import ProviderEventLogger
 from ..classify import TRANSIENT, classify
 from ..errors import (
     AgentSdkWrapperError,
@@ -101,36 +101,18 @@ class OpenAIProvider(ProviderAdapter):
         api_key: str | None = None,
         config: Any = None,
         codex: Any = None,
-        thread_id: str | None = None,
         approval_mode: Any = None,
         sandbox: Any = None,
         model_provider: str | None = None,
-        effort: Any = None,
-        summary: Any = None,
-        personality: Any = None,
-        service_tier: str | None = None,
-        ephemeral: bool | None = None,
-        debug: bool = False,
         thread_options: dict[str, Any] | None = None,
         turn_options: dict[str, Any] | None = None,
     ) -> None:
         self._api_key = api_key
         self._config = config
         self._codex = codex
-        self._thread_id = thread_id
         self._approval_mode = approval_mode
         self._sandbox = sandbox
         self._model_provider = model_provider
-        self._effort = (
-            normalize_effort_for_provider("openai", effort)
-            if isinstance(effort, str) or effort is None
-            else effort
-        )
-        self._summary = _DEFAULT_REASONING_SUMMARY if summary is None else summary
-        self._personality = personality
-        self._service_tier = service_tier
-        self._ephemeral = ephemeral
-        self._debug = debug
         self._thread_options = dict(thread_options or {})
         self._turn_options = dict(turn_options or {})
 
@@ -302,8 +284,6 @@ class OpenAIProvider(ProviderAdapter):
             if is_retryable_error(exc) or _looks_transient(exc):
                 raise TransientError(str(exc), cause=exc) from exc
             raise AgentSdkWrapperError(f"{type(exc).__name__}: {exc}", cause=exc) from exc
-        finally:
-            _write_sdk_debug_log(codex, req.artifacts_dir, debug=self._debug)
 
     async def _run(
         self, codex: Any, req: RunRequest, api_key: str | None
@@ -324,9 +304,8 @@ class OpenAIProvider(ProviderAdapter):
         sandbox = _enum_value(Sandbox, self._sandbox)
         thread_kwargs, turn_kwargs = self._build_options(req, approval_mode, sandbox)
 
-        thread_id = req.session_id or self._thread_id
-        if thread_id:
-            thread = await codex.thread_resume(thread_id, **thread_kwargs)
+        if req.session_id:
+            thread = await codex.thread_resume(req.session_id, **thread_kwargs)
         else:
             thread = await codex.thread_start(**thread_kwargs)
         yield SessionInfo(id=thread.id, model=await _thread_model(thread))
@@ -363,9 +342,7 @@ class OpenAIProvider(ProviderAdapter):
             removed += [name for name in _API_KEY_ENVS if name not in kept]
         for name in removed:
             env[name] = ""
-        config = _codex_config(
-            self._config, env, debug=self._debug, config_overrides=config_overrides
-        )
+        config = _codex_config(self._config, env, config_overrides=config_overrides)
         async with AsyncCodex(config=config) as codex:
             yield codex
 
@@ -390,10 +367,8 @@ class OpenAIProvider(ProviderAdapter):
 
     def _validate_native_options(self, req: RunRequest) -> None:
         thread_options, turn_options = self._native_options(req)
-        resuming = bool(req.session_id or self._thread_id)
-        if thread_options.get("ephemeral", self._ephemeral) and (
-            resuming or req.continue_session
-        ):
+        resuming = bool(req.session_id)
+        if thread_options.get("ephemeral") and (resuming or req.continue_session):
             raise ConfigError(
                 "ephemeral Codex threads cannot be resumed: each run starts a new "
                 "app-server, so session_id and continue_session would not find the thread"
@@ -421,22 +396,17 @@ class OpenAIProvider(ProviderAdapter):
         thread_options.setdefault("developer_instructions", req.system_prompt)
         thread_options.setdefault("approval_mode", approval_mode)
         thread_options.setdefault("sandbox", sandbox)
-        thread_options.setdefault("personality", self._personality)
-        thread_options.setdefault("service_tier", self._service_tier)
-        if req.session_id or self._thread_id:
+        if req.session_id:
             thread_options.pop("ephemeral", None)
-        else:
-            thread_options.setdefault("ephemeral", self._ephemeral)
 
         turn_options.setdefault("model", req.model)
         turn_options.setdefault("cwd", _as_str(req.cwd))
         turn_options.setdefault("approval_mode", approval_mode)
         # No turn sandbox: the SDK sends it as a full policy with default writable roots
         # and network access, overriding sandbox_workspace_write from config.
-        turn_options.setdefault("effort", req_effort or self._effort)
-        turn_options.setdefault("summary", self._summary)
-        turn_options.setdefault("personality", self._personality)
-        turn_options.setdefault("service_tier", self._service_tier)
+        turn_options.setdefault("effort", req_effort)
+        # Codex omits reasoning text without a summary mode.
+        turn_options.setdefault("summary", _DEFAULT_REASONING_SUMMARY)
         if req.output_schema is not None:
             turn_options.setdefault("output_schema", _codex_output_schema(req.output_schema))
 
@@ -1527,10 +1497,8 @@ def _codex_config(
     config: Any,
     env: dict[str, str],
     *,
-    debug: bool = False,
     config_overrides: tuple[str, ...] = (),
 ):
-    env = _codex_env(env, debug=debug)
     codex_bin = _path_codex_bin_when_sdk_bin_missing()
     if config is None and not env and codex_bin is None and not config_overrides:
         return None
@@ -1873,37 +1841,6 @@ def _account_problem(response: Any, cli_login: str) -> str | None:
     )
 
 
-def _codex_env(env: dict[str, str], *, debug: bool = False) -> dict[str, str]:
-    merged = dict(env)
-    if debug:
-        merged.setdefault("RUST_LOG", "debug")
-        merged.setdefault("RUST_BACKTRACE", "1")
-    return merged
-
-
-def _write_sdk_debug_log(
-    codex: Any,
-    artifacts_dir: str | Path | None,
-    *,
-    debug: bool = False,
-) -> Path | None:
-    if artifacts_dir is None or not debug:
-        return None
-    path = sdk_dir_for(artifacts_dir) / "openai-codex.debug.log"
-    lines = [
-        "# OpenAI Codex SDK debug log",
-        "# Captured from the SDK-managed Codex runtime stderr buffer.",
-        "",
-    ]
-    tail = _codex_stderr_tail(codex)
-    if tail:
-        lines.append(tail)
-    else:
-        lines.append("No SDK/runtime stderr output was captured.")
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return path
-
-
 def _codex_process(codex: Any) -> Any:
     return getattr(getattr(getattr(codex, "_client", None), "_sync", None), "_proc", None)
 
@@ -1933,13 +1870,6 @@ async def _raise_if_signaled(process: Any, exc: BaseException) -> None:
     raise ProcessTerminatedError(
         number, message=f"Codex app-server was killed by signal {name}: {exc}", cause=exc
     ) from exc
-
-
-def _codex_stderr_tail(codex: Any) -> str | None:
-    client = getattr(codex, "_client", None)
-    sync_client = getattr(client, "_sync", None)
-    stderr_tail = getattr(sync_client, "_stderr_tail", None)
-    return stderr_tail(limit=400) if callable(stderr_tail) else None
 
 
 def _enum_value(enum_type: Any, value: Any) -> Any:

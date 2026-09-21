@@ -1300,30 +1300,10 @@
       "live": { "expect": { "status": "success", "on_event": true } }
     },
     {
-      "id": "codex.thread_id",
-      "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript resumes Codex threads only through sessionId" },
-      "options": { "model": "gpt-5.4" },
-      "prompt": "Remember the token ALPHA42. Reply READY.",
-      "mock": [{ "text": "READY" }, { "text": "ALPHA42" }],
-      "expect": { "status": "success" },
-      "runs": [
-        {
-          "agent": "new",
-          "options": { "provider_options": { "thread_id": "{session_id}" } },
-          "prompt": "What token?",
-          "expect": {
-            "same_session": true,
-            "requests": { "match": [{ "request": 0, "path": "input", "contains": "Remember the token ALPHA42." }] }
-          }
-        }
-      ]
-    },
-    {
       "id": "codex.ephemeral_resume",
       "provider": "codex",
       "languages": { "typescript": "unsupported: TypeScript has no ephemeral Codex threads" },
-      "options": { "model": "gpt-5.4", "continue_session": true, "provider_options": { "ephemeral": true } },
+      "options": { "model": "gpt-5.4", "continue_session": true, "provider_options": { "thread_options": { "ephemeral": true } } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
     },
@@ -1478,14 +1458,14 @@
     {
       "id": "codex.artifacts_dir",
       "provider": "codex",
-      "languages": { "typescript": { "options": { "model": "gpt-5.4", "artifacts_dir": "artifacts" }, "expect": { "config_error": true }, "reason": "TypeScript has no artifacts bundle or Codex debug log" } },
-      "options": { "model": "gpt-5.4", "artifacts_dir": "artifacts", "provider_options": { "debug": true } },
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript has no artifacts bundle" } },
+      "options": { "model": "gpt-5.4", "artifacts_dir": "artifacts" },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": {
         "status": "success",
         "trace_file": true,
-        "artifacts": ["trace.jsonl", "result.json", "manifest.json", "provider-events.jsonl", "sdk/openai-codex.debug.log"]
+        "artifacts": ["trace.jsonl", "result.json", "manifest.json", "provider-events.jsonl"]
       }
     },
     {
@@ -1553,41 +1533,6 @@
         "requests": { "match": [{ "header": "authorization", "equals": "Bearer sk-invalid-conformance" }] }
       },
       "live": { "expect": { "status": "failure", "error_type": "authentication_failed" } }
-    },
-    {
-      "id": "codex.provider_effort_and_summary",
-      "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript sets Codex effort only through effort and always requests the auto reasoning summary" },
-      "options": { "model": "gpt-5.4", "provider_options": { "effort": "high", "summary": "detailed" } },
-      "prompt": "Say ok.",
-      "mock": [{ "text": "ok" }],
-      "expect": {
-        "status": "success",
-        "requests": {
-          "match": [
-            { "path": "reasoning.effort", "equals": "high" },
-            { "path": "reasoning.summary", "equals": "detailed" }
-          ]
-        }
-      }
-    },
-    {
-      "id": "codex.personality",
-      "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no Codex personality option" },
-      "options": { "model": "gpt-5.4", "provider_options": { "personality": "friendly" } },
-      "prompt": "Say ok.",
-      "mock": [{ "text": "ok" }],
-      "expect": { "status": "success", "requests": { "match": [{ "path": "instructions", "contains": "supportive teammate" }] } }
-    },
-    {
-      "id": "codex.service_tier",
-      "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no Codex service tier option" },
-      "options": { "model": "gpt-5.4", "provider_options": { "service_tier": "fast" } },
-      "prompt": "Say ok.",
-      "mock": [{ "text": "ok" }],
-      "expect": { "status": "success", "requests": { "match": [{ "path": "service_tier", "equals": "priority" }] } }
     },
     {
       "id": "codex.sandbox_and_approval_mode",

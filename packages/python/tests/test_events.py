@@ -459,7 +459,6 @@ def test_artifacts_dir_writes_trace_manifest_and_result(monkeypatch, tmp_path):
         "method": "fake/raw",
         "payload": {"text": "artifacted"},
     }
-    assert not (artifacts_dir / "sdk").exists()
     saved_result = json.loads(result_file.read_text())
     assert saved_result["final_text"] == "artifacted"
     assert saved_result["ended_reason"] == "success"
@@ -1180,24 +1179,6 @@ def test_artifacts_run_start_drops_previous_result(monkeypatch, tmp_path):
     assert at_start["result_exists"] is False
     assert at_start["manifest"] == (at_start["run_id"], "running")
     assert at_start["trace_run_ids"] == {at_start["run_id"]}
-
-
-def test_artifacts_run_start_drops_previous_sdk_files(monkeypatch, tmp_path):
-    from agent_sdk_wrapper.artifacts import sdk_dir_for
-
-    async def writes_a_debug_log(req):
-        (sdk_dir_for(req.artifacts_dir) / "debug.log").write_text("first run")
-        yield Text(text="ok")
-
-    artifacts_dir = tmp_path / "artifacts"
-    install_fake_providers(monkeypatch, events=writes_a_debug_log)
-    Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("first")
-    install_fake_providers(monkeypatch, events=[Text(text="ok")])
-    Agent(provider="openai", artifacts_dir=artifacts_dir).run_sync("second")
-
-    manifest = json.loads((artifacts_dir / "manifest.json").read_text())
-    assert "sdk.debug.log" not in manifest["files"]
-    assert not (artifacts_dir / "sdk").exists()
 
 
 def test_manifest_records_the_outcome_and_reported_model(monkeypatch, tmp_path):
