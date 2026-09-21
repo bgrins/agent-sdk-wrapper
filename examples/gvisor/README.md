@@ -11,8 +11,9 @@ Bash → gVisor worker → mounted output → trace viewer
 
 ## Run
 
-Requires Bash and Linux Docker with Compose. Install `curl`, `bzip2` and gVisor
-on the Docker host: `bash examples/gvisor/infra/install-runsc.sh`.
+Requires Bash, Perl and Linux Docker with Compose; the launcher filters worker
+output with Perl. Install `curl`, `bzip2` and gVisor on the Docker host:
+`bash examples/gvisor/infra/install-runsc.sh`.
 
 From the repository root, with API keys exported:
 
@@ -55,8 +56,13 @@ They write files to `/job/output` and results to stdout as ASCII JSON lines; the
 launcher drops other bytes. A session lasts one job: cleanup deletes its state,
 so a later job cannot resume it. Cloud deployment is not included.
 
+`test.sh` builds only its test images. Compose never pulls the worker images
+(`pull_policy: never`), so run `build.sh` first and again after changing a worker
+or an SDK package.
+
 ```sh
-bash examples/gvisor/scripts/test.sh  # offline; builds test images; requires Node
+bash examples/gvisor/scripts/build.sh
+bash examples/gvisor/scripts/test.sh  # offline; requires Node and uv
 # Run from the checkout whose results/gvisor-output the VM mounts (see macOS setup).
 AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 \
   bash examples/gvisor/scripts/test.sh --live
