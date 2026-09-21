@@ -62,6 +62,7 @@ interface LaterRun {
 interface Setup {
   files?: Record<string, string>;
   codex_login?: "chatgpt" | "api_key";
+  codex_provider?: "builtin";
 }
 export interface Case {
   id: string;
@@ -401,9 +402,10 @@ function isolatedEnv(root: string, mode: Mode): Record<string, string> {
   return env;
 }
 
-const codexProvider = (url: string) =>
+/** The mock as a Codex provider with retries off, selected unless the case keeps the built-in one. */
+const codexProvider = (url: string, select: boolean) =>
   [
-    'model_provider = "mock"',
+    ...(select ? ['model_provider = "mock"'] : []),
     "[model_providers.mock]",
     'name = "mock"',
     `base_url = "${url}"`,
@@ -497,7 +499,7 @@ export async function runCase(plan: Plan, mode: Mode): Promise<Outcome[]> {
       if (mock)
         await writeFile(
           join(root, "codex_home", "config.toml"),
-          codexProvider(mock.url),
+          codexProvider(mock.url, plan.setup.codex_provider !== "builtin"),
         );
     }
     const first = plan.turns[0]?.agent ?? {};
@@ -605,7 +607,8 @@ export async function runCase(plan: Plan, mode: Mode): Promise<Outcome[]> {
     return outcomes;
   } finally {
     await mock?.close();
-    await rm(root, { recursive: true, force: true });
+    // A cancelled Claude CLI can still be exiting, and writing, when its run returns.
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   }
 }
 
@@ -780,7 +783,7 @@ const fields = {
     "languages",
     "live",
   ],
-  setup: ["files", "codex_login"],
+  setup: ["files", "codex_login", "codex_provider"],
   step: [
     "text",
     "thinking",
