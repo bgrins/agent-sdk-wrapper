@@ -21,13 +21,11 @@ from .events import _jsonable
 
 ANTHROPIC_TOOL_SERVER = "agent_sdk_wrapper_tools"
 CODEX_TOOL_SERVER = "agent_sdk_wrapper_tools"
-TOOL_DESCRIPTION_ATTR = "__agent_sdk_wrapper_tool_description__"
-TOOL_NAME_ATTR = "__agent_sdk_wrapper_tool_name__"
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def tool_name(fn: Callable[..., Any]) -> str:
-    return getattr(fn, TOOL_NAME_ATTR, None) or getattr(fn, "__name__", "tool")
+    return getattr(fn, "__name__", "tool")
 
 
 def validate_tool_names(callables: list[Callable[..., Any]]) -> None:
@@ -46,9 +44,6 @@ def validate_tool_names(callables: list[Callable[..., Any]]) -> None:
 
 
 def tool_description(fn: Callable[..., Any]) -> str:
-    override = getattr(fn, TOOL_DESCRIPTION_ATTR, None)
-    if override:
-        return override
     doc = inspect.getdoc(fn) or ""
     first = doc.strip().split("\n\n", 1)[0].strip()
     return first or tool_name(fn)

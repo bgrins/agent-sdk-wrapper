@@ -10,8 +10,6 @@ from pydantic import BaseModel
 
 from agent_sdk_wrapper import ConfigError
 from agent_sdk_wrapper.tools import (
-    TOOL_DESCRIPTION_ATTR,
-    TOOL_NAME_ATTR,
     json_schema_for,
     tool_description,
     tool_name,
@@ -32,23 +30,12 @@ def test_tool_metadata():
     assert tool_description(add) == "Add two numbers."
 
 
-def test_tool_metadata_overrides():
-    def fn() -> str:
-        return "ok"
-
-    setattr(fn, TOOL_NAME_ATTR, "custom_name")
-    setattr(fn, TOOL_DESCRIPTION_ATTR, "Custom description.")
-
-    assert tool_name(fn) == "custom_name"
-    assert tool_description(fn) == "Custom description."
-
-
 def test_tool_names_must_be_valid_and_unique():
     def first() -> None: ...
 
     def other() -> None: ...
 
-    setattr(other, TOOL_NAME_ATTR, "first")
+    other.__name__ = "first"
     with pytest.raises(ConfigError, match="duplicate tool name 'first'"):
         validate_tool_names([first, other])
     with pytest.raises(ConfigError, match="<lambda>"):

@@ -38,7 +38,6 @@ from agent_sdk_wrapper.providers.openai_provider import (
     _validate_supported,
     _write_sdk_debug_log,
 )
-from agent_sdk_wrapper.tools import TOOL_NAME_ATTR
 
 
 class Answer(BaseModel):
@@ -612,7 +611,7 @@ def _source_fallback_candidates():
         return value
 
     identity = lambda value: value  # noqa: E731
-    setattr(identity, TOOL_NAME_ATTR, "identity")
+    identity.__name__ = "identity"
 
     return {
         "module-level names MODULE_OFFSET": uses_global,
