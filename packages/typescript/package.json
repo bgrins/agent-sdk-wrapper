@@ -29,7 +29,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
-    "test:integration": "tsc -p tsconfig.test.json && node --test .test-dist/test/live.integration.js",
+    "test:integration": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.integration.js",
     "test:package": "npm run build && node scripts/check-package.mjs",
     "lint": "biome lint src test examples fixtures scripts",
     "format:check": "biome format src test examples fixtures scripts *.json",
