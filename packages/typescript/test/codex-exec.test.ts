@@ -200,11 +200,20 @@ test("a held Codex error notice is kept when the stream ends without turn.failed
     ["exit1", "failure"],
     ["hang", "cancelled"],
   ] as const) {
+    // The caller cancels once the runtime has sent its notice.
+    const controller = new AbortController();
     const { agent } = await fakeCodex(
       t,
       [...started, { type: "error", message: notice }],
       after,
-      after === "hang" ? { signal: AbortSignal.timeout(500) } : {},
+      after === "hang"
+        ? {
+            signal: controller.signal,
+            onProviderEvent: (event) => {
+              if ((event as ThreadEvent).type === "error") controller.abort();
+            },
+          }
+        : {},
     );
     const run = await agent.run("notice");
     assert.equal(run.status, status, after);
