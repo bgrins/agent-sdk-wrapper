@@ -239,6 +239,7 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
     status = RunStatus.SUCCESS
     ended_reason = RunEndedReason.SUCCESS
     error: str | None = None
+    error_type: str | None = None
     event_payloads: list[dict[str, Any]] = []
 
     for env in envelopes:
@@ -261,6 +262,7 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
                 reported_model = event.model
         elif isinstance(event, Error) and error is None:
             error = event.message
+            error_type = event.error_type
         elif isinstance(event, RunFinished):
             status = event.status
             ended_reason = event.ended_reason
@@ -276,6 +278,7 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
         "cost_usd": cost_usd,
         "session_id": session_id,
         "error": error if status != RunStatus.SUCCESS else None,
+        "error_type": error_type if status != RunStatus.SUCCESS else None,
         "events": event_payloads,
     }
 
@@ -294,6 +297,7 @@ def run_result_summary(result: RunResult) -> dict[str, Any]:
         "cost_usd": result.cost_usd,
         "session_id": result.session_id,
         "error": result.error,
+        "error_type": result.error_type,
         "events": [_stable_event_payload(env.event) for env in result.events],
     }
 

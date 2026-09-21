@@ -81,6 +81,22 @@ def test_replay_summary_uses_last_text_and_reported_model(monkeypatch, tmp_path)
     assert run_result_summary(result) == replay.expected
 
 
+def test_summaries_include_the_first_error_type(monkeypatch, tmp_path) -> None:
+    install_fake_providers(
+        monkeypatch,
+        events=[
+            Error(message="denied", error_type="permission_denied"),
+            Error(message="later", error_type="execution_error"),
+        ],
+    )
+    trace = tmp_path / "trace.jsonl"
+
+    result = Agent(provider="openai", trace_file=trace).run_sync("hi")
+
+    assert run_result_summary(result)["error_type"] == "permission_denied"
+    assert load_trace_replay(trace).expected["error_type"] == "permission_denied"
+
+
 @pytest.mark.parametrize(
     "trace_path",
     sorted(TRACE_FIXTURES.glob("*.trace.jsonl")),
