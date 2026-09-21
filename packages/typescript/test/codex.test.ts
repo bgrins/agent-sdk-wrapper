@@ -158,10 +158,23 @@ test("Codex maps final items once, tools and inclusive token totals", async () =
   assert.equal(threads[0]?.options.model, "gpt-test");
   assert.equal(threads[0]?.options.modelReasoningEffort, "high");
   assert.equal(threads[0]?.options.workingDirectory, "/tmp");
-  assert.deepEqual(clients[0]?.config, {
-    model_reasoning_summary: "auto",
-    cli_auth_credentials_store: "ephemeral",
+  assert.equal(clients[0]?.config?.model_reasoning_summary, "auto");
+});
+test("Codex cliLogin deny keeps logins and stored credentials out of the child", async () => {
+  const { agent, clients } = harness([completed], {
+    providerOptions: {
+      provider: "openai",
+      client: {
+        env: { OPENAI_API_KEY: "k", CODEX_ACCESS_TOKEN: "token", HOME: "/h" },
+      },
+    },
   });
+  await agent.run("deny");
+  assert.equal(clients[0]?.config?.cli_auth_credentials_store, "ephemeral");
+  assert.deepEqual(clients[0]?.config?.features, { shell_snapshot: false });
+  // The SDK passes apiKey to the child as CODEX_API_KEY.
+  assert.equal(clients[0]?.apiKey, "k");
+  assert.deepEqual(clients[0]?.env, { HOME: "/h" });
 });
 test("Codex completion-only file/MCP/search items get paired calls and results", async () => {
   const { agent } = harness([
@@ -454,7 +467,8 @@ test("Codex cliLogin require keeps API keys out of the child and skips the ephem
   await agent.run("login");
   assert.equal(clients[0]?.apiKey, undefined);
   assert.deepEqual(clients[0]?.env, { HOME: "/h" });
-  assert.deepEqual(clients[0]?.config, { model_reasoning_summary: "auto" });
+  assert.equal(clients[0]?.config?.cli_auth_credentials_store, undefined);
+  assert.deepEqual(clients[0]?.config?.features, { shell_snapshot: false });
 });
 test("Codex cliLogin require accepts only a stored ChatGPT login", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "codex-login-"));
@@ -482,16 +496,6 @@ test("Codex cliLogin require accepts only a stored ChatGPT login", async (t) => 
         error instanceof ProviderError &&
         error.errorType === "authentication_failed",
     );
-});
-test("Codex cliLogin deny keeps an access-token login out of the child", async () => {
-  const { agent, clients } = harness([completed], {
-    providerOptions: {
-      provider: "openai",
-      client: { apiKey: "k", env: { CODEX_ACCESS_TOKEN: "token", HOME: "/h" } },
-    },
-  });
-  await agent.run("deny");
-  assert.deepEqual(clients[0]?.env, { HOME: "/h" });
 });
 test("Codex web search calls wait for their query", async () => {
   const { agent } = harness([

@@ -103,8 +103,12 @@ export class CodexAdapter implements ProviderAdapter {
         ? req.providerOptions.client
         : undefined;
     const inherited = native?.env ?? process.env;
-    // deny: never read or write stored logins; require: keep API keys out of the child.
-    const removed = req.cliLogin === "require" ? apiKeyEnv : [loginTokenEnv];
+    // deny: never read or write stored logins, and pass the key only as the
+    // SDK's CODEX_API_KEY; require: keep API keys out of the child.
+    const removed =
+      req.cliLogin === "require"
+        ? apiKeyEnv
+        : [loginTokenEnv, "OPENAI_API_KEY"];
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(inherited))
       if (value !== undefined && !removed.includes(key)) env[key] = value;
@@ -117,6 +121,8 @@ export class CodexAdapter implements ProviderAdapter {
       env,
       config: {
         model_reasoning_summary: "auto",
+        // Shell snapshots write the child env, credentials included, to CODEX_HOME.
+        features: { shell_snapshot: false },
         ...(req.cliLogin !== "require"
           ? { cli_auth_credentials_store: "ephemeral" }
           : {}),
