@@ -596,6 +596,7 @@ def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeyp
         AssistantMessage,
         TaskNotificationMessage,
         TaskStartedMessage,
+        TaskUpdatedMessage,
         ToolResultBlock,
         ToolUseBlock,
         UserMessage,
@@ -620,6 +621,14 @@ def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeyp
         yield UserMessage(
             content=[ToolResultBlock(tool_use_id="tool-1", content="file body")]
         )
+        # The CLI reports the terminal status before the notification with the summary.
+        yield TaskUpdatedMessage(
+            subtype="task_updated",
+            data={},
+            task_id="task-1",
+            patch={"status": "completed"},
+            status="completed",
+        )
         yield TaskNotificationMessage(
             subtype="task_notification",
             data={},
@@ -630,6 +639,7 @@ def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeyp
             uuid="u2",
             session_id="sess-1",
         )
+        yield _result()
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
 
@@ -644,7 +654,7 @@ def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeyp
     events = asyncio.run(collect())
 
     started = next(e for e in events if isinstance(e, SubagentStarted))
-    ended = next(e for e in events if isinstance(e, SubagentEnded))
+    [ended] = [e for e in events if isinstance(e, SubagentEnded)]
     result = next(e for e in events if isinstance(e, ToolResult))
     assert (started.task_id, started.name, started.description) == (
         "task-1",
@@ -957,7 +967,7 @@ def test_anthropic_omits_subagent_scoped_messages(monkeypatch):
     assert [type(event) for event in events] == [WarningEvent, Text]
 
 
-def test_anthropic_subagents_pair_start_with_either_terminal_message(monkeypatch):
+def test_anthropic_subagents_without_a_notification_end_at_the_result(monkeypatch):
     from claude_agent_sdk import TaskStartedMessage, TaskUpdatedMessage
 
     from agent_sdk_wrapper.events import SubagentEnded, SubagentStarted
@@ -973,25 +983,23 @@ def test_anthropic_subagents_pair_start_with_either_terminal_message(monkeypatch
             task_type=task_type,
         )
 
+    def killed(task_id):
+        return TaskUpdatedMessage(
+            subtype="task_updated",
+            data={},
+            task_id=task_id,
+            patch={"status": "killed"},
+            status="killed",
+        )
+
+    # A stopped task may report only task_updated; shell tasks are not subagents.
     events, _ = _stream(
         monkeypatch,
         [
             started("shell", "local_bash"),
             started("agent", "local_agent"),
-            TaskUpdatedMessage(
-                subtype="task_updated",
-                data={},
-                task_id="shell",
-                patch={"status": "killed"},
-                status="killed",
-            ),
-            TaskUpdatedMessage(
-                subtype="task_updated",
-                data={},
-                task_id="agent",
-                patch={"status": "killed"},
-                status="killed",
-            ),
+            killed("shell"),
+            killed("agent"),
         ],
     )
     assert events == [

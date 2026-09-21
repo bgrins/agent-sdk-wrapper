@@ -394,7 +394,9 @@ class AnthropicProvider(ProviderAdapter):
         assistant_error: tuple[str | None, str] | None = None
         # Map tool_use_id to the tool name for result events.
         tool_names: dict[str, str] = {}
-        subagent_tasks: set[str] = set()
+        # Subagent task ids, with the terminal status task_updated reported. The CLI
+        # sends that before task_notification, which carries the summary.
+        subagent_tasks: dict[str, str | None] = {}
         provider_log = ProviderEventLogger(
             "anthropic",
             req.artifacts_dir,
@@ -457,7 +459,7 @@ class AnthropicProvider(ProviderAdapter):
                         elif isinstance(message, TaskStartedMessage):
                             subagent_type = message.data.get("subagent_type")
                             if message.task_type in _SUBAGENT_TASK_TYPES or subagent_type:
-                                subagent_tasks.add(message.task_id)
+                                subagent_tasks[message.task_id] = None
                                 yield SubagentStarted(
                                     task_id=message.task_id,
                                     name=subagent_type or message.task_type or "",
@@ -465,7 +467,7 @@ class AnthropicProvider(ProviderAdapter):
                                 )
                         elif isinstance(message, TaskNotificationMessage):
                             if message.task_id in subagent_tasks:
-                                subagent_tasks.discard(message.task_id)
+                                del subagent_tasks[message.task_id]
                                 yield SubagentEnded(
                                     task_id=message.task_id,
                                     status=message.status,
@@ -476,8 +478,7 @@ class AnthropicProvider(ProviderAdapter):
                                 message.status in TERMINAL_TASK_STATUSES
                                 and message.task_id in subagent_tasks
                             ):
-                                subagent_tasks.discard(message.task_id)
-                                yield SubagentEnded(task_id=message.task_id, status=message.status)
+                                subagent_tasks[message.task_id] = message.status
                         elif isinstance(message, SystemMessage):
                             data = message.data
                             if message.subtype == "model_refusal_fallback" and data.get(
@@ -507,6 +508,10 @@ class AnthropicProvider(ProviderAdapter):
                             if not seen_session and message.session_id:
                                 seen_session = True
                                 yield SessionInfo(id=message.session_id)
+                            # Tasks whose notification never arrived end with the run.
+                            for task_id, status in subagent_tasks.items():
+                                if status is not None:
+                                    yield SubagentEnded(task_id=task_id, status=status)
                             if message.model_usage or message.usage:
                                 usage = _usage_event(
                                     message.usage or {},
