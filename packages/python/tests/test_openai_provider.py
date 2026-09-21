@@ -1774,19 +1774,6 @@ def test_codex_custom_model_providers_skip_the_openai_key_gate(monkeypatch):
     assert by_override.check_credentials(req) is None
 
 
-def test_codex_quota_429s_are_not_transient():
-    from agent_sdk_wrapper.providers.openai_provider import _http_error_type
-
-    assert _http_error_type(429, "You exceeded your current quota") == "usage_limit_exceeded"
-    assert _http_error_type(429, "Rate limit reached") == "transient_api_error"
-
-
-def test_codex_409_is_transient_as_for_claude():
-    from agent_sdk_wrapper.providers.openai_provider import _http_error_type
-
-    assert _http_error_type(409, "conflict") == "transient_api_error"
-
-
 def test_codex_web_search_call_waits_for_its_query():
     started = SimpleNamespace(
         method="item/started",

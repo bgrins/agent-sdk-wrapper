@@ -63,7 +63,8 @@ export async function executable(path: string): Promise<void> {
     );
   }
 }
-// Status codes only count next to an HTTP marker, never as bare numbers.
+// Mirrors Python's agent_sdk_wrapper/classify.py; docs/fixtures/error-classification-v1.json
+// holds the cases both must agree on. Status codes only count next to an HTTP marker.
 const statusPatterns = [
   /\b(?:status(?: code)?|HTTP(?: status)?|API Error)\s*:?\s*(\d{3})\b/i,
   /\b(\d{3}) (?:Bad Request|Unauthorized|Payment Required|Forbidden|Not Found|Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b/i,
@@ -72,63 +73,59 @@ const statusPatterns = [
 const usageLimit =
   /\busage limits?\b|\bquota exceeded\b|\binsufficient_quota\b|\bexceeded your current quota\b|\bupgrade to (?:Plus|Pro)\b/i;
 const contextWindow =
-  /\bprompt is too long\b|\bcontext[_ ]length[_ ]exceeded\b|\bexceeds the context window\b|\bran out of room in the model.s context window\b|\bcontext window exceeded\b/i;
+  /\bprompt is too long\b|\bcontext[_ ]length[_ ]exceeded\b|\bcontext[ _-]?window\b|\bmaximum context length\b/i;
 const billing = /\bcredit balance\b|\bbilling\b/i;
-const transient =
-  /\brate[_ ]?limit|\boverloaded\b|\bhigh (?:demand|load)\b|\btemporarily unavailable\b|\bat capacity\b|\bserver (?:is )?busy\b|\bstream disconnected\b|\b(?:connection|request) timed out\b|\bconnection (?:refused|reset)\b|\bConnectionRefused\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b/i;
 const authentication =
-  /\bunauthorized\b|\bauthentication\b|\binvalid[_ ](?:x-)?api[_ -]?key\b|\bnot logged in\b|\bmissing api key\b/i;
-const permission = /\bforbidden\b|\bpermission denied\b/i;
-const invalidRequest = /\binvalid_request_error\b|\binvalid prompt\b/i;
+  /\bunauthorized\b|\bauthentication(?:_error)?\b|\binvalid[_ ](?:x-)?api[_ -]?key\b|\bincorrect api key\b|\bnot logged in\b|\bmissing api key\b/i;
+const permission = /\bforbidden\b|\bpermission denied\b|\bpermission_error\b/i;
+// "Model provider `x` not found" is a configuration error, not a missing model.
 const modelNotFound =
-  /\bmodel_not_found\b|\bmodel\b.*\b(?:not found|does not exist)\b|\bunknown model\b/i;
-export function classify(
-  message: string,
-  fallback: string,
-  status?: number,
-): ErrorEvent {
+  /\bmodel_not_found\b|\bunknown model\b|\bmodel\b(?! provider).{0,80}?\b(?:not found|does not exist|is not supported)\b/i;
+const invalidRequest =
+  /\binvalid_request_error\b|\binvalid prompt\b|\bbad request\b/i;
+const transient =
+  /\brate[ _-]?limit|\boverloaded(?:_error)?\b|\bhigh (?:demand|load)\b|\btemporarily unavailable\b|\bat capacity\b|\bserver (?:is )?busy\b|\bstream disconnected\b|\b(?:connection|request) timed out\b|\bconnection (?:refused|reset|error)\b|\bconnection closed before message completed\b|\bConnectionRefused\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b/i;
+/**
+ * Quota, context and billing text outrank the status, since those arrive as 400 or
+ * 429. Otherwise the status decides, then the text.
+ */
+function errorType(message: string, status?: number): string | undefined {
   const code =
     status ??
     statusPatterns
       .map((pattern) => pattern.exec(message)?.[1])
       .map(Number)
       .find(Number.isInteger);
-  const errorType = usageLimit.test(message)
-    ? "usage_limit_exceeded"
-    : contextWindow.test(message)
-      ? "context_window_exceeded"
-      : billing.test(message)
-        ? "billing_error"
-        : code === 408 ||
-            code === 409 ||
-            code === 429 ||
-            (code !== undefined && code >= 500)
-          ? "transient_api_error"
-          : code === 401
-            ? "authentication_failed"
-            : code === 402
-              ? "billing_error"
-              : code === 403
-                ? "permission_denied"
-                : modelNotFound.test(message)
-                  ? "model_not_found"
-                  : code === 400 || code === 422
-                    ? "invalid_request"
-                    : code !== undefined
-                      ? `api_error_${code}`
-                      : transient.test(message)
-                        ? "transient_api_error"
-                        : authentication.test(message)
-                          ? "authentication_failed"
-                          : permission.test(message)
-                            ? "permission_denied"
-                            : invalidRequest.test(message)
-                              ? "invalid_request"
-                              : fallback;
+  if (usageLimit.test(message)) return "usage_limit_exceeded";
+  if (contextWindow.test(message)) return "context_window_exceeded";
+  if (billing.test(message)) return "billing_error";
+  if (code !== undefined) {
+    if (code === 408 || code === 409 || code === 429 || code >= 500)
+      return "transient_api_error";
+    if (code === 401) return "authentication_failed";
+    if (code === 402) return "billing_error";
+    if (code === 403) return "permission_denied";
+  }
+  if (modelNotFound.test(message)) return "model_not_found";
+  if (authentication.test(message)) return "authentication_failed";
+  if (code !== undefined)
+    return code === 400 || code === 422
+      ? "invalid_request"
+      : `api_error_${code}`;
+  if (permission.test(message)) return "permission_denied";
+  if (invalidRequest.test(message)) return "invalid_request";
+  if (transient.test(message)) return "transient_api_error";
+  return undefined;
+}
+export function classify(
+  message: string,
+  fallback: string,
+  status?: number,
+): ErrorEvent {
   return {
     type: "error",
     message,
-    error_type: errorType,
+    error_type: errorType(message, status) ?? fallback,
   };
 }
 export function nativeError(cause: unknown): AgentSdkWrapperError {

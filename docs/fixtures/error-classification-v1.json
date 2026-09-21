@@ -1,0 +1,431 @@
+{
+  "description": "Failure messages (with an optional HTTP status) and the error_type both classifiers must return; null means no match.",
+  "cases": [
+    {
+      "message": "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "connection reset by peer",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Request timed out.",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "stream disconnected before completion: stream closed before response.completed",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Selected model is at capacity. Please try a different model.",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "server busy, try later",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "{\"type\":\"rate_limit_error\"}",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "exceeded retry limit, last status: 529",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "unexpected status 503 Service Unavailable",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "unexpected status 401 Unauthorized: bad key",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "Not logged in · Please run /login",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "unexpected status 403 Forbidden: denied",
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "unexpected status 404 Not Found: The model 'gpt-nope' does not exist or you do not have access to it.",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "unexpected status 400 Bad Request: malformed",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "unexpected status 418 I'm a teapot",
+      "error_type": "api_error_418"
+    },
+    {
+      "message": "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "{\"error\":{\"message\":\"Your input exceeds the context window of this model.\",\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\"}}",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "Quota exceeded. Check your plan and billing details.",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "You've hit your usage limit. Upgrade to Plus to continue.",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "Your credit balance is too low",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "unexpected status 402 Payment Required: Payment required",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "Invalid prompt: your prompt was flagged as potentially violating our usage policy.",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "unexpected status 422 Unprocessable Entity",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "API Error: 400 You have reached your specified API usage limits.",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "The model refused the request",
+      "error_type": null
+    },
+    {
+      "message": "Processed 503 files before failing",
+      "error_type": null
+    },
+    {
+      "message": "We're currently experiencing high demand, which may cause temporary errors.",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Error: Model provider `nope` not found",
+      "error_type": null
+    },
+    {
+      "message": "handshaking with MCP server failed: connection closed",
+      "error_type": null
+    },
+    {
+      "message": "API Error: Connection error.",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"no access\"}}",
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Permission denied: this organization cannot use the model",
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "API Error: 400 Your prompt exceeds the model's context window",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "stream disconnected before completion: Incorrect API key provided",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "Bad Request",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "unexpected status 403 Forbidden: You exceeded your current quota, url: http://x/v1/responses",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "unexpected status 400 Bad Request: {\"error\":{\"message\":\"model gpt-9 does not exist\"}}",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "unexpected status 404 Not Found: The model `gpt-9` does not exist",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "unexpected status 401 Unauthorized: Missing bearer",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "unexpected status 429 Too Many Requests: You exceeded your current quota",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "unexpected status 429 Too Many Requests: Your credit balance is too low",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "exceeded retry limit, last status: 429 Too Many Requests",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "unexpected status 500 Internal Server Error: permission denied",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "unexpected status 500 Internal Server Error: context_length_exceeded",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "unexpected status 400 Bad Request: Your input exceeds the context window of this model",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "unexpected status 400 Bad Request: prompt is too long",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "unexpected status 400 Bad Request: This model's maximum context length is 128000 tokens",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "unexpected status 400 Bad Request: rate limit",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "unexpected status 403 Forbidden: billing",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "unexpected status 404 Not Found: nothing here",
+      "error_type": "api_error_404"
+    },
+    {
+      "message": "unexpected status 418 I'm a teapot: short and stout",
+      "error_type": "api_error_418"
+    },
+    {
+      "message": "unexpected status 422 Unprocessable Entity: model foo is not supported",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "This model's maximum context length is 128000 tokens",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "The model `gpt-9` is not supported when using Codex with a ChatGPT account.",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "stream disconnected before completion: model_not_found",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "stream disconnected before completion: Your credit balance is too low",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "stream disconnected before completion: permission denied",
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "stream disconnected before completion: Invalid prompt",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "Request timed out",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "request timed out",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "connection closed before message completed",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "error sending request for url (http://x): connection refused",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Connection reset by peer",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "ECONNRESET",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "server is busy",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Our servers are currently overloaded.",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Not logged in",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "missing api key",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "Authentication required",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "authentication failed",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "Unauthorized",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "Forbidden",
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "invalid_request_error: bad param",
+      "error_type": "invalid_request"
+    },
+    {
+      "message": "unknown model gpt-9",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "Upgrade to Plus to continue using Codex",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "upgrade to Pro",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "You've hit your usage limit.",
+      "error_type": "usage_limit_exceeded"
+    },
+    {
+      "message": "Something unexpected happened.",
+      "error_type": null
+    },
+    {
+      "message": "HTTP 503",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "status: 502",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "status code 409",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "API Error: 529 overloaded",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "http 401",
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "HTTP status 404",
+      "error_type": "api_error_404"
+    },
+    {
+      "message": "failed with status 400 and billing details",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "sandbox denied: permission denied",
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "timed out waiting for tool",
+      "error_type": null
+    },
+    {
+      "message": "Codex ran out of room in the model's context window.",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "context window exceeded",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "context_window of 128k",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "exceeds the context window",
+      "error_type": "context_window_exceeded"
+    },
+    {
+      "message": "overloaded",
+      "status": 529,
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "gone",
+      "status": 410,
+      "error_type": "api_error_410"
+    },
+    {
+      "message": "request failed",
+      "status": 408,
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "request failed",
+      "status": 409,
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Unauthorized",
+      "status": 403,
+      "error_type": "permission_denied"
+    },
+    {
+      "message": "Authentication failed upstream",
+      "status": 500,
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "Invalid API key",
+      "status": 400,
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "model claude-nope not found",
+      "status": 404,
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "",
+      "status": 401,
+      "error_type": "authentication_failed"
+    },
+    {
+      "message": "rate limit",
+      "status": 400,
+      "error_type": "invalid_request"
+    }
+  ]
+}

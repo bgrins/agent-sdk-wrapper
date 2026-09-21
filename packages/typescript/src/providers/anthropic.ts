@@ -493,7 +493,6 @@ const assistantErrorTypes: Partial<Record<SDKAssistantMessageError, string>> = {
   rate_limit: "transient_api_error",
   overloaded: "transient_api_error",
   server_error: "transient_api_error",
-  invalid_request: "invalid_request",
   model_not_found: "model_not_found",
   max_output_tokens: "execution_error",
 };
@@ -561,6 +560,13 @@ function resultError(
         : structured,
     );
   const classified = classify(text, "execution_error", status);
+  // An invalid_request assistant error yields only to a more specific type.
+  if (
+    assistantError === "invalid_request" &&
+    (classified.error_type === "execution_error" ||
+      classified.error_type.startsWith("api_error_"))
+  )
+    return error("invalid_request");
   // An API error without an HTTP status or a recognizable message is a dropped connection.
   return status === undefined &&
     classified.error_type === "execution_error" &&

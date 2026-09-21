@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..artifacts import ProviderEventLogger, sdk_dir_for
+from ..classify import TRANSIENT, classify
 from ..errors import (
     AgentSdkWrapperError,
     ConfigError,
@@ -2120,14 +2121,13 @@ def _parse_json(text: str) -> Any:
         return text
 
 
-_TRANSIENT = "transient_api_error"
 _CODEX_ERROR_TYPES = {
     "contextWindowExceeded": "context_window_exceeded",
     "sessionBudgetExceeded": "max_budget",
     "usageLimitExceeded": "usage_limit_exceeded",
-    "rateLimitExceeded": _TRANSIENT,
-    "serverOverloaded": _TRANSIENT,
-    "internalServerError": _TRANSIENT,
+    "rateLimitExceeded": TRANSIENT,
+    "serverOverloaded": TRANSIENT,
+    "internalServerError": TRANSIENT,
     "unauthorized": "authentication_failed",
     "badRequest": "invalid_request",
     "cyberPolicy": "refused",
@@ -2143,49 +2143,6 @@ _CODEX_HTTP_ERRORS = {
     "responseStreamDisconnected",
     "responseTooManyFailedAttempts",
 }
-_HTTP_STATUS_RE = re.compile(
-    r"\b(?:status(?: code)?|http)[:\s]+(\d{3})\b"
-    r"|\b(\d{3}) (?:bad request|unauthorized|payment required|forbidden|not found"
-    r"|too many requests|internal server error|bad gateway|service unavailable"
-    r"|gateway timeout)\b",
-    re.IGNORECASE,
-)
-_ERROR_PATTERNS = tuple(
-    (re.compile(pattern, re.IGNORECASE), error_type)
-    for pattern, error_type in (
-        (
-            r"\bcontext[ _-]?window\b|\bcontext_length_exceeded\b"
-            r"|\bmaximum context length\b|\bprompt is too long\b",
-            "context_window_exceeded",
-        ),
-        (
-            r"\binsufficient_quota\b|\bexceeded your current quota\b|\bquota exceeded\b"
-            r"|\busage limits?\b",
-            "usage_limit_exceeded",
-        ),
-        (r"\bbilling\b|\bcredit balance\b", "billing_error"),
-        (
-            r"\bunauthorized\b|\bnot logged in\b|\binvalid_api_key\b"
-            r"|\b(?:invalid|incorrect|missing) api key\b",
-            "authentication_failed",
-        ),
-        (r"\bforbidden\b|\bpermission denied\b", "permission_denied"),
-        (
-            r"\bmodel_not_found\b|\bunknown model\b"
-            r"|\bmodel\b.{0,80}?\b(?:does not exist|not found|is not supported)\b",
-            "model_not_found",
-        ),
-        (
-            r"\brate[ _-]?limit|\boverloaded\b|\bserver busy\b|\bat capacity\b"
-            r"|\bstream disconnected\b|\bconnection (?:reset|refused|closed|timed out)\b"
-            r"|\btimed out\b|\btemporarily unavailable\b",
-            _TRANSIENT,
-        ),
-        (r"\binvalid_request_error\b|\bbad request\b|\binvalid prompt\b", "invalid_request"),
-    )
-)
-
-
 def _error_event(error: Any, raw: dict[str, Any] | None = None) -> Error:
     message = _turn_error_text(error)
     info = _field(error, "codex_error_info", "codexErrorInfo")
@@ -2227,42 +2184,8 @@ def _classify_codex_error(info: Any, message: str) -> str:
             return _CODEX_ERROR_TYPES[kind]
         if kind in _CODEX_HTTP_ERRORS:
             status = detail.get("httpStatusCode") if isinstance(detail, dict) else None
-            return _http_error_type(status, message) if status else _TRANSIENT
-    return _message_error_type(message) or "provider_exception"
-
-
-def _message_error_type(message: str) -> str | None:
-    match = _HTTP_STATUS_RE.search(message)
-    if match:
-        return _http_error_type(int(match.group(1) or match.group(2)), message)
-    return _pattern_error_type(message)
-
-
-def _pattern_error_type(message: str) -> str | None:
-    for pattern, error_type in _ERROR_PATTERNS:
-        if pattern.search(message):
-            return error_type
-    return None
-
-
-def _http_error_type(status: int, message: str) -> str:
-    specific = _pattern_error_type(message)
-    # A 429 can mean an exhausted quota, which retrying cannot fix.
-    if status == 429 and specific in ("usage_limit_exceeded", "billing_error"):
-        return specific
-    if status in (408, 409, 429) or status >= 500:
-        return _TRANSIENT
-    if status == 401:
-        return "authentication_failed"
-    if status == 402:
-        return "billing_error"
-    if status == 403:
-        return "permission_denied"
-    if specific is not None and specific != _TRANSIENT:
-        return specific
-    if status in (400, 422):
-        return "invalid_request"
-    return f"api_error_{status}"
+            return classify(message, status or None) or TRANSIENT
+    return classify(message) or "provider_exception"
 
 
 def _status_value(status: Any) -> str:
@@ -2312,4 +2235,4 @@ def _as_str(value: Any) -> str | None:
 
 
 def _looks_transient(exc: BaseException) -> bool:
-    return _message_error_type(str(exc)) == _TRANSIENT
+    return classify(str(exc)) == TRANSIENT

@@ -9,7 +9,6 @@ import functools
 import json
 import os
 import platform
-import re
 import shutil
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import ProviderEventLogger
+from ..classify import TRANSIENT, classify
 from ..errors import (
     AgentSdkWrapperError,
     ConfigError,
@@ -102,15 +102,6 @@ _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
     "system_prompt": lambda req: req.system_prompt is not None,
 }
 
-# Transient statuses below 500; every 5xx is transient too.
-_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
-_STATUS_ERRORS = {
-    400: "invalid_request",
-    401: "authentication_failed",
-    402: "billing_error",
-    403: "permission_denied",
-    422: "invalid_request",
-}
 _SUBTYPE_ERRORS = {
     "error_max_turns": "max_turns",
     "error_max_budget_usd": "max_budget",
@@ -151,35 +142,6 @@ _ASSISTANT_ERRORS = {
     "model_not_found": "model_not_found",
     "max_output_tokens": "execution_error",
 }
-_TEXT_ERRORS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(
-            r"\b(?:not logged in|invalid (?:x-)?api[ _-]?key|authentication_error|unauthorized)\b",
-            re.IGNORECASE,
-        ),
-        "authentication_failed",
-    ),
-    (re.compile(r"\bcredit balance\b|\bbilling\b", re.IGNORECASE), "billing_error"),
-    (
-        re.compile(r"\busage limits?\b|\bquota exceeded\b", re.IGNORECASE),
-        "usage_limit_exceeded",
-    ),
-    (
-        re.compile(r"\bprompt is too long\b|\bcontext window\b", re.IGNORECASE),
-        "context_window_exceeded",
-    ),
-    (
-        re.compile(r"\bmodel\b.{0,80}\b(?:not found|does not exist)\b", re.IGNORECASE),
-        "model_not_found",
-    ),
-)
-_TRANSIENT_TEXT = re.compile(
-    r"\b(?:rate[ _-]?limit(?:ed)?|overloaded(?:_error)?|temporarily unavailable|server busy"
-    r"|at capacity|connection (?:error|reset|refused)|timed out|ECONNRESET|ECONNREFUSED"
-    r"|ETIMEDOUT|stream disconnected|API Error: (?:429|5\d\d))\b",
-    re.IGNORECASE,
-)
-
 # Signal exits use 128 + signum in the SDK protocol, or -signum in asyncio.
 _SIGNALS_BY_EXIT_CODE: dict[int, int] = {137: 9, 143: 15, 130: 2, -9: 9, -15: 15, -2: 2}
 
@@ -622,7 +584,7 @@ class AnthropicProvider(ProviderAdapter):
             signum = _SIGNALS_BY_EXIT_CODE.get(exc.exit_code) if exc.exit_code else None
             if signum is not None:
                 raise ProcessTerminatedError(signum, message=msg, cause=exc) from exc
-            if _looks_transient(stderr):
+            if classify(stderr) == TRANSIENT:
                 raise TransientError(msg, cause=exc) from exc
             raise AgentSdkWrapperError(msg, cause=exc) from exc
         except CLIJSONDecodeError as exc:
@@ -804,20 +766,12 @@ def _classify(text: str, *, status: int | None, assistant_error: str | None) -> 
         return "permission_denied"
     if assistant_error in _ASSISTANT_ERRORS:
         return _ASSISTANT_ERRORS[assistant_error]
-    for pattern, error_type in _TEXT_ERRORS:
-        if pattern.search(text):
-            return error_type
-    if status is not None and (status in _RETRYABLE_STATUS_CODES or status >= 500):
-        return "transient_api_error"
-    if status is not None and status in _STATUS_ERRORS:
-        return _STATUS_ERRORS[status]
-    if _looks_transient(text):
-        return "transient_api_error"
-    if assistant_error == "invalid_request":
+    error_type = classify(text, status)
+    # An invalid_request assistant error yields only to a more specific type.
+    generic = error_type is None or error_type.startswith("api_error_")
+    if assistant_error == "invalid_request" and generic:
         return "invalid_request"
-    if status is not None:
-        return f"api_error_{status}"
-    return None
+    return error_type
 
 
 def _error_detail(message: Any, assistant_text: str = "") -> str:
@@ -863,10 +817,6 @@ def _api_retry_warning(message: Any, *, include_raw: bool) -> WarningEvent:
     if isinstance(delay, (int, float)):
         text += f" in {delay / 1000:.1f}s"
     return WarningEvent(message=text, raw=_raw(message) if include_raw else None)
-
-
-def _looks_transient(text: str) -> bool:
-    return bool(_TRANSIENT_TEXT.search(text))
 
 
 def _stringify(content: Any) -> str:
