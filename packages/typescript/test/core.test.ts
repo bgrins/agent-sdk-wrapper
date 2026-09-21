@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   Agent,
   ConfigError,
@@ -62,6 +63,50 @@ test("provider aliases, inference, model prefixes and conflicting selections", (
     ["openai", "codex:"],
   ])
     assert.throws(() => resolveProvider(provider, model), ConfigError);
+});
+test("model IDs with colons stay whole unless the prefix is a provider", () => {
+  for (const [provider, model, expected] of [
+    [
+      "anthropic",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+    [
+      "anthropic",
+      "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+      "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+    ],
+    [
+      undefined,
+      "anthropic:us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+    ["codex", "ft:gpt-4o:org:custom:id", "ft:gpt-4o:org:custom:id"],
+    ["openai", "qwen2.5-coder:7b", "qwen2.5-coder:7b"],
+  ] as const)
+    assert.equal(resolveProvider(provider, model).model, expected);
+  assert.throws(
+    () => resolveProvider(undefined, "anthropic.claude-3-5-sonnet-v2:0"),
+    ConfigError,
+  );
+});
+test("a missing or non-directory cwd fails request resolution", async () => {
+  let checked = 0;
+  const provider = successful();
+  provider.ensureAvailable = async () => {
+    checked++;
+  };
+  const file = fileURLToPath(import.meta.url);
+  for (const cwd of ["/definitely/missing/dir", file]) {
+    assert.throws(
+      () => new Agent({ provider: "openai", cwd }, { openai: provider }),
+      ConfigError,
+    );
+    const agent = new Agent({ provider: "openai" }, { openai: provider });
+    await assert.rejects(agent.checkRuntime({ cwd }), ConfigError);
+    await assert.rejects(agent.run({ prompt: "x", cwd }), ConfigError);
+  }
+  assert.equal(checked, 0);
 });
 test("message classification matches the shared cases", () => {
   const { cases } = JSON.parse(

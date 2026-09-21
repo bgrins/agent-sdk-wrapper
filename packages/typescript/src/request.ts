@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { ConfigError } from "./errors.js";
 import type { Provider } from "./events.js";
 import type { ProviderOptions } from "./providers/options.js";
@@ -73,15 +74,21 @@ export function checkKeys(
       throw new ConfigError(`${label}.${key} is not implemented or recognized`);
   }
 }
-export function normalizeProvider(value: string): Provider {
-  if (typeof value !== "string")
-    throw new ConfigError("provider must be a string");
+function knownProvider(value: string): Provider | undefined {
   const name = value.trim().toLowerCase();
   if (name === "codex" || name === "openai") return "openai";
   if (name === "anthropic") return name;
-  throw new ConfigError(
-    `Unknown provider '${value}'; expected anthropic, openai, or codex`,
-  );
+  return undefined;
+}
+export function normalizeProvider(value: string): Provider {
+  if (typeof value !== "string")
+    throw new ConfigError("provider must be a string");
+  const provider = knownProvider(value);
+  if (!provider)
+    throw new ConfigError(
+      `Unknown provider '${value}'; expected anthropic, openai, or codex`,
+    );
+  return provider;
 }
 export function resolveProvider(
   provider?: string,
@@ -92,10 +99,11 @@ export function resolveProvider(
   if (model !== undefined && (typeof model !== "string" || !model.trim()))
     throw new ConfigError("model must be a non-empty string");
   let name = model?.trim();
-  let prefix: Provider | undefined;
-  if (name?.includes(":")) {
-    const colon = name.indexOf(":");
-    prefix = normalizeProvider(name.slice(0, colon));
+  // Bedrock IDs, ARNs and fine-tune names contain colons; only a provider name is a prefix.
+  const colon = name?.indexOf(":") ?? -1;
+  const prefix =
+    name && colon >= 0 ? knownProvider(name.slice(0, colon)) : undefined;
+  if (name && prefix) {
     name = name.slice(colon + 1).trim();
     if (!name)
       throw new ConfigError("Expected provider:model with a non-empty model");
@@ -120,6 +128,13 @@ export function resolveProvider(
     );
   return { provider: selected, ...(name ? { model: name } : {}) };
 }
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
 export function resolveRequest(input: RunRequest): ResolvedRequest {
   checkKeys(input, keys, "request");
   if (typeof input.prompt !== "string")
@@ -133,6 +148,8 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
   }
   if (input.traceFile?.includes("\0"))
     throw new ConfigError("traceFile must not contain NUL characters");
+  if (input.cwd !== undefined && !isDirectory(input.cwd))
+    throw new ConfigError(`cwd is not a directory: ${input.cwd}`);
   for (const key of ["includeRaw", "continueSession"] as const) {
     if (input[key] !== undefined && typeof input[key] !== "boolean")
       throw new ConfigError(`${key} must be boolean`);
