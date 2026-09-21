@@ -319,6 +319,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           };
           continue;
         }
+        const fallback = modelFallback(message);
         // Status frames can arrive between the frames of one message.
         if (
           pending &&
@@ -337,8 +338,10 @@ export class AnthropicAdapter implements ProviderAdapter {
           const model =
             message.type === "system" && message.subtype === "init"
               ? message.model
-              : sessionModel;
+              : (fallback?.to ?? sessionModel);
           if (message.session_id !== session || model !== sessionModel) {
+            // Text before a model switch came from the previous model.
+            if (model !== sessionModel) yield* flush();
             session = message.session_id;
             sessionModel = model;
             yield {
@@ -481,6 +484,14 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (info.resetsAt !== undefined)
             details.push(`resets_at=${info.resetsAt}`);
           yield { type: "warning", message: details.join(", "), ...raw };
+        } else if (fallback) {
+          const from = fallback.from ? ` from ${fallback.from}` : "";
+          const why = fallback.trigger ? ` (${fallback.trigger})` : "";
+          yield {
+            type: "warning",
+            message: `Claude fell back${from} to ${fallback.to}${why}`,
+            ...raw,
+          };
         } else if (message.type === "stream_event")
           throw new ProviderProtocolError(
             "Unexpected partial Claude frames with includePartialMessages disabled",
@@ -500,6 +511,26 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 }
 type Raw = { raw?: Record<string, unknown> };
+/** The CLI's `system/model_fallback` frame, which the SDK types omit. */
+function modelFallback(
+  message: SDKMessage,
+): { to: string; from?: string; trigger?: string } | undefined {
+  const data = object(message);
+  if (
+    data?.type !== "system" ||
+    data.subtype !== "model_fallback" ||
+    typeof data.fallback_model !== "string" ||
+    !data.fallback_model
+  )
+    return undefined;
+  const text = (value: unknown) =>
+    typeof value === "string" && value ? value : undefined;
+  return {
+    to: data.fallback_model,
+    from: text(data.original_model),
+    trigger: text(data.trigger),
+  };
+}
 const cancelled = (): ErrorEvent => ({
   type: "error",
   message: "Run cancelled",

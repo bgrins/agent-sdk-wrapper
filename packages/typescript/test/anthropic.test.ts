@@ -787,6 +787,47 @@ test("Claude session_info reports the runtime model from init", async () => {
   );
   assert.equal(run.model, "claude-resolved");
 });
+test("Claude model fallback warns and reports the fallback model", async () => {
+  // Captured from the Claude CLI; the SDK types omit this frame.
+  const fallback = {
+    type: "system",
+    subtype: "model_fallback",
+    uuid: randomUUID(),
+    trigger: "overloaded",
+    original_model: "claude-haiku-4-5",
+    fallback_model: "claude-sonnet-4-5",
+    content: "Switched to Sonnet 4.5 due to high demand for Haiku 4.5",
+    session_id: "claude-session",
+  } as unknown as SDKMessage;
+  const run = await harness([
+    init("claude-haiku-4-5"),
+    fallback,
+    assistant([textBlock("from fallback")], {}, { model: "claude-sonnet-4-5" }),
+    result({ result: "from fallback" }),
+  ]).agent.run("fallback");
+  assert.deepEqual(
+    run.events
+      .map((env) => env.event)
+      .filter(
+        (event) => event.type === "session_info" || event.type === "warning",
+      ),
+    [
+      { type: "session_info", id: "claude-session", model: "claude-haiku-4-5" },
+      {
+        type: "session_info",
+        id: "claude-session",
+        model: "claude-sonnet-4-5",
+      },
+      {
+        type: "warning",
+        message:
+          "Claude fell back from claude-haiku-4-5 to claude-sonnet-4-5 (overloaded)",
+      },
+    ],
+  );
+  assert.equal(run.model, "claude-sonnet-4-5");
+  assert.equal(run.final_text, "from fallback");
+});
 test("Claude rate limit events become warnings", async () => {
   const run = await harness([
     {
