@@ -22,13 +22,8 @@ from .artifacts import (
     write_manifest,
     write_result_artifact,
 )
-from .errors import (
-    ConfigError,
-    ProcessTerminatedError,
-    ProviderNotAvailableError,
-    RunFailedError,
-    TransientError,
-)
+from .classify import classify
+from .errors import ConfigError, ProcessTerminatedError, ProviderNotAvailableError, RunFailedError
 from .events import (
     AgentEvent,
     Error,
@@ -541,15 +536,13 @@ def _interrupted_error(exc: BaseException) -> Error:
 
 def _error_event(exc: BaseException) -> Error:
     message = str(exc) or type(exc).__name__
-    if isinstance(exc, TransientError):
-        return Error(message=message, error_type="transient_api_error")
     if isinstance(exc, ProcessTerminatedError):
         return Error(message=message, error_type="process_terminated")
     if isinstance(exc, ProviderNotAvailableError):
         return Error(message=message, error_type="runtime_unavailable")
     if isinstance(exc, ConfigError):
         return Error(message=message, error_type="invalid_request")
-    return Error(message=message, error_type="provider_exception")
+    return Error(message=message, error_type=classify(message) or "provider_exception")
 
 
 def _check_overrides(overrides: dict[str, Any]) -> None:

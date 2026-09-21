@@ -12,8 +12,8 @@ from ..request import RunRequest
 class ProviderAdapter(ABC):
     """Translate a ``RunRequest`` into native calls and normalized ``AgentEvent`` values.
 
-    Raise ``TransientError`` for transient failures and ``ProviderNotAvailableError``
-    for an unavailable runtime. The runner handles deadlines and event envelopes.
+    Raise ``ProviderNotAvailableError`` for an unavailable runtime; the runner classifies
+    other exceptions by their message. It also handles deadlines and event envelopes.
     """
 
     name: str

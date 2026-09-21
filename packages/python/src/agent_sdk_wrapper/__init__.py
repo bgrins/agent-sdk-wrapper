@@ -10,7 +10,6 @@ from .errors import (
     ProcessTerminatedError,
     ProviderNotAvailableError,
     RunFailedError,
-    TransientError,
 )
 from .events import (
     AgentEvent,
@@ -116,7 +115,6 @@ __all__ = [
     "ToolResult",
     "TraceWriter",
     "TraceReplay",
-    "TransientError",
     "Usage",
     "WarningEvent",
     "__version__",

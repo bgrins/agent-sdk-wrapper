@@ -13,11 +13,9 @@ from agent_sdk_wrapper import (
     Error,
     EventEnvelope,
     ProcessTerminatedError,
-    RunFailedError,
     RunFinished,
     RunStatus,
     Text,
-    TransientError,
     install_fake_providers,
 )
 
@@ -100,16 +98,6 @@ def test_the_first_provider_error_sets_the_result_error(monkeypatch):
     assert (result.error, result.error_type) == ("overloaded", "transient_api_error")
     assert result.final_text == "partial"
     assert result.to_dict()["error_type"] == "transient_api_error"
-
-
-def test_raise_on_error_carries_the_result(monkeypatch):
-    play, _ = script(TransientError("rate limit"))
-    install_fake_providers(monkeypatch, events=play)
-
-    with pytest.raises(RunFailedError, match="rate limit") as raised:
-        asyncio.run(Agent(provider="openai").run("hi", raise_on_error=True))
-
-    assert raised.value.result.error_type == "transient_api_error"
 
 
 def test_stream_rejects_raise_on_error(monkeypatch):

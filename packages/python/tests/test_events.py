@@ -26,7 +26,6 @@ from agent_sdk_wrapper import (
     TokenUsage,
     ToolCall,
     ToolResult,
-    TransientError,
     Usage,
     install_fake_providers,
     normalize_builtin_tools,
@@ -762,7 +761,7 @@ def test_run_result_distinguishes_max_turns_from_generic_error(monkeypatch):
     ("exc", "error_type"),
     [
         (ProviderNotAvailableError("missing runtime"), "runtime_unavailable"),
-        (TransientError("rate limit"), "transient_api_error"),
+        (RuntimeError("API Error: 401 invalid x-api-key"), "authentication_failed"),
         (RuntimeError("sdk bug"), "provider_exception"),
     ],
 )
@@ -806,7 +805,7 @@ def test_a_transient_failure_after_text_keeps_the_text(monkeypatch, tmp_path):
 
         async def stream(self, req):  # type: ignore[override]
             yield Text(text="partial")
-            raise TransientError("lost connection")
+            raise ConnectionError("connection reset by peer")
 
     monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
 
@@ -820,7 +819,7 @@ def test_a_transient_failure_after_text_keeps_the_text(monkeypatch, tmp_path):
     assert result.status == RunStatus.FAILURE
     assert result.ended_reason == RunEndedReason.ERROR
     assert result.final_text == "partial"
-    assert result.error == "lost connection"
+    assert result.error == "connection reset by peer"
     assert any(
         isinstance(event.event, Error) and event.event.error_type == "transient_api_error"
         for event in result.events

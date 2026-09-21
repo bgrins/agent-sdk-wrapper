@@ -24,10 +24,6 @@ class ProviderNotAvailableError(AgentSdkWrapperError):
     """The backend can't run: missing dependency, CLI, or credentials."""
 
 
-class TransientError(AgentSdkWrapperError):
-    """A transient provider failure (rate limit, timeout, upstream 5xx, dropped connection)."""
-
-
 class ProcessTerminatedError(AgentSdkWrapperError):
     """The runtime was killed by a signal. Stop the batch; do not retry in place."""
 
