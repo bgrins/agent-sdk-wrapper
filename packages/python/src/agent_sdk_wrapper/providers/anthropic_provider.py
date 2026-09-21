@@ -15,6 +15,33 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
+import claude_agent_sdk
+from claude_agent_sdk import (
+    TERMINAL_TASK_STATUSES,
+    AgentDefinition,
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKError,
+    CLIConnectionError,
+    CLIJSONDecodeError,
+    CLINotFoundError,
+    ProcessError,
+    RateLimitEvent,
+    ResultMessage,
+    ServerToolResultBlock,
+    ServerToolUseBlock,
+    StreamEvent,
+    SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+
 from ..artifacts import ProviderEventLogger
 from ..classify import TRANSIENT, classify
 from ..errors import (
@@ -78,7 +105,6 @@ _PROVIDER_FLAG_ENV = (
 )
 _SYNTHETIC_MODEL = "<synthetic>"
 _SUBAGENT_TASK_TYPES = frozenset({"local_agent", "remote_agent"})
-_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
 # Native keys first-class options compute; extra_options may set one only when
 # its option is unused. The wrapper always computes env.
 _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
@@ -155,7 +181,7 @@ def _raw(obj: Any) -> dict[str, Any] | None:
     return None
 
 
-def _bundled_cli_path(claude_agent_sdk: Any) -> Path:
+def _bundled_cli_path() -> Path:
     cli_name = "claude.exe" if platform.system() == "Windows" else "claude"
     return Path(claude_agent_sdk.__file__).parent / "_bundled" / cli_name
 
@@ -167,16 +193,9 @@ class AnthropicProvider(ProviderAdapter):
         self._cli_path = cli_path
 
     def ensure_available(self) -> None:
-        try:
-            import claude_agent_sdk
-        except ImportError as exc:
-            raise ProviderNotAvailableError(
-                "claude-agent-sdk is not installed. Install agent-sdk-wrapper with the "
-                "Anthropic dependencies enabled."
-            ) from exc
         if self._cli_path is not None:
             return
-        if _bundled_cli_path(claude_agent_sdk).exists() or shutil.which("claude"):
+        if _bundled_cli_path().exists() or shutil.which("claude"):
             return
         raise ProviderNotAvailableError(
             "Claude Code runtime was not found. The Claude Agent SDK bundles it "
@@ -262,9 +281,7 @@ class AnthropicProvider(ProviderAdapter):
 
     def _build_options(
         self, req: RunRequest, stderr_tail: collections.deque[str] | None = None
-    ):
-        from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions
-
+    ) -> ClaudeAgentOptions:
         self.validate_request(req)
 
         allowed = list(req.allowed_tools)
@@ -352,11 +369,7 @@ class AnthropicProvider(ProviderAdapter):
             kwargs["thinking"] = dict(_DEFAULT_THINKING)
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         kwargs.update(extra)
-        try:
-            return ClaudeAgentOptions(**kwargs)
-        except TypeError as exc:
-            msg = f"invalid Claude Agent SDK option: {exc}"
-            raise AgentSdkWrapperError(msg, cause=exc) from exc
+        return ClaudeAgentOptions(**kwargs)
 
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
         self.validate_request(req)
@@ -365,25 +378,6 @@ class AnthropicProvider(ProviderAdapter):
         if problem:
             yield Error(message=problem, error_type="authentication_failed")
             return
-
-        from claude_agent_sdk import (
-            AssistantMessage,
-            ClaudeSDKError,
-            CLIConnectionError,
-            CLIJSONDecodeError,
-            CLINotFoundError,
-            ProcessError,
-            RateLimitEvent,
-            ResultMessage,
-            StreamEvent,
-            SystemMessage,
-            TaskNotificationMessage,
-            TaskStartedMessage,
-            TaskUpdatedMessage,
-            ToolResultBlock,
-            UserMessage,
-            query,
-        )
 
         stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
         options = self._build_options(req, stderr_tail)
@@ -410,7 +404,7 @@ class AnthropicProvider(ProviderAdapter):
         try:
             try:
                 async with contextlib.aclosing(
-                    query(prompt=req.prompt, options=options)
+                    claude_agent_sdk.query(prompt=req.prompt, options=options)
                 ) as messages:
                     async for message in messages:
                         provider_log.write(message)
@@ -460,8 +454,7 @@ class AnthropicProvider(ProviderAdapter):
                                         raw=_raw(block) if req.include_raw else None,
                                     )
                         elif isinstance(message, TaskStartedMessage):
-                            data = message.data if isinstance(message.data, dict) else {}
-                            subagent_type = data.get("subagent_type")
+                            subagent_type = message.data.get("subagent_type")
                             if message.task_type in _SUBAGENT_TASK_TYPES or subagent_type:
                                 subagent_tasks.add(message.task_id)
                                 yield SubagentStarted(
@@ -478,15 +471,14 @@ class AnthropicProvider(ProviderAdapter):
                                     summary=message.summary,
                                 )
                         elif isinstance(message, TaskUpdatedMessage):
-                            status = message.status or message.patch.get("status")
                             if (
-                                status in _TERMINAL_TASK_STATUSES
+                                message.status in TERMINAL_TASK_STATUSES
                                 and message.task_id in subagent_tasks
                             ):
                                 subagent_tasks.discard(message.task_id)
-                                yield SubagentEnded(task_id=message.task_id, status=status)
+                                yield SubagentEnded(task_id=message.task_id, status=message.status)
                         elif isinstance(message, SystemMessage):
-                            data = message.data if isinstance(message.data, dict) else {}
+                            data = message.data
                             if message.subtype == "model_refusal_fallback" and data.get(
                                 "retracted_message_uuids"
                             ):
@@ -611,14 +603,10 @@ def _stderr_callback(
 
 @functools.cache
 def _native_option_names() -> frozenset[str]:
-    from claude_agent_sdk import ClaudeAgentOptions
-
     return frozenset(field.name for field in dataclasses.fields(ClaudeAgentOptions))
 
 
-def _message_text(message: Any) -> str:
-    from claude_agent_sdk import TextBlock
-
+def _message_text(message: AssistantMessage) -> str:
     return "".join(block.text for block in message.content if isinstance(block, TextBlock))
 
 
@@ -630,8 +618,6 @@ class _PendingText:
     parts: list[str] = dataclasses.field(default_factory=list)
 
     def continues(self, message: Any) -> bool:
-        from claude_agent_sdk import AssistantMessage, RateLimitEvent, SystemMessage, TextBlock
-
         # Status frames can arrive between the frames of one message.
         if isinstance(message, (SystemMessage, RateLimitEvent)):
             return True
@@ -654,17 +640,9 @@ class _PendingText:
 
 
 def _assistant_events(
-    message: Any, tool_names: dict[str, str], include_raw: bool, pending: _PendingText
+    message: AssistantMessage, tool_names: dict[str, str], include_raw: bool, pending: _PendingText
 ) -> list[AgentEvent]:
     """Map one assistant frame; text accumulates in ``pending`` until a non-text block."""
-
-    from claude_agent_sdk import (
-        ServerToolResultBlock,
-        ServerToolUseBlock,
-        TextBlock,
-        ThinkingBlock,
-        ToolUseBlock,
-    )
 
     events: list[AgentEvent] = []
     for block in message.content:
@@ -700,23 +678,20 @@ def _assistant_events(
     return events
 
 
-def _thinking_event(block: Any) -> Thinking:
+def _thinking_event(block: ThinkingBlock) -> Thinking:
     """Map thinking text, or report the encrypted signature length for redacted blocks."""
 
-    text = block.thinking or ""
-    signature = getattr(block, "signature", None) or ""
-    if text.strip():
-        return Thinking(text=text)
-    return Thinking(text=text, redacted_bytes=len(signature) or None)
+    if block.thinking.strip():
+        return Thinking(text=block.thinking)
+    return Thinking(text=block.thinking, redacted_bytes=len(block.signature) or None)
 
 
-def _compaction_event(message: Any) -> ContextCompacted | None:
+def _compaction_event(message: SystemMessage) -> ContextCompacted | None:
     """Map a ``compact_boundary`` system message to a normalized event."""
 
-    if getattr(message, "subtype", None) != "compact_boundary":
+    if message.subtype != "compact_boundary":
         return None
-    data = message.data if isinstance(message.data, dict) else {}
-    metadata = data.get("compact_metadata")
+    metadata = message.data.get("compact_metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
     return ContextCompacted(
         trigger=str(metadata.get("trigger", "unknown")),
@@ -725,7 +700,7 @@ def _compaction_event(message: Any) -> ContextCompacted | None:
 
 
 def _result_error(
-    message: Any, assistant_error: tuple[str | None, str] | None = None
+    message: ResultMessage, assistant_error: tuple[str | None, str] | None = None
 ) -> Error | None:
     """Classify a result from structured signals first, then its error text."""
 
@@ -774,14 +749,13 @@ def _classify(text: str, *, status: int | None, assistant_error: str | None) -> 
     return error_type
 
 
-def _error_detail(message: Any, assistant_text: str = "") -> str:
+def _error_detail(message: ResultMessage, assistant_text: str = "") -> str:
     """Pick the most specific failure text an errored result carries."""
 
     if assistant_text:
         return assistant_text
-    errors = getattr(message, "errors", None)
-    if errors:
-        return "; ".join(str(e) for e in errors)
+    if message.errors:
+        return "; ".join(str(e) for e in message.errors)
     if message.result:
         return str(message.result)
     if message.api_error_status is not None:
@@ -789,7 +763,7 @@ def _error_detail(message: Any, assistant_text: str = "") -> str:
     return ""
 
 
-def _rate_limit_warning(message: Any, *, include_raw: bool) -> WarningEvent:
+def _rate_limit_warning(message: RateLimitEvent, *, include_raw: bool) -> WarningEvent:
     info = message.rate_limit_info
     details = [f"Claude rate limit status: {info.status}"]
     if info.rate_limit_type:
@@ -804,10 +778,10 @@ def _rate_limit_warning(message: Any, *, include_raw: bool) -> WarningEvent:
     )
 
 
-def _api_retry_warning(message: Any, *, include_raw: bool) -> WarningEvent:
+def _api_retry_warning(message: SystemMessage, *, include_raw: bool) -> WarningEvent:
     """Report a retry the Claude runtime makes on its own, before the wrapper sees an error."""
 
-    data = message.data if isinstance(message.data, dict) else {}
+    data = message.data
     status = data.get("error_status")
     delay = data.get("retry_delay_ms")
     text = f"Claude API error {status}" if status else "Claude API request failed"

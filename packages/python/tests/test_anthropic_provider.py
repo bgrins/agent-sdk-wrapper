@@ -956,10 +956,18 @@ def test_anthropic_subagents_pair_start_with_either_terminal_message(monkeypatch
             started("shell", "local_bash"),
             started("agent", "local_agent"),
             TaskUpdatedMessage(
-                subtype="task_updated", data={}, task_id="shell", patch={"status": "killed"}
+                subtype="task_updated",
+                data={},
+                task_id="shell",
+                patch={"status": "killed"},
+                status="killed",
             ),
             TaskUpdatedMessage(
-                subtype="task_updated", data={}, task_id="agent", patch={"status": "killed"}
+                subtype="task_updated",
+                data={},
+                task_id="agent",
+                patch={"status": "killed"},
+                status="killed",
             ),
         ],
     )
