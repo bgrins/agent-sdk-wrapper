@@ -181,8 +181,8 @@ function get(base, path, headers = {}) {
   });
 }
 
-async function listen(t, directory, options) {
-  const server = createTraceServer(directory, options);
+async function listen(t, directory, options, create = createTraceServer) {
+  const server = create(directory, options);
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -352,40 +352,50 @@ test("a newer deep run is listed ahead of older shallow runs", async (t) => {
   assert.equal(runs[0].label, "jobs/a/b/fresh");
 });
 
-test("a symlinked ancestor swapped in after path checks is not followed", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "ancestor-swap-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const results = join(root, "results");
-  await mkdir(join(results, "job", "logs"), { recursive: true });
-  await mkdir(join(root, "elsewhere"));
-  await writeFile(join(results, "job", "logs", "trace.jsonl"), "{}\n");
-  await writeFile(join(root, "elsewhere", "trace.jsonl"), "private\n");
-  const base = await listen(t, results);
-  const canonical = await fs.realpath(
-    join(results, "job", "logs", "trace.jsonl"),
-  );
-  const realpath = fs.realpath;
-  let swapped = false;
-  const mocked = t.mock.method(fs, "realpath", async (path, ...args) => {
-    const resolved = await realpath(path, ...args);
-    if (path === canonical && !swapped) {
-      swapped = true;
-      await fs.rename(join(results, "job", "logs"), join(root, "moved"));
-      await symlink(join(root, "elsewhere"), join(results, "job", "logs"));
-    }
-    return resolved;
-  });
-  syncBuiltinESMExports();
-  try {
-    const response = await get(base, "/results/job/logs/trace.jsonl");
-    assert.ok(swapped, "Swap the ancestor after path resolution");
-    assert.equal(response.status, 403);
-    assert.ok(!response.body.includes("private"));
-  } finally {
-    mocked.mock.restore();
+// freebsd stands in for platforms with neither O_NOFOLLOW_ANY nor /proc.
+for (const platform of [process.platform, "freebsd"]) {
+  test(`a symlinked ancestor swapped in after path checks is not followed on ${platform}`, async (t) => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: platform });
+    t.after(() => Object.defineProperty(process, "platform", original));
+    // The module picks its open flags at import.
+    const viewer = await import(`./trace-viewer.mjs?platform=${platform}`);
+    const root = await mkdtemp(join(tmpdir(), "ancestor-swap-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const results = join(root, "results");
+    await mkdir(join(results, "job", "logs"), { recursive: true });
+    await mkdir(join(root, "elsewhere"));
+    await writeFile(join(results, "job", "logs", "trace.jsonl"), "{}\n");
+    await writeFile(join(results, "top.trace.jsonl"), "top\n");
+    await writeFile(join(root, "elsewhere", "trace.jsonl"), "private\n");
+    const base = await listen(t, results, {}, viewer.createTraceServer);
+    assert.equal((await get(base, "/results/top.trace.jsonl")).body, "top\n");
+    const canonical = await fs.realpath(
+      join(results, "job", "logs", "trace.jsonl"),
+    );
+    const realpath = fs.realpath;
+    let swapped = false;
+    const mocked = t.mock.method(fs, "realpath", async (path, ...args) => {
+      const resolved = await realpath(path, ...args);
+      if (path === canonical && !swapped) {
+        swapped = true;
+        await fs.rename(join(results, "job", "logs"), join(root, "moved"));
+        await symlink(join(root, "elsewhere"), join(results, "job", "logs"));
+      }
+      return resolved;
+    });
     syncBuiltinESMExports();
-  }
-});
+    try {
+      const response = await get(base, "/results/job/logs/trace.jsonl");
+      assert.ok(swapped, "Swap the ancestor after path resolution");
+      assert.equal(response.status, 403);
+      assert.ok(!response.body.includes("private"));
+    } finally {
+      mocked.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+}
 
 // Just enough DOM for the viewer script: nodes, text, keys and listeners.
 class FakeNode {

@@ -118,23 +118,23 @@ export function contentSecurityPolicy(html) {
   ].join("; ");
 }
 
+// An ancestor swapped for a symlink after realpath() redirects open().
 // O_NOFOLLOW guards only the last component. macOS O_NOFOLLOW_ANY refuses a
 // symlink anywhere in the path; Linux reports the opened file's real path.
-// Elsewhere, comparing inodes after open narrows the race but cannot close it.
+// Nothing else detects the swap, so elsewhere only top-level files are served.
 const openFlags =
   constants.O_RDONLY |
   constants.O_NONBLOCK |
   (process.platform === "darwin" ? 0x20000000 : constants.O_NOFOLLOW);
 
-async function openedElsewhere(handle, file) {
-  if (process.platform === "darwin") return false;
+async function openedSafely(handle, file, nested) {
+  if (process.platform === "darwin") return true;
   if (process.platform === "linux") {
-    // Containers can run without /proc; fall back to comparing inodes.
+    // Containers can run without /proc.
     const opened = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
-    if (opened !== null) return opened !== file;
+    if (opened !== null) return opened === file;
   }
-  const [opened, current] = await Promise.all([handle.stat(), lstat(file)]);
-  return opened.dev !== current.dev || opened.ino !== current.ino;
+  return !nested;
 }
 
 // Ancestors must be host-controlled. Depth 1 reads only files in fixed job mounts.
@@ -204,7 +204,8 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
       if (file !== requested) return send(403, "text/plain", "Forbidden");
       const handle = await open(file, openFlags);
       try {
-        if (await openedElsewhere(handle, file))
+        const nested = file.slice(root.length + 1).includes(sep);
+        if (!(await openedSafely(handle, file, nested)))
           return send(403, "text/plain", "Forbidden");
         const info = await handle.stat();
         if (!info.isFile() || info.nlink !== 1 || info.size > 16 * 1024 * 1024)
