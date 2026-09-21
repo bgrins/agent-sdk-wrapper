@@ -1571,6 +1571,27 @@ async def test_codex_failed_turn_yields_one_classified_error():
 
 
 @pytest.mark.asyncio
+async def test_codex_error_notice_on_a_completed_turn_is_a_warning():
+    req = RunRequest(provider="openai", prompt="ignored")
+    notice = {"codexErrorInfo": "other", "message": "Hook failed; continuing."}
+    payload = {"error": notice, "threadId": "t", "turnId": "u", "willRetry": False}
+    events = [
+        notification("error", payload),
+        SimpleNamespace(
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="done"))
+            ),
+        ),
+        turn_completed(),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert out == [Text(text="done"), WarningEvent(message="Hook failed; continuing.")]
+
+
+@pytest.mark.asyncio
 async def test_codex_error_text_survives_empty_messages_and_unparsed_payloads():
     from openai_codex.models import Notification, UnknownNotification
 
