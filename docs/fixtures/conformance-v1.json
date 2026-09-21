@@ -124,7 +124,7 @@
       "options": { "model": "claude-haiku-4-5" },
       "prompt": "Create a file.",
       "mock": [{ "shell": "touch made-by-bash && echo CONF_TOUCHED" }, { "text": "done" }],
-      "expect": { "status": "success", "tool_calls": ["Bash"], "tool_results": [{ "contains": "", "is_error": true }] }
+      "expect": { "status": "success", "tool_calls": ["Bash"], "tool_results": [{ "is_error": true }] }
     },
     {
       "id": "anthropic.allowed_tools",

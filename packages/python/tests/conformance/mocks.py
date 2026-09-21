@@ -156,8 +156,8 @@ class Handler(BaseHTTPRequestHandler):
 class MockClaude(MockApi):
     """The Claude Messages API. ANTHROPIC_BASE_URL is ``base_url``, without ``/v1``.
 
-    The CLI retries a failed stream once without streaming; that request replays
-    the failed step, so the fault reaches the run instead of the next step.
+    After a failed stream the CLI retries once without streaming. That request replays
+    the latest streaming step, so the fault reaches the run instead of the next step.
     """
 
     def __init__(self, steps: list[dict[str, Any]] | None = None) -> None:

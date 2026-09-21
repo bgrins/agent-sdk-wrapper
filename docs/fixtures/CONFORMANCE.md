@@ -99,7 +99,7 @@ of these attempts varies between CLI versions, so fault cases assert counts only
 | `events.includes`, `events.excludes` | Event types that must or must not appear in the result |
 | `events.count` | Number of events the result keeps |
 | `tool_calls` | Names of tool calls, in order; or `{"includes": [...], "excludes": [...]}` |
-| `tool_results` | `[{"contains": "...", "is_error": bool}]`, in order; `is_error` defaults to `false` |
+| `tool_results` | `[{"contains": "...", "is_error": bool}]`, one per tool result, in order; `contains` is optional and `is_error` defaults to `false` |
 | `structured_output` | Expected structured value |
 | `requests.count` | Number of model requests the mock saw, including the Claude non-streaming retry |
 | `requests.match` | `{"request": n, "path": "a.b", "equals" \| "contains" \| "excludes": ...}` or `{"path": "a.b", "absent": true}` on request bodies (JSON), or `{"header": "name", ...}` |

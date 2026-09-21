@@ -432,7 +432,7 @@ def _check_result(expect: dict[str, Any], result: RunResult, ctx: Context) -> No
         results = [event for event in events if event.type == "tool_result"]
         assert len(results) == len(expect["tool_results"]), results
         for actual, wanted in zip(results, expect["tool_results"], strict=True):
-            assert wanted["contains"] in (actual.output or ""), actual
+            assert wanted.get("contains", "") in (actual.output or ""), actual
             assert actual.is_error == wanted.get("is_error", False), actual
     if "structured_output" in expect:
         value = result.structured_output
