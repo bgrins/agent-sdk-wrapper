@@ -24,6 +24,21 @@ async def bridge(reader, writer):
     await asyncio.gather(copy(reader, upstream_writer), copy(upstream_reader, writer))
 
 
+async def run_prompts(agent, prompts, trace_prefix, budget):
+    """Run the prompts within one time budget, printing every result."""
+    deadline = time.monotonic() + budget
+    for turn, prompt in enumerate(prompts):
+        # Each run times out at the shared deadline and still returns a result.
+        remaining = max(deadline - time.monotonic(), 0.001)
+        result = await agent.run(
+            prompt, trace_file=f"{trace_prefix}-{turn:04}.trace.jsonl", timeout=remaining
+        )
+        print(json.dumps({"kind": "result", "result": result.to_dict()}), flush=True)
+        if not result.ok:
+            return False
+    return True
+
+
 async def main():
     if "gvisor" not in platform.release() or os.getuid() == 0:
         raise RuntimeError("Verified non-root gVisor agent required")
@@ -40,7 +55,6 @@ async def main():
         model=request["model"],
         cwd="/job/work",
         continue_session=True,
-        timeout=150,
     )
     if request["provider"] == "anthropic":
         options.update(
@@ -65,15 +79,12 @@ async def main():
     async with server:
         agent = Agent(**options)
         trace_prefix = f"/job/output/{time.time_ns() // 1_000_000}-{uuid4()}"
-        # Both calls share one worker and session.
-        async with asyncio.timeout(150):
-            for turn, prompt in enumerate(prompts):
-                result = await agent.run(prompt, trace_file=f"{trace_prefix}-{turn:04}.trace.jsonl")
-                print(json.dumps({"kind": "result", "result": result.to_dict()}), flush=True)
-                if not result.ok:
-                    return 1
+        # Both calls share one worker, session and 150-second budget.
+        if not await run_prompts(agent, prompts, trace_prefix, budget=150):
+            return 1
         subprocess.run(["node", "/example/shared/project.mjs", "check"], check=True)
         return 0
 
 
-raise SystemExit(asyncio.run(main()))
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

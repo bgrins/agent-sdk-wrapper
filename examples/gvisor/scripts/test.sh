@@ -28,4 +28,5 @@ if [[ $mode == --offline ]]; then
   node examples/gvisor/tests/smoke.mjs --bad-patch > results/gvisor-checks/fixture-bad-patch.log
   node examples/gvisor/tests/smoke.mjs --missing-output > results/gvisor-checks/fixture-missing-output.log
   node --test examples/gvisor/tests/output-file.test.mjs examples/gvisor/tests/lifecycle.test.mjs
+  uv run --project packages/python --extra dev pytest -q examples/gvisor/tests/test_python_worker.py
 fi
