@@ -2,7 +2,19 @@
   "description": "Cross-language conformance cases. Each case runs the real Claude or Codex runtime in both packages: offline against a local mock API that answers with `mock` steps and records requests, and live (opt-in, billed) when the case has a `live` section. Format: docs/fixtures/CONFORMANCE.md.",
   "version": 1,
   "coverage_exemptions": {
-    "python": {}
+    "python": {},
+    "typescript": {
+      "anthropic:systemPrompt": "Claude takes it as options.systemPrompt; codex.system_prompt covers the reserved top-level name",
+      "anthropic:maxTurns": "Claude takes it as options.maxTurns; codex.max_turns covers the reserved top-level name",
+      "anthropic:permissionMode": "Claude takes it as options.permissionMode; codex.permission_mode covers the reserved top-level name",
+      "anthropic:builtinTools": "Claude takes it as options.tools; codex.builtin_tools covers the reserved top-level name",
+      "anthropic:timeout": "Python's timeout maps to signal; TypeScript reserves the name",
+      "codex:timeout": "Python's timeout maps to signal; TypeScript reserves the name",
+      "codex:client.baseUrl": "Selects the built-in provider, whose websocket transport and retries the mock cannot turn off; cases select a custom provider in CODEX_HOME/config.toml",
+      "codex:client.codexPathOverride": "Runtime location; codex-exec.test.ts drives a fake runtime through it",
+      "codex:thread.skipGitRepoCheck": "The runner sets it for every case because scratch directories are not repositories",
+      "codex:thread.additionalDirectories": "No Python counterpart; it only adds writable sandbox roots"
+    }
   },
   "cases": [
     {
@@ -89,6 +101,7 @@
     {
       "id": "anthropic.run_override_unknown",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript accepts providerOptions per run, replacing the Agent's" },
       "options": { "model": "claude-haiku-4-5" },
       "run_options": { "provider_options": { "cli_path": "claude" } },
       "prompt": "Say ok.",
@@ -188,6 +201,7 @@
     {
       "id": "anthropic.web_tools_conflict",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript has no web_tools; a native tools list has no conflict to reject" },
       "options": { "model": "claude-haiku-4-5", "web_tools": true, "builtin_tools": "none" },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -195,6 +209,7 @@
     {
       "id": "anthropic.tools",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
       "options": { "model": "claude-haiku-4-5", "tools": ["add", "shout"] },
       "prompt": "Use the add tool to add 1234 and 4321, then use shout on the word maple. Reply with the sum.",
       "mock": [
@@ -226,6 +241,7 @@
     {
       "id": "anthropic.tool_error",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
       "options": { "model": "claude-haiku-4-5", "tools": ["shout"] },
       "prompt": "Shout nothing.",
       "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "" } } }, { "text": "failed" }],
@@ -234,6 +250,7 @@
     {
       "id": "anthropic.mcp_servers",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement MCP servers yet" } },
       "options": {
         "model": "claude-haiku-4-5",
         "mcp_servers": [{ "name": "brief_tools", "fixture": "simple_mcp_server", "enabled_tools": ["read_brief"] }],
@@ -274,6 +291,7 @@
     {
       "id": "anthropic.subagents",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement subagents yet" } },
       "options": {
         "model": "claude-haiku-4-5",
         "subagents": {
@@ -311,6 +329,7 @@
     {
       "id": "anthropic.subagent_definition",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement subagents yet" } },
       "options": {
         "model": "claude-haiku-4-5",
         "subagents": {
@@ -337,6 +356,7 @@
     {
       "id": "anthropic.structured_tool_handoff",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
       "options": { "model": "claude-haiku-4-5", "tools": ["add"], "output_schema": "Weather" },
       "prompt": "Call add with a=19 and b=2, then report the weather for Paris with temp_c set to the sum.",
       "mock": [
@@ -361,6 +381,7 @@
     {
       "id": "anthropic.output_schema_missing",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement structured output yet" } },
       "options": { "model": "claude-haiku-4-5", "output_schema": "Weather" },
       "prompt": "Report the weather for Paris.",
       "mock": [{ "text": "It is sunny." }],
@@ -369,6 +390,7 @@
     {
       "id": "anthropic.max_turns",
       "provider": "anthropic",
+      "languages": { "typescript": { "options": { "model": "claude-haiku-4-5", "max_turns": 1 }, "reason": "TypeScript has no callable tools; the mock's call fails as an unknown tool and still takes a turn" } },
       "options": { "model": "claude-haiku-4-5", "max_turns": 1, "tools": ["add"] },
       "prompt": "Add 1 and 2.",
       "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1, "b": 2 } } }, { "text": "3" }],
@@ -384,6 +406,7 @@
     {
       "id": "anthropic.timeout",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "status": "cancelled", "error_type": "cancelled" }, "reason": "TypeScript deadlines are AbortSignals, which cancel the run" } },
       "options": { "model": "claude-haiku-4-5", "timeout": 3 },
       "prompt": "Say ok.",
       "mock": [{ "hang": 30 }],
@@ -571,6 +594,7 @@
     {
       "id": "anthropic.include_raw",
       "provider": "anthropic",
+      "languages": { "typescript": { "options": { "model": "claude-haiku-4-5", "include_raw": true }, "reason": "TypeScript has no callable tools; the mock's call fails as an unknown tool and still takes a turn" } },
       "options": { "model": "claude-haiku-4-5", "include_raw": true, "tools": ["add"] },
       "prompt": "Add 1 and 2.",
       "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1, "b": 2 } } }, { "text": "3" }],
@@ -579,6 +603,7 @@
     {
       "id": "anthropic.include_events_in_result",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript results always keep their events" },
       "options": { "model": "claude-haiku-4-5", "include_events_in_result": false, "on_event": true },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -595,6 +620,7 @@
     {
       "id": "anthropic.artifacts_dir",
       "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript has no artifacts bundle" } },
       "options": { "model": "claude-haiku-4-5", "artifacts_dir": "artifacts" },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -615,6 +641,7 @@
     {
       "id": "anthropic.raise_on_error",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript has no raise_on_error; callers check status" },
       "options": { "model": "claude-haiku-4-5" },
       "run_options": { "raise_on_error": true },
       "prompt": "Say ok.",
@@ -624,6 +651,7 @@
     {
       "id": "anthropic.raise_on_error_success",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript has no raise_on_error; callers check status" },
       "options": { "model": "claude-haiku-4-5" },
       "run_options": { "raise_on_error": true },
       "prompt": "Say ok.",
@@ -663,6 +691,7 @@
     {
       "id": "anthropic.provider_options_unknown",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript Claude providerOptions are SDK options; anthropic.extra_options_unknown covers unknown ones" },
       "options": { "model": "claude-haiku-4-5", "provider_options": { "api_key": "sk-ant-mock" } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -915,6 +944,7 @@
     {
       "id": "codex.system_prompt",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript reserves systemPrompt; only Claude takes a native system prompt" } },
       "options": { "model": "gpt-5.4", "system_prompt": "When asked for the code word, reply with only MAPLE7." },
       "prompt": "What is the code word?",
       "mock": [{ "text": "MAPLE7" }],
@@ -927,6 +957,7 @@
     {
       "id": "codex.run_overrides",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript reserves systemPrompt; only Claude takes a native system prompt" } },
       "options": { "model": "gpt-5.4", "system_prompt": "AGENT-DEFAULT-PROMPT" },
       "run_options": { "system_prompt": "RUN-OVERRIDE-PROMPT", "effort": "high" },
       "prompt": "Say ok.",
@@ -952,6 +983,7 @@
     {
       "id": "codex.tools",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
       "options": {
         "model": "gpt-5.4",
         "tools": ["add", "shout"],
@@ -986,6 +1018,7 @@
     {
       "id": "codex.tool_error",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
       "options": { "model": "gpt-5.4", "tools": ["shout"] },
       "prompt": "Shout nothing.",
       "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "" } } }, { "text": "failed" }],
@@ -994,6 +1027,7 @@
     {
       "id": "codex.allowed_tools",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no callable tools or Codex tool filters" },
       "options": { "model": "gpt-5.4", "tools": ["add", "shout"], "allowed_tools": ["add"] },
       "prompt": "Shout, then add.",
       "mock": [
@@ -1010,6 +1044,7 @@
     {
       "id": "codex.disallowed_tools",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no callable tools or Codex tool filters" },
       "options": { "model": "gpt-5.4", "tools": ["add", "shout"], "disallowed_tools": ["shout"] },
       "prompt": "Shout.",
       "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "hi" } } }, { "text": "done" }],
@@ -1022,6 +1057,7 @@
     {
       "id": "codex.allowed_tools_without_tools",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex tool filters" },
       "options": { "model": "gpt-5.4", "allowed_tools": ["add"] },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1029,6 +1065,7 @@
     {
       "id": "codex.allowed_tools_native",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex tool filters" },
       "options": { "model": "gpt-5.4", "tools": ["add"], "disallowed_tools": ["web_search"] },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1064,6 +1101,7 @@
     {
       "id": "codex.web_tools_config_conflict",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript passes no Codex config overrides besides networkAccessEnabled; provider settings live in CODEX_HOME/config.toml" },
       "options": {
         "model": "gpt-5.4",
         "web_tools": false,
@@ -1075,6 +1113,7 @@
     {
       "id": "codex.mcp_servers",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no MCP servers or Codex tool filters" },
       "options": {
         "model": "gpt-5.4",
         "mcp_servers": [
@@ -1103,6 +1142,7 @@
     {
       "id": "codex.mcp_required_failure",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement MCP servers yet" } },
       "options": {
         "model": "gpt-5.4",
         "mcp_servers": [{ "name": "broken", "command": "/bin/sh", "args": ["-c", "exit 3"], "required": true }]
@@ -1114,6 +1154,7 @@
     {
       "id": "codex.mcp_optional_failure",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement MCP servers yet" } },
       "options": {
         "model": "gpt-5.4",
         "mcp_servers": [{ "name": "broken", "command": "/bin/sh", "args": ["-c", "exit 3"] }]
@@ -1125,6 +1166,7 @@
     {
       "id": "codex.subagents",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement subagents yet" } },
       "options": {
         "model": "gpt-5.4",
         "subagents": {
@@ -1155,6 +1197,7 @@
     {
       "id": "codex.structured_tool_handoff",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
       "options": {
         "model": "gpt-5.4",
         "tools": ["add"],
@@ -1191,6 +1234,7 @@
     {
       "id": "codex.output_schema_invalid",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement structured output yet" } },
       "options": { "model": "gpt-5.4", "output_schema": "Weather" },
       "prompt": "Report the weather for Paris.",
       "mock": [{ "text": "It is sunny." }],
@@ -1206,6 +1250,7 @@
     {
       "id": "codex.timeout",
       "provider": "codex",
+      "languages": { "typescript": { "expect": { "status": "cancelled", "error_type": "cancelled" }, "reason": "TypeScript deadlines are AbortSignals, which cancel the run" } },
       "options": { "model": "gpt-5.4", "timeout": 3 },
       "prompt": "Say ok.",
       "mock": [{ "hang": 30 }],
@@ -1254,6 +1299,7 @@
     {
       "id": "codex.thread_id",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript resumes Codex threads only through sessionId" },
       "options": { "model": "gpt-5.4" },
       "prompt": "Remember the token ALPHA42. Reply READY.",
       "mock": [{ "text": "READY" }, { "text": "ALPHA42" }],
@@ -1273,6 +1319,7 @@
     {
       "id": "codex.ephemeral_resume",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no ephemeral Codex threads" },
       "options": { "model": "gpt-5.4", "continue_session": true, "provider_options": { "ephemeral": true } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1280,6 +1327,7 @@
     {
       "id": "codex.setting_sources",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex setting sources" },
       "options": { "model": "gpt-5.4", "setting_sources": ["project"] },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1410,6 +1458,7 @@
     {
       "id": "codex.include_events_in_result",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript results always keep their events" },
       "options": { "model": "gpt-5.4", "include_events_in_result": false, "on_event": true },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1426,6 +1475,7 @@
     {
       "id": "codex.artifacts_dir",
       "provider": "codex",
+      "languages": { "typescript": { "options": { "model": "gpt-5.4", "artifacts_dir": "artifacts" }, "expect": { "config_error": true }, "reason": "TypeScript has no artifacts bundle or Codex debug log" } },
       "options": { "model": "gpt-5.4", "artifacts_dir": "artifacts", "provider_options": { "debug": true } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1446,6 +1496,7 @@
     {
       "id": "codex.raise_on_error",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no raise_on_error; callers check status" },
       "options": { "model": "gpt-5.4" },
       "run_options": { "raise_on_error": true },
       "prompt": "Say ok.",
@@ -1460,6 +1511,7 @@
     {
       "id": "codex.extra_options",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex turn options" },
       "options": { "model": "gpt-5.4", "extra_options": { "turn_options": { "effort": "minimal" } } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1468,6 +1520,7 @@
     {
       "id": "codex.extra_options_unknown",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex extra_options" },
       "options": { "model": "gpt-5.4", "extra_options": { "not_an_option": true } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1501,6 +1554,7 @@
     {
       "id": "codex.provider_effort_and_summary",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript sets Codex effort only through effort and always requests the auto reasoning summary" },
       "options": { "model": "gpt-5.4", "provider_options": { "effort": "high", "summary": "detailed" } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1517,6 +1571,7 @@
     {
       "id": "codex.personality",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex personality option" },
       "options": { "model": "gpt-5.4", "provider_options": { "personality": "friendly" } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1525,6 +1580,7 @@
     {
       "id": "codex.service_tier",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex service tier option" },
       "options": { "model": "gpt-5.4", "provider_options": { "service_tier": "fast" } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1570,6 +1626,7 @@
     {
       "id": "codex.config_runtime_retries",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript passes no Codex config overrides besides networkAccessEnabled; provider settings live in CODEX_HOME/config.toml" },
       "options": {
         "model": "gpt-5.4",
         "provider_options": { "config": { "config_overrides": ["model_providers.mock.request_max_retries=1"] } }
@@ -1584,6 +1641,7 @@
     {
       "id": "codex.config_credential_store",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript passes no Codex config overrides besides networkAccessEnabled; provider settings live in CODEX_HOME/config.toml" },
       "options": {
         "model": "gpt-5.4",
         "provider_options": { "config": { "config_overrides": ["cli_auth_credentials_store=\"file\""] } }
@@ -1594,6 +1652,7 @@
     {
       "id": "codex.thread_options",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex developer instructions" },
       "options": {
         "model": "gpt-5.4",
         "system_prompt": "FIRST-CLASS-PROMPT",
@@ -1614,6 +1673,7 @@
     {
       "id": "codex.turn_options",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex turn options" },
       "options": { "model": "gpt-5.4", "provider_options": { "turn_options": { "summary": "concise" } } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1622,6 +1682,7 @@
     {
       "id": "codex.turn_options_unknown",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no Codex turn options" },
       "options": { "model": "gpt-5.4", "provider_options": { "turn_options": { "temperature": 0 } } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1629,6 +1690,7 @@
     {
       "id": "codex.model_provider",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript selects Codex providers only through CODEX_HOME/config.toml or baseUrl" },
       "options": {
         "model": "gpt-5.4",
         "env": { "OPENAI_API_KEY": "" },
@@ -1644,6 +1706,7 @@
     {
       "id": "codex.prebuilt_client_stored_login",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no prebuilt Codex client" },
       "options": { "model": "gpt-5.4", "provider_options": { "codex": "client" } },
       "setup": { "codex_login": "chatgpt" },
       "prompt": "Say ok.",
@@ -1653,6 +1716,7 @@
     {
       "id": "codex.prebuilt_client_tools",
       "provider": "codex",
+      "languages": { "typescript": "unsupported: TypeScript has no prebuilt Codex client" },
       "options": { "model": "gpt-5.4", "tools": ["add"], "provider_options": { "codex": "client" } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }

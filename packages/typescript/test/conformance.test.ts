@@ -9,6 +9,7 @@ import type {
 } from "../src/index.js";
 import {
   cases,
+  exemptions,
   exercised,
   type Plan,
   resolveCase,
@@ -37,65 +38,68 @@ test("conformance cases use only fields the TypeScript runner implements", () =>
   );
 });
 
-// Every TypeScript option: null must be set by some case's options, a string
-// exempts the key with its reason. The types make this table exhaustive.
-type Surface<T> = { [K in keyof Required<T>]: string | null };
+// Every TypeScript option; the types keep these lists exhaustive. Native
+// options are named by their providerOptions field.
+type Keys<T> = { [K in keyof Required<T>]: true };
+const request = Object.keys({
+  prompt: true,
+  provider: true,
+  model: true,
+  effort: true,
+  cwd: true,
+  sessionId: true,
+  continueSession: true,
+  includeRaw: true,
+  signal: true,
+  providerOptions: true,
+  onProviderEvent: true,
+  traceFile: true,
+  cliLogin: true,
+  tools: true,
+  mcpServers: true,
+  outputSchema: true,
+  systemPrompt: true,
+  subagents: true,
+  maxTurns: true,
+  timeout: true,
+  artifactsDir: true,
+  builtinTools: true,
+  permissionMode: true,
+} satisfies Keys<RunRequest>);
 const surface = {
-  request: {
-    prompt: null,
-    provider: null,
-    model: null,
-    effort: null,
-    cwd: null,
-    sessionId: null,
-    continueSession: null,
-    includeRaw: null,
-    signal: null,
-    providerOptions: null,
-    onProviderEvent: null,
-    traceFile: null,
-    cliLogin: null,
-    tools: null,
-    mcpServers: null,
-    outputSchema: null,
-    systemPrompt: null,
-    subagents: null,
-    maxTurns: null,
-    timeout: "Python's timeout maps to signal; TypeScript reserves the name",
-    artifactsDir: null,
-    builtinTools: null,
-    permissionMode: null,
-  } satisfies Surface<RunRequest>,
-  anthropic: {
-    permissionMode: null,
-    allowDangerouslySkipPermissions: null,
-    allowedTools: null,
-    disallowedTools: null,
-    settingSources: null,
-    pathToClaudeCodeExecutable: null,
-    maxTurns: null,
-    thinking: null,
-    tools: null,
-    systemPrompt: null,
-    env: null,
-  } satisfies Surface<AnthropicNativeOptions>,
-  "openai.client": {
-    apiKey: null,
-    baseUrl:
-      "Selects the built-in provider, whose websocket transport and retries the mock cannot turn off; cases use a custom provider",
-    env: null,
-    codexPathOverride:
-      "Runtime location; codex-exec.test.ts drives a fake runtime through it",
-  } satisfies Surface<CodexNativeOptions>,
-  "openai.thread": {
-    sandboxMode: null,
-    skipGitRepoCheck:
-      "codex exec only; the runner sets it because scratch directories are not repositories",
-    networkAccessEnabled: null,
-    webSearchMode: null,
-    approvalPolicy: null,
-    additionalDirectories: null,
-  } satisfies Surface<CodexThreadOptions>,
+  anthropic: [
+    ...request,
+    ...Object.keys({
+      permissionMode: true,
+      allowDangerouslySkipPermissions: true,
+      allowedTools: true,
+      disallowedTools: true,
+      settingSources: true,
+      pathToClaudeCodeExecutable: true,
+      maxTurns: true,
+      thinking: true,
+      tools: true,
+      systemPrompt: true,
+      env: true,
+    } satisfies Keys<AnthropicNativeOptions>).map((key) => `options.${key}`),
+  ],
+  codex: [
+    ...request,
+    ...Object.keys({
+      apiKey: true,
+      baseUrl: true,
+      env: true,
+      codexPathOverride: true,
+    } satisfies Keys<CodexNativeOptions>).map((key) => `client.${key}`),
+    ...Object.keys({
+      sandboxMode: true,
+      skipGitRepoCheck: true,
+      networkAccessEnabled: true,
+      webSearchMode: true,
+      approvalPolicy: true,
+      additionalDirectories: true,
+    } satisfies Keys<CodexThreadOptions>).map((key) => `thread.${key}`),
+  ],
 };
 
 test("every TypeScript option is exercised by a conformance case or exempted", () => {
@@ -107,13 +111,19 @@ test("every TypeScript option is exercised by a conformance case or exempted", (
       }),
     ),
   );
-  const missing: string[] = [];
-  const stale: string[] = [];
-  for (const [layer, keys] of Object.entries(surface))
-    for (const [key, reason] of Object.entries(keys)) {
-      const name = `${layer}.${key}`;
-      if (reason === null && !used.has(name)) missing.push(name);
-      if (reason !== null && used.has(name)) stale.push(name);
-    }
-  assert.deepEqual({ missing, stale }, { missing: [], stale: [] });
+  const options = Object.entries(surface).flatMap(([provider, keys]) =>
+    keys.map((key) => `${provider}:${key}`),
+  );
+  assert.deepEqual(
+    {
+      missing: options.filter((key) => !used.has(key) && !exemptions[key]),
+      exemptedButExercised: Object.keys(exemptions).filter((key) =>
+        used.has(key),
+      ),
+      unknownExemptions: Object.keys(exemptions).filter(
+        (key) => !options.includes(key),
+      ),
+    },
+    { missing: [], exemptedButExercised: [], unknownExemptions: [] },
+  );
 });

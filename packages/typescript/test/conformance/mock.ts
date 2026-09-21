@@ -5,9 +5,11 @@ import type { AddressInfo } from "node:net";
 export interface Step {
   text?: string;
   thinking?: string;
-  tool?: { name: string; input?: Record<string, unknown> };
+  tool?: ToolCall | ToolCall[];
   shell?: string;
-  usage?: [number, number];
+  tool_search?: string;
+  /** Input and output tokens; Codex also takes reasoning tokens. */
+  usage?: [number, number, number?];
   stop_reason?: string;
   status?: number;
   headers?: Record<string, string>;
@@ -15,6 +17,10 @@ export interface Step {
   stream_error?: Record<string, unknown>;
   truncate?: boolean;
   hang?: number;
+}
+interface ToolCall {
+  name: string;
+  input?: Record<string, unknown>;
 }
 export interface Recorded {
   path: string;
@@ -133,6 +139,11 @@ function respond(
   else res.end(sse(events));
 }
 
+const toolCalls = (step: Step, shell: (command: string) => ToolCall) => [
+  ...[step.tool ?? []].flat(),
+  ...(step.shell !== undefined ? [shell(step.shell)] : []),
+];
+
 function claudeBlocks(step: Step, index: number): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [];
   if (step.thinking !== undefined)
@@ -142,17 +153,18 @@ function claudeBlocks(step: Step, index: number): Record<string, unknown>[] {
       signature: "sig",
     });
   if (step.text !== undefined) blocks.push({ type: "text", text: step.text });
-  const tool =
-    step.shell !== undefined
-      ? { name: "Bash", input: { command: step.shell } }
-      : step.tool;
-  if (tool)
+  const calls = toolCalls(step, (command) => ({
+    name: "Bash",
+    input: { command },
+  }));
+  calls.forEach((call, n) => {
     blocks.push({
       type: "tool_use",
-      id: `toolu_${index}`,
-      name: tool.name,
-      input: tool.input ?? {},
+      id: `toolu_${index}_${n}`,
+      name: call.name,
+      input: call.input ?? {},
     });
+  });
   return blocks;
 }
 
@@ -217,10 +229,12 @@ function claudeEvents(step: Step, index: number, model: string): Event[] {
           partial_json: JSON.stringify(block.input),
         }),
       );
-    events.push([
-      "content_block_stop",
-      { type: "content_block_stop", index: n },
-    ]);
+    // A stream error arrives inside the open block.
+    if (!step.stream_error)
+      events.push([
+        "content_block_stop",
+        { type: "content_block_stop", index: n },
+      ]);
   });
   if (step.stream_error)
     return [...events, ["error", { type: "error", error: step.stream_error }]];
@@ -248,20 +262,31 @@ function codexEvents(step: Step, index: number): Event[] {
       id: `rs_${index}`,
       summary: [{ type: "summary_text", text: step.thinking }],
     });
-  const call = (name: string, input: unknown) => {
+  if (step.tool_search !== undefined)
+    items.push({
+      type: "tool_search_call",
+      id: `ts_${index}`,
+      call_id: `ts_${index}`,
+      execution: "client",
+      status: "completed",
+      arguments: { query: step.tool_search },
+    });
+  const calls = toolCalls(step, (cmd) => ({
+    name: "exec_command",
+    input: { cmd },
+  }));
+  calls.forEach(({ name, input }, n) => {
     // Codex addresses MCP tools as a namespace plus the tool's own name.
     const mcp = /^(mcp__.+?)__(.+)$/.exec(name);
     items.push({
       type: "function_call",
-      id: `fc_${index}_${items.length}`,
-      call_id: `call_${index}_${items.length}`,
+      id: `fc_${index}_${n}`,
+      call_id: `call_${index}_${n}`,
       name: mcp ? mcp[2] : name,
       ...(mcp ? { namespace: mcp[1] } : {}),
-      arguments: JSON.stringify(input),
+      arguments: JSON.stringify(input ?? {}),
     });
-  };
-  if (step.tool) call(step.tool.name, step.tool.input ?? {});
-  if (step.shell !== undefined) call("exec_command", { cmd: step.shell });
+  });
   if (step.text !== undefined)
     items.push({
       type: "message",
@@ -269,7 +294,7 @@ function codexEvents(step: Step, index: number): Event[] {
       id: `msg_${index}`,
       content: [{ type: "output_text", text: step.text }],
     });
-  const [input, output] = step.usage ?? [100, 10];
+  const [input, output, reasoning = 0] = step.usage ?? [100, 10];
   const done: Event = step.stream_error
     ? [
         "response.failed",
@@ -288,7 +313,7 @@ function codexEvents(step: Step, index: number): Event[] {
               input_tokens: input,
               input_tokens_details: { cached_tokens: 0 },
               output_tokens: output,
-              output_tokens_details: { reasoning_tokens: 0 },
+              output_tokens_details: { reasoning_tokens: reasoning },
               total_tokens: input + output,
             },
           },

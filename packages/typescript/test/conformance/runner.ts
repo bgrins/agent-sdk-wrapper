@@ -39,7 +39,7 @@ export interface Expect {
   final_text?: string;
   final_text_contains?: string;
   events?: { includes?: string[]; excludes?: string[]; count?: number };
-  tool_calls?: string[];
+  tool_calls?: string[] | { includes?: string[]; excludes?: string[] };
   tool_results?: { contains?: string; is_error?: boolean }[];
   structured_output?: unknown;
   requests?: { count?: number; match?: Match[] };
@@ -74,7 +74,11 @@ export interface Case {
   mock?: Step[];
   expect?: Expect;
   runs?: LaterRun[];
-  languages?: { typescript?: string | { options?: Options; expect?: Expect } };
+  languages?: {
+    typescript?:
+      | string
+      | { options?: Options; expect?: Expect; reason: string };
+  };
   live?: {
     prompt?: string;
     options?: Options;
@@ -98,7 +102,10 @@ export interface Plan {
   turns: Turn[];
 }
 
-export const cases: Case[] = JSON.parse(
+const spec: {
+  cases: Case[];
+  coverage_exemptions: { typescript?: Record<string, string> };
+} = JSON.parse(
   readFileSync(
     new URL(
       "../../../../../docs/fixtures/conformance-v1.json",
@@ -106,7 +113,10 @@ export const cases: Case[] = JSON.parse(
     ),
     "utf8",
   ),
-).cases;
+);
+export const cases = spec.cases;
+/** `<provider>:<option>` to the reason no case exercises it. */
+export const exemptions = spec.coverage_exemptions.typescript ?? {};
 
 const liveModels: Record<CaseProvider, [env: string, model: string]> = {
   anthropic: ["AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL", "claude-haiku-4-5"],
@@ -164,17 +174,14 @@ export function resolveCase(c: Case, mode: Mode): Plan | string {
     },
   ];
   (c.runs ?? []).forEach((later, index) => {
-    const extra = live?.runs?.[index];
-    const run = {
-      ...later,
-      ...extra,
-      options: { ...later.options, ...extra?.options },
-    };
+    const run = { ...later, ...live?.runs?.[index] };
     turns.push({
       prompt: run.prompt,
       agent:
-        run.agent === "new" ? mergeOptions(options, run.options) : undefined,
-      overrides: run.agent === "new" ? {} : run.options,
+        run.agent === "new"
+          ? mergeOptions(options, run.options ?? {})
+          : undefined,
+      overrides: run.agent === "new" ? {} : (run.options ?? {}),
       expect: run.expect ?? {},
     });
   });
@@ -280,12 +287,18 @@ export const pythonOptions: Record<string, Entry> = {
   mcp_servers: request("mcpServers"),
   output_schema: request("outputSchema"),
   artifacts_dir: request("artifactsDir"),
-  "extra_options.thinking": {
-    anthropic: ({ budget_tokens, ...thinking }: Options) =>
-      claude("thinking")({
-        ...thinking,
-        ...(budget_tokens === undefined ? {} : { budgetTokens: budget_tokens }),
-      }),
+  // Both languages pass these to the Claude SDK, whose TypeScript names are camelCase.
+  extra_options: {
+    anthropic: (options: Options) => ({
+      anthropic: Object.fromEntries(
+        Object.entries(options).map(([key, value]) => {
+          const { budget_tokens, ...thinking } = value as Options;
+          return key === "thinking"
+            ? ["thinking", { ...thinking, budgetTokens: budget_tokens }]
+            : [key.replace(/_(\w)/g, (_, c: string) => c.toUpperCase()), value];
+        }),
+      ),
+    }),
   },
   "provider_options.cli_path": {
     anthropic: claude("pathToClaudeCodeExecutable"),
@@ -300,6 +313,21 @@ export const pythonOptions: Record<string, Entry> = {
     },
   },
   "provider_options.config.env": { codex: client("env") },
+  // The TypeScript SDK sets this config key from networkAccessEnabled.
+  "provider_options.config.config_overrides": {
+    codex: (entries: string[]) => {
+      const fragment: Fragment = {};
+      for (const entry of entries) {
+        const value =
+          /^sandbox_workspace_write\.network_access=(true|false)$/.exec(
+            entry,
+          )?.[1];
+        if (!value) throw new Unmapped(`config_overrides entry ${entry}`);
+        merge(fragment, thread("networkAccessEnabled")(value === "true"));
+      }
+      return fragment;
+    },
+  },
 };
 
 function merge(target: Fragment, source: Fragment): Fragment {
@@ -345,15 +373,19 @@ export function mapOptions(options: Options, ctx: Context): Fragment {
   return fragment;
 }
 
-const layerNames: Record<Layer, string> = {
-  request: "request",
-  anthropic: "anthropic",
-  client: "openai.client",
-  thread: "openai.thread",
+/** Where a layer's options live under providerOptions. */
+const nativePrefix: Record<Layer, string> = {
+  request: "",
+  anthropic: "options.",
+  client: "client.",
+  thread: "thread.",
 };
-/** Qualified TypeScript option names a plan's options set; empty when an option is unmapped. */
+/**
+ * `<provider>:<option>` for each TypeScript option a plan sets, with native
+ * options as `options.x`, `client.x` or `thread.x`; empty when an option is unmapped.
+ */
 export function exercised(plan: Plan): string[] {
-  const keys = new Set(["request.provider", "request.prompt"]);
+  const keys = new Set(["provider", "prompt"]);
   try {
     for (const turn of plan.turns)
       for (const options of [turn.agent ?? {}, turn.overrides]) {
@@ -363,16 +395,16 @@ export function exercised(plan: Plan): string[] {
           Layer,
           Options,
         ][]) {
-          if (layer !== "request") keys.add("request.providerOptions");
+          if (layer !== "request") keys.add("providerOptions");
           for (const key of Object.keys(fields))
-            keys.add(`${layerNames[layer]}.${key}`);
+            keys.add(`${nativePrefix[layer]}${key}`);
         }
       }
   } catch (error) {
     if (error instanceof Unmapped) return [];
     throw error;
   }
-  return [...keys];
+  return [...keys].map((key) => `${plan.provider}:${key}`);
 }
 
 const dead = "http://127.0.0.1:9";
@@ -383,7 +415,8 @@ function isolatedEnv(root: string, mode: Mode): Record<string, string> {
     if (
       value !== undefined &&
       !/^(ANTHROPIC_|OPENAI_|CODEX_|CLAUDE_CODE_|XDG_)/.test(key) &&
-      key !== "CLAUDECODE"
+      key !== "CLAUDECODE" &&
+      key !== "MODEL"
     )
       env[key] = value;
   Object.assign(env, {
@@ -495,7 +528,7 @@ export async function runCase(plan: Plan, mode: Mode): Promise<Outcome[]> {
         env.CLAUDE_CODE_MAX_RETRIES = "0";
       }
     } else {
-      env.OPENAI_API_KEY = key ?? "sk-mock";
+      env.OPENAI_API_KEY = key ?? "sk-mock-key";
       if (mock)
         await writeFile(
           join(root, "codex_home", "config.toml"),
@@ -691,8 +724,14 @@ async function check(
   const calls = events.flatMap((event) =>
     event.type === "tool_call" ? [event.name] : [],
   );
-  if (expect.tool_calls !== undefined)
-    assert.deepEqual(calls, expect.tool_calls, summary);
+  const toolCalls = expect.tool_calls;
+  if (Array.isArray(toolCalls)) assert.deepEqual(calls, toolCalls, summary);
+  else if (toolCalls) {
+    for (const name of toolCalls.includes ?? [])
+      assert.ok(calls.includes(name), `missing ${name} call\n${summary}`);
+    for (const name of toolCalls.excludes ?? [])
+      assert.ok(!calls.includes(name), `unexpected ${name} call\n${summary}`);
+  }
   if (expect.tool_results !== undefined) {
     const results = events.flatMap((event) =>
       event.type === "tool_result" ? [event] : [],
@@ -789,6 +828,7 @@ const fields = {
     "thinking",
     "tool",
     "shell",
+    "tool_search",
     "usage",
     "stop_reason",
     "status",
@@ -800,6 +840,7 @@ const fields = {
   ],
   run: ["prompt", "options", "agent", "expect"],
   live: ["prompt", "options", "expect", "runs"],
+  override: ["options", "expect", "reason"],
   expect: [
     "status",
     "error_type",
@@ -819,19 +860,19 @@ const fields = {
     "config_error",
   ],
 };
-/** Case fields, steps and expectations the TypeScript runner does not implement. */
+/** Fields of a case TypeScript runs that its runner does not implement. */
 export function unknownFields(c: Case): string[] {
   const unknown = (kind: keyof typeof fields, value: object | undefined) =>
     Object.keys(value ?? {})
       .filter((key) => !fields[kind].includes(key))
       .map((key) => `${kind}.${key}`);
   const override = c.languages?.typescript;
-  const expects = [
-    c.expect,
-    c.live?.expect,
-    typeof override === "object" ? override.expect : undefined,
-  ];
+  if (typeof override === "string")
+    return override.startsWith("unsupported: ") ? [] : ["override reason"];
+  const expects = [override?.expect ?? c.expect, c.live?.expect];
   return [
+    ...unknown("override", override),
+    ...(override && !override.reason ? ["override.reason"] : []),
     ...unknown("case", c),
     ...unknown("setup", c.setup),
     ...unknown("live", c.live),

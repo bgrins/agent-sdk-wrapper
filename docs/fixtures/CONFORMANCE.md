@@ -18,7 +18,7 @@ checks.
 | `mock` | Mock API steps, one per model request; the last repeats. Later runs continue the list |
 | `expect` | Offline expectations |
 | `runs` | Later runs, in order, after the case's run (below) |
-| `languages` | Per-language overrides: `{"typescript": "unsupported: <reason>"}`, or an object with `options`/`expect` to replace (options stay Python-named), or `{"expect": {"config_error": true}}`. A string or `config_error` override also skips the live run |
+| `languages` | Per-language overrides: `{"typescript": "unsupported: <reason>"}`, or an object with `options`/`expect` to replace (options stay Python-named) and a `reason`, such as `{"expect": {"config_error": true}, "reason": "..."}`. A string or `config_error` override also skips the live run |
 | `live` | Optional live section: `prompt`, `options` merged over the case options, `expect` in place of the offline one, and `runs` whose fields replace those of the run at the same index |
 
 The top-level `coverage_exemptions` maps each language to `{"<provider>:<option>": "<reason>"}`
@@ -85,7 +85,8 @@ Steps combine where it makes sense, e.g. `{"thinking": "plan", "text": "done", "
 or text followed by a `stream_error`.
 
 The Claude mock serves `POST /v1/messages` (`ANTHROPIC_BASE_URL` without `/v1`); the Codex mock
-serves `POST /v1/responses` for a custom model provider with retries off. After a failed stream
+serves `POST /v1/responses` for a custom model provider with retries off. Offline runs set
+`ANTHROPIC_API_KEY=sk-ant-mock` or `OPENAI_API_KEY=sk-mock-key`. After a failed stream
 the Claude CLI may stream again (each attempt takes the next step) and then retries once without
 streaming; a non-streaming request replays the step of the latest streaming one (a
 `stream_error` as HTTP 529, 429 or 500 by `error.type`) instead of taking the next one. The number
