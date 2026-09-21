@@ -68,7 +68,7 @@ from ..events import (
     WarningEvent,
 )
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
-from ..request import INHERIT_MODEL, RunRequest, normalize_effort_for_provider
+from ..request import RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
 from ..tools import json_schema_for, to_anthropic_tools, validate_tool_names
 from .base import ProviderAdapter
@@ -83,6 +83,8 @@ _STDERR_TAIL_LINES = 50
 _EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 # Background subagents add a follow-up turn and a second result frame.
 _BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+# Subagents without a model, built-in ones included, use this over the parent model.
+_SUBAGENT_MODEL_ENV = "CLAUDE_CODE_SUBAGENT_MODEL"
 # claude.ai login tokens the CLI reads from the env; it treats empty values as unset.
 _LOGIN_TOKEN_ENV = (
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -324,8 +326,7 @@ class AnthropicProvider(ProviderAdapter):
                     description=sub.description,
                     prompt=sub.prompt,
                     tools=sub.tools,
-                    # Without a model the CLI uses CLAUDE_CODE_SUBAGENT_MODEL from the host.
-                    model=sub.model or INHERIT_MODEL,
+                    model=sub.model,
                     maxTurns=sub.max_turns,
                 )
                 for name, sub in req.subagents.items()
@@ -341,6 +342,7 @@ class AnthropicProvider(ProviderAdapter):
         # An empty value keeps an inherited effort from overriding the CLI default.
         env.setdefault(_EFFORT_ENV, effort or "")
         env.setdefault(_BACKGROUND_TASKS_ENV, "1")
+        env.setdefault(_SUBAGENT_MODEL_ENV, "")
         for name in _LOGIN_TOKEN_ENV:
             env[name] = ""
 

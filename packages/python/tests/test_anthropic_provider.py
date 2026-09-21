@@ -164,29 +164,6 @@ def test_anthropic_max_thinking_tokens_reaches_the_cli():
     assert "--thinking" not in command
 
 
-def test_anthropic_subagents_without_a_model_inherit_the_parent_model():
-    from agent_sdk_wrapper import INHERIT_MODEL
-
-    options = AnthropicProvider()._build_options(
-        RunRequest(
-            provider="anthropic",
-            prompt="x",
-            subagents={
-                "unset": SubagentDef(description="d", prompt="p"),
-                "inherit": SubagentDef(description="d", prompt="p", model=INHERIT_MODEL),
-                "pinned": SubagentDef(description="d", prompt="p", model="claude-haiku-4-5"),
-            },
-        )
-    )
-
-    # Without a model, the CLI would use CLAUDE_CODE_SUBAGENT_MODEL from the host env.
-    assert {name: agent.model for name, agent in options.agents.items()} == {
-        "unset": "inherit",
-        "inherit": "inherit",
-        "pinned": "claude-haiku-4-5",
-    }
-
-
 def test_every_native_option_a_first_class_field_sets_is_owned(tmp_path):
     from claude_agent_sdk import ClaudeAgentOptions
     from pydantic import BaseModel
@@ -767,6 +744,7 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
         "KEEP": "1",
         "CLAUDE_CODE_EFFORT_LEVEL": "high",
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "",
         **blanked_logins,
     }
 
@@ -774,11 +752,15 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
         RunRequest(
             provider="anthropic",
             prompt="x",
-            env={"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"},
+            env={
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-4-5",
+            },
         )
     )
     assert caller.env == {
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-4-5",
         "CLAUDE_CODE_EFFORT_LEVEL": "",
         **blanked_logins,
     }
@@ -1534,3 +1516,51 @@ def test_anthropic_cancellation_outranks_a_refusal_and_duplicates_are_dropped(mo
     )
     assert [e.text for e in events if isinstance(e, Text)] == ["once"]
     assert [e.model for e in events if isinstance(e, SessionInfo)] == [None, "claude-x"]
+
+
+@pytest.fixture
+def claude_cli(tmp_path, monkeypatch):
+    """The real Claude CLI against a mock Messages API; yields ``(api, cwd)``."""
+    from conformance.mocks import MockClaude
+    from conformance.runner import Scratch, isolate
+
+    scratch = Scratch(tmp_path)
+    isolate(monkeypatch, scratch, live=False)
+    api = MockClaude().start()
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", api.base_url)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-mock")
+    monkeypatch.setenv("CLAUDE_CODE_MAX_RETRIES", "0")
+    yield api, scratch.dir("cwd")
+    api.stop()
+
+
+async def test_anthropic_subagents_ignore_the_host_subagent_model(claude_cli, monkeypatch):
+    from agent_sdk_wrapper import Agent
+
+    api, cwd = claude_cli
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "claude-sonnet-4-5")
+
+    def delegate(subagent_type):
+        return {
+            "tool": {
+                "name": "Agent",
+                "input": {"description": "d", "prompt": "p", "subagent_type": subagent_type},
+            }
+        }
+
+    api.set_steps([
+        delegate("general-purpose"),
+        {"text": "built-in"},
+        delegate("reviewer"),
+        {"text": "defined"},
+        {"text": "done"},
+    ])
+    result = await Agent(
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        cwd=cwd,
+        subagents={"reviewer": SubagentDef(description="Reviews.", prompt="Review.")},
+    ).run("go")
+
+    assert result.status == "success"
+    assert [r["body"]["model"] for r in api.requests] == ["claude-haiku-4-5"] * 5
