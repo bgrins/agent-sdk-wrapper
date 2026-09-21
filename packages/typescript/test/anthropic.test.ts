@@ -460,7 +460,11 @@ test("Claude server-tool results pair with their calls", async () => {
       },
     ]),
     assistant([
-      { type: "web_search_tool_result", tool_use_id: "search", content: [search] },
+      {
+        type: "web_search_tool_result",
+        tool_use_id: "search",
+        content: [search],
+      },
     ]),
     assistant([
       { type: "server_tool_use", id: "advice", name: "advisor", input: {} },
@@ -469,7 +473,10 @@ test("Claude server-tool results pair with their calls", async () => {
       {
         type: "advisor_tool_result",
         tool_use_id: "advice",
-        content: { type: "advisor_tool_result_error", error_code: "overloaded" },
+        content: {
+          type: "advisor_tool_result_error",
+          error_code: "overloaded",
+        },
       },
     ]),
     result(),
@@ -490,7 +497,8 @@ test("Claude server-tool results pair with their calls", async () => {
         type: "tool_result",
         id: "advice",
         name: "advisor",
-        output: '{"type":"advisor_tool_result_error","error_code":"overloaded"}',
+        output:
+          '{"type":"advisor_tool_result_error","error_code":"overloaded"}',
         is_error: true,
       },
     ],

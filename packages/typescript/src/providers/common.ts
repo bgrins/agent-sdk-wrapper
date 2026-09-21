@@ -132,7 +132,9 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
   const message = cause instanceof Error ? cause.message : String(cause);
   const data = object(cause);
   // Shells report a signal exit as 128 + signal; some runtimes report -signal.
-  const code = Number(/\bexited with (?:exit )?code (-?\d+)\b/i.exec(message)?.[1]);
+  const code = Number(
+    /\bexited with (?:exit )?code (-?\d+)\b/i.exec(message)?.[1],
+  );
   if (
     data?.signal ||
     (code >= 129 && code <= 159) ||
