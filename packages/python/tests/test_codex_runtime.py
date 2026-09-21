@@ -621,6 +621,35 @@ async def test_wrapper_tools_validate_and_report_like_the_claude_handler(
     }
 
 
+async def test_a_required_mcp_server_that_exits_is_not_transient(mock_api, codex_home, tmp_path):
+    broken = McpStdioServer(name="broken", command="/bin/sh", args=["-c", "exit 3"], required=True)
+
+    result = await codex_agent(mock_api, codex_home, tmp_path, mcp_servers=[broken]).run("hi")
+
+    # "connection closed: initialize response" is not a dropped API connection.
+    assert result.error_type == "provider_exception"
+    assert "required MCP servers failed to initialize: broken" in (result.error or "")
+    assert mock_api.posts() == []
+
+
+async def test_a_tool_the_server_cannot_import_fails_the_run_with_the_import_error(
+    mock_api, codex_home, tmp_path, monkeypatch
+):
+    import types
+
+    ghost_tools = types.ModuleType("ghost_tools")
+    exec("def ghost() -> str:\n    return 'boo'\n", ghost_tools.__dict__)
+    monkeypatch.setitem(sys.modules, "ghost_tools", ghost_tools)
+
+    result = await codex_agent(mock_api, codex_home, tmp_path, tools=[ghost_tools.ghost]).run("hi")
+
+    assert result.error_type == "provider_exception"
+    assert "cannot load tool 'ghost': ModuleNotFoundError: No module named 'ghost_tools'" in (
+        result.error or ""
+    )
+    assert mock_api.posts() == []
+
+
 async def test_session_reports_the_model_and_mcp_startup_failures(
     mock_api, codex_home, tmp_path
 ):
