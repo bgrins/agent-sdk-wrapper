@@ -13,6 +13,7 @@ import {
   type Plan,
   resolveCase,
   runCase,
+  unknownFields,
 } from "./conformance/runner.js";
 
 describe("conformance cases, offline", {
@@ -27,6 +28,13 @@ describe("conformance cases, offline", {
       await runCase(plan as Plan, "offline");
     });
   }
+});
+
+test("conformance cases use only fields the TypeScript runner implements", () => {
+  assert.deepEqual(
+    cases.flatMap((c) => unknownFields(c).map((field) => `${c.id}: ${field}`)),
+    [],
+  );
 });
 
 // Every TypeScript option: null must be set by some case's options, a string

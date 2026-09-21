@@ -639,12 +639,9 @@ function matches(value: unknown, match: Match): boolean {
   if (match.absent) return value === undefined;
   if (match.excludes !== undefined)
     return value === undefined || !text.includes(match.excludes);
-  if (match.contains !== undefined)
-    return value !== undefined && text.includes(match.contains);
-  return (
-    JSON.stringify(value) === JSON.stringify(match.equals) &&
-    value !== undefined
-  );
+  if (value === undefined) return false;
+  if (match.contains !== undefined) return text.includes(match.contains);
+  return JSON.stringify(value) === JSON.stringify(match.equals);
 }
 
 const errorType = (thrown: unknown) =>
@@ -652,7 +649,9 @@ const errorType = (thrown: unknown) =>
     ? thrown.errorType
     : thrown instanceof RuntimeUnavailableError
       ? "runtime_unavailable"
-      : undefined;
+      : String(thrown);
+const shape = (envelopes: EventEnvelope[]) =>
+  envelopes.map(({ sequence, event }) => [sequence, event.type]);
 
 async function check(
   expect: Expect,
@@ -664,7 +663,7 @@ async function check(
   if (expect.config_error) {
     assert.ok(
       thrown instanceof ConfigError,
-      `expected ConfigError, got ${String(thrown ?? result?.status)}`,
+      `expected ConfigError: ${String(thrown ?? result?.status)}`,
     );
     assert.deepEqual(
       outcome.envelopes,
@@ -675,30 +674,18 @@ async function check(
   }
   if (expect.setup_error !== undefined) {
     assert.equal(requests.length, 0, "setup errors precede model requests");
-    assert.equal(
-      thrown ? errorType(thrown) : result?.error_type,
-      expect.setup_error,
-      String(thrown ?? result?.error),
-    );
-    if (thrown) return;
+    // TypeScript throws setup failures; Python returns failed results.
+    if (thrown) return assert.equal(errorType(thrown), expect.setup_error);
+    assert.equal(result?.error_type, expect.setup_error, result?.error ?? "");
   }
   if (thrown) throw thrown;
   assert.ok(result);
-  for (const key of ["raises", "artifacts"] as const)
-    assert.equal(
-      expect[key],
-      undefined,
-      `TypeScript has no ${key} equivalent; add a languages.typescript override`,
-    );
   const events = result.events.map(({ event }) => event);
   const types: string[] = events.map((event) => event.type);
-  const summary = `${result.status} ${result.error_type ?? ""} ${result.error ?? ""}\nevents: ${types.join(", ")}`;
-  if (expect.status !== undefined)
-    assert.equal(result.status, expect.status, summary);
-  if (expect.error_type !== undefined)
-    assert.equal(result.error_type, expect.error_type, summary);
-  if (expect.final_text !== undefined)
-    assert.equal(result.final_text, expect.final_text, summary);
+  const summary = `${result.status} ${result.error_type} ${result.error}\nevents: ${types.join(", ")}`;
+  for (const key of ["status", "error_type", "final_text"] as const)
+    if (expect[key] !== undefined)
+      assert.equal(result[key], expect[key], summary);
   if (expect.final_text_contains !== undefined)
     assert.ok(
       result.final_text.includes(expect.final_text_contains),
@@ -710,36 +697,30 @@ async function check(
     assert.ok(!types.includes(type), `unexpected ${type}\n${summary}`);
   if (expect.events?.count !== undefined)
     assert.equal(events.length, expect.events.count, summary);
+  const calls = events.flatMap((event) =>
+    event.type === "tool_call" ? [event.name] : [],
+  );
   if (expect.tool_calls !== undefined)
-    assert.deepEqual(
-      events.flatMap((event) =>
-        event.type === "tool_call" ? [event.name] : [],
-      ),
-      expect.tool_calls,
-    );
+    assert.deepEqual(calls, expect.tool_calls, summary);
   if (expect.tool_results !== undefined) {
     const results = events.flatMap((event) =>
       event.type === "tool_result" ? [event] : [],
     );
-    assert.equal(results.length, expect.tool_results.length, summary);
-    expect.tool_results.forEach((want, index) => {
-      const got = results[index];
-      assert.ok(
-        got?.output?.includes(want.contains ?? ""),
-        `tool result ${index}: ${got?.output}`,
-      );
-      assert.equal(
-        got?.is_error,
-        want.is_error ?? false,
-        `tool result ${index}: ${got?.output}`,
-      );
+    const got = results.map(({ output = "", is_error }, index) => {
+      const contains = expect.tool_results?.[index]?.contains ?? "";
+      return {
+        contains: output.includes(contains) ? contains : output,
+        is_error,
+      };
     });
+    const want = expect.tool_results.map(
+      ({ contains = "", is_error = false }) => ({ contains, is_error }),
+    );
+    assert.deepEqual(got, want, summary);
   }
   if ("structured_output" in expect)
     assert.deepEqual(result.structured_output, expect.structured_output);
   if (expect.same_session) assert.equal(result.session_id, previousSession);
-  const shape = (envelopes: EventEnvelope[]) =>
-    envelopes.map(({ sequence, event }) => [sequence, event.type]);
   if (expect.on_event)
     assert.deepEqual(shape(outcome.envelopes), shape(result.events));
   if (expect.trace_file) {
@@ -758,13 +739,10 @@ async function check(
   if (expect.on_provider_event)
     assert.ok(outcome.natives.length > 0, "no native events");
   for (const type of expect.raw ?? []) {
-    const matching = events.filter((event) => event.type === type);
-    assert.ok(matching.length > 0, `missing ${type}\n${summary}`);
+    const typed = events.filter((event) => event.type === type);
     assert.ok(
-      matching.every(
-        (event) => "raw" in event && typeof event.raw === "object",
-      ),
-      `${type} without raw`,
+      typed.length > 0 && typed.every((event) => "raw" in event && event.raw),
+      `${type} with raw\n${summary}`,
     );
   }
   if (mode === "live") return;
@@ -779,10 +757,10 @@ async function check(
       match.request === undefined
         ? requests
         : requests.slice(match.request).slice(0, 1);
-    const values = pool.map((request) =>
+    const values = pool.map(({ headers, body }) =>
       match.header !== undefined
-        ? request.headers[match.header]
-        : at(request.body, match.path ?? ""),
+        ? headers[match.header]
+        : at(body, match.path ?? ""),
     );
     const every =
       match.request === undefined &&
@@ -797,4 +775,80 @@ async function check(
       `request match ${JSON.stringify(match)} failed; saw ${JSON.stringify(values).slice(0, 2000)}`,
     );
   }
+}
+
+// Fields this runner implements; anything else fails the case instead of passing unchecked.
+const fields = {
+  case: [
+    "id",
+    "provider",
+    "options",
+    "run_options",
+    "prompt",
+    "setup",
+    "mock",
+    "expect",
+    "runs",
+    "languages",
+    "live",
+  ],
+  setup: ["files", "codex_login"],
+  step: [
+    "text",
+    "thinking",
+    "tool",
+    "shell",
+    "usage",
+    "stop_reason",
+    "status",
+    "headers",
+    "body",
+    "stream_error",
+    "truncate",
+    "hang",
+  ],
+  run: ["prompt", "options", "agent", "expect"],
+  live: ["prompt", "options", "expect", "runs"],
+  expect: [
+    "status",
+    "error_type",
+    "final_text",
+    "final_text_contains",
+    "events",
+    "tool_calls",
+    "tool_results",
+    "structured_output",
+    "requests",
+    "same_session",
+    "on_event",
+    "trace_file",
+    "on_provider_event",
+    "raw",
+    "setup_error",
+    "config_error",
+  ],
+};
+/** Case fields, steps and expectations the TypeScript runner does not implement. */
+export function unknownFields(c: Case): string[] {
+  const unknown = (kind: keyof typeof fields, value: object | undefined) =>
+    Object.keys(value ?? {})
+      .filter((key) => !fields[kind].includes(key))
+      .map((key) => `${kind}.${key}`);
+  const override = c.languages?.typescript;
+  const expects = [
+    c.expect,
+    c.live?.expect,
+    typeof override === "object" ? override.expect : undefined,
+  ];
+  return [
+    ...unknown("case", c),
+    ...unknown("setup", c.setup),
+    ...unknown("live", c.live),
+    ...(c.mock ?? []).flatMap((step) => unknown("step", step)),
+    ...[...(c.runs ?? []), ...(c.live?.runs ?? [])].flatMap((run) => {
+      expects.push(run.expect);
+      return unknown("run", run);
+    }),
+    ...expects.flatMap((expect) => unknown("expect", expect)),
+  ];
 }
