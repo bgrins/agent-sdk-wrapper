@@ -1213,13 +1213,16 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         assert 'mcp_servers.auditor.command="uv"' in overrides
         assert 'mcp_servers.auditor.args=["run", "auditor-mcp"]' in overrides
         assert f'mcp_servers.auditor.cwd="{tmp_path}"' in overrides
-        env_override = next(
-            value for value in overrides if value.startswith("mcp_servers.auditor.env=")
+        # Passed-through values never reach the Codex command line.
+        assert "parent" not in " ".join(overrides)
+        assert (
+            'mcp_servers.auditor.env_vars=["INHERITED_MODE", "OVERRIDE_MODE", "MISSING_MODE"]'
+            in overrides
         )
-        assert '"INHERITED_MODE" = "parent"' in env_override
-        assert '"OVERRIDE_MODE" = "explicit"' in env_override
-        assert '"AUDITOR_MODE" = "test"' in env_override
-        assert "MISSING_MODE" not in env_override
+        assert (
+            'mcp_servers.auditor.env={ "AUDITOR_MODE" = "test", "OVERRIDE_MODE" = "explicit" }'
+            in overrides
+        )
         assert 'mcp_servers.auditor.enabled_tools=["review", "search"]' in overrides
         assert 'mcp_servers.auditor.disabled_tools=["delete"]' in overrides
         assert 'mcp_servers.auditor.default_tools_approval_mode="approve"' in overrides

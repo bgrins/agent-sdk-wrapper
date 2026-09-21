@@ -48,7 +48,7 @@ from ..events import (
     Usage,
     WarningEvent,
 )
-from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
+from ..mcp import McpHttpServer, McpServer, McpStdioServer
 from ..request import RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
 from ..tools import (
@@ -1318,10 +1318,16 @@ def _mcp_config_overrides(
                         "mcp_servers", server.name, "cwd", value=_as_str(server.cwd)
                     )
                 )
-            env = stdio_server_env(server)
-            if env:
+            if server.env_passthrough:
+                # Codex copies these from its own env; values stay off the command line.
                 overrides.append(
-                    _config_override("mcp_servers", server.name, "env", value=env)
+                    _config_override(
+                        "mcp_servers", server.name, "env_vars", value=server.env_passthrough
+                    )
+                )
+            if server.env:
+                overrides.append(
+                    _config_override("mcp_servers", server.name, "env", value=server.env)
                 )
         elif isinstance(server, McpHttpServer):
             overrides.append(_config_override("mcp_servers", server.name, "url", value=server.url))

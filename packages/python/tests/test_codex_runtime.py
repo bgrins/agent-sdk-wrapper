@@ -500,6 +500,46 @@ async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_pat
     assert any(f"fox: {{\n{UNICODE_TEXT}\n}}" in text for text in followup)
 
 
+async def test_mcp_env_passthrough_comes_from_the_run_env(mock_api, codex_home, tmp_path):
+    script = tmp_path / "echo_server.py"
+    script.write_text(ECHO_MCP_SERVER, encoding="utf-8")
+
+    def echo_server(name: str, **options: Any) -> McpStdioServer:
+        return McpStdioServer(
+            name=name,
+            command=sys.executable,
+            args=[str(script)],
+            env_passthrough=["GREETING"],
+            default_tools_approval_mode="approve",
+            required=True,
+            **options,
+        )
+
+    mock_api.plan = [
+        {
+            "calls": [
+                {"name": "echo", "namespace": "mcp__inherits"},
+                {"name": "echo", "namespace": "mcp__overrides"},
+            ]
+        },
+        {"text": "done"},
+    ]
+    servers = [echo_server("inherits"), echo_server("overrides", env={"GREETING": "explicit"})]
+    agent = codex_agent(
+        mock_api, codex_home, tmp_path, env={"GREETING": "from-run"}, mcp_servers=servers
+    )
+
+    result = await agent.run("hi")
+
+    assert result.ok, result.error
+    outputs = {
+        e.event.name: json.loads(e.event.output or "{}")["content"][0]["text"]
+        for e in result.events
+        if e.event.type == "tool_result"
+    }
+    assert outputs == {"inherits.echo": "from-run", "overrides.echo": "explicit"}
+
+
 async def test_wrapper_tools_see_the_parent_env_and_imports(
     mock_api, codex_home, tmp_path, monkeypatch
 ):
