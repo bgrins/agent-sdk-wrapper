@@ -87,7 +87,6 @@ _ALLOWED_OVERRIDES = frozenset({
     "on_provider_event",
     "output_schema",
     "permission_mode",
-    "raise_on_error",
     "session_id",
     "setting_sources",
     "subagents",
@@ -119,7 +118,6 @@ class _Run:
     session_overridden: bool
     trace_path: str | Path | None
     on_event: Callable[[EventEnvelope], None] | None
-    raise_on_error: bool
     result: RunResult | None = None
 
 
@@ -161,7 +159,6 @@ class Agent:
         artifacts_dir: str | Path | None = None,
         on_event: Callable[[EventEnvelope], None] | None = None,
         on_provider_event: ProviderEventCallback | None = None,
-        raise_on_error: bool = False,
     ) -> None:
         self.provider: Provider = resolve_provider(provider, model)
         self.model = normalize_model_for_provider(self.provider, model)
@@ -193,7 +190,6 @@ class Agent:
         self.artifacts_dir = artifacts_dir
         self.on_event = on_event
         self.on_provider_event = on_provider_event
-        self.raise_on_error = raise_on_error
 
         self._provider = build_provider(self.provider, **(provider_options or {}))
 
@@ -211,11 +207,16 @@ class Agent:
         """Stream envelopes for one run. Invalid settings raise ``ConfigError`` here."""
 
         if "raise_on_error" in overrides:
-            raise ConfigError("stream() does not accept raise_on_error; check run_finished")
+            raise ConfigError("raise_on_error applies to run(); stream() reports run_finished")
         return self._events(self._prepare(prompt, overrides))
 
-    async def run(self, prompt: str, **overrides: Any) -> RunResult:
-        """Collect :meth:`stream` into a ``RunResult``."""
+    async def run(
+        self, prompt: str, *, raise_on_error: bool = False, **overrides: Any
+    ) -> RunResult:
+        """Collect :meth:`stream` into a ``RunResult``.
+
+        ``raise_on_error=True`` raises ``RunFailedError`` for a non-success result.
+        """
 
         run = self._prepare(prompt, overrides)
         async with contextlib.aclosing(self._events(run)) as events:
@@ -223,7 +224,7 @@ class Agent:
                 pass
         result = run.result
         assert result is not None
-        if not result.ok and run.raise_on_error:
+        if not result.ok and raise_on_error:
             raise RunFailedError(result)
         return result
 
@@ -269,7 +270,6 @@ class Agent:
             session_overridden="session_id" in overrides,
             trace_path=trace_path,
             on_event=overrides.get("on_event", self.on_event),
-            raise_on_error=bool(overrides.get("raise_on_error", self.raise_on_error)),
         )
 
     def _build_request(self, prompt: str, overrides: dict[str, Any]) -> RunRequest:

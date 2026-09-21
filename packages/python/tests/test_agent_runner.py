@@ -107,7 +107,7 @@ def test_raise_on_error_carries_the_result(monkeypatch):
     install_fake_providers(monkeypatch, events=play)
 
     with pytest.raises(RunFailedError, match="rate limit") as raised:
-        asyncio.run(Agent(provider="openai", raise_on_error=True).run("hi"))
+        asyncio.run(Agent(provider="openai").run("hi", raise_on_error=True))
 
     assert raised.value.result.error_type == "transient_api_error"
 
