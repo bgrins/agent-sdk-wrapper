@@ -131,10 +131,12 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
   if (cause instanceof AgentSdkWrapperError) return cause;
   const message = cause instanceof Error ? cause.message : String(cause);
   const data = object(cause);
+  // Shells report a signal exit as 128 + signal; some runtimes report -signal.
+  const code = Number(/\bexited with (?:exit )?code (-?\d+)\b/i.exec(message)?.[1]);
   if (
     data?.signal ||
-    // 128 + SIGINT/SIGKILL/SIGTERM when a wrapper script reports the exit.
-    /\bexited with (?:exit )?code (?:130|137|143)\b/i.test(message) ||
+    (code >= 129 && code <= 159) ||
+    code < 0 ||
     // Signal names are upper case; /i would match words like "sign" and "signal".
     /\b(?:[Kk]illed|[Ee]xited|[Tt]erminated)\b.*\bSIG[A-Z]{2,}\b/.test(message)
   )

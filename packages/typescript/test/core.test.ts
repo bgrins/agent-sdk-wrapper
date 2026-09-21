@@ -538,7 +538,18 @@ test("any upper-case signal name marks a runtime as terminated", () => {
     ) instanceof ProcessTerminatedError,
   );
 });
-test("high demand, 408 and 409 are transient; exit codes 130/137/143 are kills", () => {
+test("exit codes 129-159 and negative codes are signal kills", () => {
+  const terminated = (code: number) =>
+    nativeError(
+      new Error(`Codex Exec exited with code ${code}: fatal`),
+    ) instanceof ProcessTerminatedError;
+  assert.deepEqual(
+    [129, 130, 134, 137, 143, 159, -9, -15].filter(terminated),
+    [129, 130, 134, 137, 143, 159, -9, -15],
+  );
+  assert.deepEqual([0, 1, 2, 127, 128, 160, 255].filter(terminated), []);
+});
+test("high demand, 408 and 409 are transient", () => {
   for (const [message, status] of [
     [
       "We're currently experiencing high demand, which may cause temporary errors.",
@@ -551,10 +562,6 @@ test("high demand, 408 and 409 are transient; exit codes 130/137/143 are kills",
       classify(message, "provider_exception", status).error_type,
       "transient_api_error",
     );
-  assert.ok(
-    nativeError(new Error("Codex Exec exited with code 137")) instanceof
-      ProcessTerminatedError,
-  );
 });
 test("a kill after a provider error records both", async () => {
   const agent = new Agent(
