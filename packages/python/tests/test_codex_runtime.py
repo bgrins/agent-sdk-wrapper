@@ -312,6 +312,64 @@ async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_ho
     assert auth.read_text(encoding="utf-8") == before
 
 
+SECRET_KEY = "sk-mock-SECRET-4242"
+
+
+def env_key_agent(api: MockResponses, home: Path, cwd: Path, *overrides: str) -> Agent:
+    """An agent whose only API key is OPENAI_API_KEY in the run env."""
+
+    config = codex_config(api, home, *overrides)
+    for name in ("OPENAI_API_KEY", "CODEX_API_KEY"):
+        del config["env"][name]
+    return Agent(
+        provider="codex",
+        model=MODEL,
+        cwd=cwd,
+        timeout=60,
+        env={"OPENAI_API_KEY": SECRET_KEY},
+        provider_options={"config": config},
+    )
+
+
+def files_containing(root: Path, text: str) -> list[Path]:
+    return [p for p in root.rglob("*") if p.is_file() and text.encode() in p.read_bytes()]
+
+
+async def test_an_env_api_key_stays_out_of_codex_home_and_commands(
+    mock_api, codex_home, tmp_path
+):
+    mock_api.plan = [{"shell": 'printf "%s" "${OPENAI_API_KEY:-unset}"'}, {"text": "done"}]
+
+    result = await env_key_agent(mock_api, codex_home, tmp_path).run("hi")
+
+    assert result.ok, result.error
+    assert [r["authorization"] for r in mock_api.posts()] == [f"Bearer {SECRET_KEY}"] * 2
+    [shell] = [e.event for e in result.events if e.event.type == "tool_result"]
+    assert shell.output == "unset"
+    assert list(codex_home.glob("shell_snapshots/*"))
+    assert files_containing(codex_home, SECRET_KEY) == []
+
+
+async def test_a_provider_env_key_keeps_the_key_but_no_shell_snapshot(
+    mock_api, codex_home, tmp_path
+):
+    mock_api.plan = [{"shell": "true"}, {"text": "done"}]
+    agent = env_key_agent(
+        mock_api,
+        codex_home,
+        tmp_path,
+        "model_providers.mock.requires_openai_auth=false",
+        'model_providers.mock.env_key="OPENAI_API_KEY"',
+    )
+
+    result = await agent.run("hi")
+
+    assert result.ok, result.error
+    assert [r["authorization"] for r in mock_api.posts()] == [f"Bearer {SECRET_KEY}"] * 2
+    assert list(codex_home.glob("shell_snapshots/*")) == []
+    assert files_containing(codex_home, SECRET_KEY) == []
+
+
 class Detail(BaseModel):
     note: str
     score: int = 0

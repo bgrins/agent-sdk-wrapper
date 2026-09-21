@@ -18,6 +18,7 @@ import signal
 import sys
 import tempfile
 import textwrap
+import tomllib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
@@ -74,6 +75,7 @@ _CREDENTIAL_OVERRIDE_KEYS = frozenset({"cli_auth_credentials_store", "forced_log
 _WEB_SEARCH_OVERRIDE_KEYS = frozenset({"web_search", "tools.web_search"})
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PROVIDER_ENV_KEY_RE = re.compile(r"model_providers\.[^.]+\.env_key")
 _DEFAULT_REASONING_SUMMARY = "auto"
 _WRAPPER_TOOL_TIMEOUT_SEC = 600
 
@@ -211,10 +213,10 @@ class OpenAIProvider(ProviderAdapter):
             return req.env[_API_KEY_ENV] or None
         return os.environ.get(_API_KEY_ENV) or None
 
-    def _native_config_keys(self, req: RunRequest) -> set[str]:
-        """Dotted keys of any per-thread or per-turn ``config`` the caller passes."""
+    def _native_configs(self, req: RunRequest) -> list[dict[str, Any]]:
+        """Any per-thread or per-turn ``config`` the caller passes."""
 
-        keys: set[str] = set()
+        configs = []
         for options in (
             self._thread_options,
             self._turn_options,
@@ -223,8 +225,28 @@ class OpenAIProvider(ProviderAdapter):
         ):
             config = options.get("config") if isinstance(options, dict) else None
             if isinstance(config, dict):
-                keys |= _dotted_keys(config)
+                configs.append(config)
+        return configs
+
+    def _native_config_keys(self, req: RunRequest) -> set[str]:
+        keys: set[str] = set()
+        for config in self._native_configs(req):
+            keys |= _dotted_keys(config)
         return keys
+
+    def _provider_env_keys(self, req: RunRequest) -> set[str]:
+        """Env vars that model providers in the caller's config read their key from."""
+
+        items = [
+            item for key, value in _override_items(self._config) for item in _leaves(key, value)
+        ]
+        for config in self._native_configs(req):
+            items.extend(_leaves("", config))
+        return {
+            value
+            for key, value in items
+            if isinstance(value, str) and _PROVIDER_ENV_KEY_RE.fullmatch(key)
+        }
 
     def _uses_custom_model_provider(self, req: RunRequest) -> bool:
         thread_options = {
@@ -257,7 +279,7 @@ class OpenAIProvider(ProviderAdapter):
                     config_overrides += (
                         _config_override("cli_auth_credentials_store", value="ephemeral"),
                     )
-                async with self._codex_client(req, config_overrides) as codex:
+                async with self._codex_client(req, config_overrides, api_key is not None) as codex:
                     process = _codex_process(codex)
                     try:
                         async for event in self._run(codex, req, runtime_config, api_key):
@@ -321,7 +343,9 @@ class OpenAIProvider(ProviderAdapter):
             yield event
 
     @asynccontextmanager
-    async def _codex_client(self, req: RunRequest, config_overrides: tuple[str, ...] = ()):
+    async def _codex_client(
+        self, req: RunRequest, config_overrides: tuple[str, ...] = (), logs_in: bool = False
+    ):
         if self._codex is not None:
             yield self._codex
             return
@@ -330,7 +354,17 @@ class OpenAIProvider(ProviderAdapter):
 
         env = dict(req.env)
         # Codex treats an empty value as unset. An access token is a ChatGPT login.
-        removed = _API_KEY_ENVS if req.cli_login == "require" else (_ACCESS_TOKEN_ENV,)
+        removed = list(_API_KEY_ENVS if req.cli_login == "require" else (_ACCESS_TOKEN_ENV,))
+        if logs_in:
+            # Codex writes its env into CODEX_HOME shell snapshots and passes it to
+            # commands, so the key it logs in with stays out of the env unless a
+            # model provider reads it from there; then snapshots are off.
+            kept = self._provider_env_keys(req)
+            removed += [name for name in _API_KEY_ENVS if name not in kept]
+            if kept & set(_API_KEY_ENVS):
+                config_overrides += (
+                    _config_override("features", "shell_snapshot", value=False),
+                )
         for name in removed:
             env[name] = ""
         config = _codex_config(
@@ -1772,11 +1806,36 @@ def _dotted_keys(config: dict[str, Any], prefix: str = "") -> set[str]:
     return keys
 
 
+def _leaves(prefix: str, value: Any) -> list[tuple[str, Any]]:
+    """Flatten nested tables into ``(dotted key, value)`` pairs."""
+
+    if not isinstance(value, dict):
+        return [(prefix, value)]
+    return [
+        leaf
+        for key, child in value.items()
+        for leaf in _leaves(f"{prefix}.{key}" if prefix else str(key), child)
+    ]
+
+
+def _override_items(config: Any) -> list[tuple[str, Any]]:
+    """The caller's ``config_overrides``, parsed as Codex does: TOML, else a string."""
+
+    items = []
+    for item in _config_value(config, "config_overrides") or ():
+        key, _, raw = str(item).partition("=")
+        try:
+            value = tomllib.loads(f"value = {raw}")["value"]
+        except tomllib.TOMLDecodeError:
+            value = raw.strip()
+        items.append((key.strip(), value))
+    return items
+
+
 def _override_keys(config: Any) -> set[str]:
     """Keys the caller sets through ``config_overrides``."""
 
-    overrides = _config_value(config, "config_overrides") or ()
-    return {str(item).split("=", 1)[0].strip() for item in overrides}
+    return {key for key, _ in _override_items(config)}
 
 
 def _config_has_codex_bin(config: Any) -> bool:

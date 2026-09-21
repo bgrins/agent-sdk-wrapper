@@ -1823,7 +1823,10 @@ def test_codex_optional_nulls_follow_the_matching_union_member():
 
 @pytest.mark.parametrize(
     ("cli_login", "blanked"),
-    [("deny", ("CODEX_ACCESS_TOKEN",)), ("require", ("OPENAI_API_KEY", "CODEX_API_KEY"))],
+    [
+        ("deny", ("CODEX_ACCESS_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")),
+        ("require", ("OPENAI_API_KEY", "CODEX_API_KEY")),
+    ],
 )
 def test_codex_login_policy_blanks_credential_env(monkeypatch, cli_login, blanked):
     import openai_codex
