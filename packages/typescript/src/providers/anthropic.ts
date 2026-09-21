@@ -407,6 +407,24 @@ export class AnthropicAdapter implements ProviderAdapter {
                 input: object(block.input),
                 ...raw,
               };
+            } else if (
+              block.type.endsWith("_tool_result") &&
+              "tool_use_id" in block
+            ) {
+              // Server tools (web search, advisor, ...) return results in the assistant turn.
+              const contentType = object(block.content)?.type;
+              yield {
+                type: "tool_result",
+                id: block.tool_use_id,
+                name: names.get(block.tool_use_id),
+                output: toolOutput(block.content),
+                is_error:
+                  "is_error" in block
+                    ? block.is_error
+                    : typeof contentType === "string" &&
+                      contentType.endsWith("_error"),
+                ...raw,
+              };
             } else
               yield {
                 type: "warning",

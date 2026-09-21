@@ -442,6 +442,64 @@ test("Claude subagent retractions leave the main answer intact", async () => {
     assert.deepEqual(errorsOf(run), []);
   }
 });
+test("Claude server-tool results pair with their calls", async () => {
+  const search = {
+    type: "web_search_result",
+    url: "https://example.com",
+    title: "Example",
+    encrypted_content: "e",
+    page_age: null,
+  } as const;
+  const run = await harness([
+    assistant([
+      {
+        type: "server_tool_use",
+        id: "search",
+        name: "web_search",
+        input: { query: "example" },
+      },
+    ]),
+    assistant([
+      { type: "web_search_tool_result", tool_use_id: "search", content: [search] },
+    ]),
+    assistant([
+      { type: "server_tool_use", id: "advice", name: "advisor", input: {} },
+    ]),
+    assistant([
+      {
+        type: "advisor_tool_result",
+        tool_use_id: "advice",
+        content: { type: "advisor_tool_result_error", error_code: "overloaded" },
+      },
+    ]),
+    result(),
+  ]).agent.run("search");
+  assert.deepEqual(
+    run.events
+      .map((env) => env.event)
+      .filter((event) => event.type === "tool_result"),
+    [
+      {
+        type: "tool_result",
+        id: "search",
+        name: "web_search",
+        output: JSON.stringify(search),
+        is_error: false,
+      },
+      {
+        type: "tool_result",
+        id: "advice",
+        name: "advisor",
+        output: '{"type":"advisor_tool_result_error","error_code":"overloaded"}',
+        is_error: true,
+      },
+    ],
+  );
+  assert.equal(
+    run.events.some((env) => env.event.type === "warning"),
+    false,
+  );
+});
 test("Claude excludes subagent tool results with their omitted calls", async () => {
   const run = await harness([
     {
