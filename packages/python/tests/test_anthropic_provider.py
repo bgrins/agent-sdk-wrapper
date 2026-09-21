@@ -565,29 +565,18 @@ def test_anthropic_thinking_reports_redacted_size_when_text_is_hidden():
     assert hidden.redacted_bytes == 42
 
 
-def test_anthropic_signal_killed_runtime_raises_process_terminated(monkeypatch):
-    import claude_agent_sdk
+# Exit codes the real CLI reported after SIGTERM, SIGHUP, SIGSEGV and SIGABRT.
+@pytest.mark.parametrize(("exit_code", "signal"), [(143, 15), (129, 1), (-11, 11), (-6, 6)])
+def test_anthropic_signal_killed_runtime_raises_process_terminated(
+    monkeypatch, exit_code, signal
+):
     from claude_agent_sdk import ProcessError
 
     from agent_sdk_wrapper import ProcessTerminatedError
 
-    async def fake_query(**kwargs):
-        raise ProcessError("Command failed", exit_code=143)
-        yield  # pragma: no cover - generator marker
-
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
-
-    async def collect():
-        return [
-            event
-            async for event in AnthropicProvider().stream(
-                RunRequest(provider="anthropic", prompt="ignored")
-            )
-        ]
-
     with pytest.raises(ProcessTerminatedError) as excinfo:
-        asyncio.run(collect())
-    assert excinfo.value.signal == 15
+        _stream(monkeypatch, [ProcessError("Command failed", exit_code=exit_code)])
+    assert excinfo.value.signal == signal
 
 
 def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeypatch):

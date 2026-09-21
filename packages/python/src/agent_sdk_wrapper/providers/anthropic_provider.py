@@ -168,8 +168,18 @@ _ASSISTANT_ERRORS = {
     "model_not_found": "model_not_found",
     "max_output_tokens": "execution_error",
 }
-# Signal exits use 128 + signum in the SDK protocol, or -signum in asyncio.
-_SIGNALS_BY_EXIT_CODE: dict[int, int] = {137: 9, 143: 15, 130: 2, -9: 9, -15: 15, -2: 2}
+
+
+def _exit_signal(exit_code: int | None) -> int | None:
+    """Signal deaths exit with -signum from asyncio, or 128 + signum from the CLI's handlers."""
+
+    if exit_code is None:
+        return None
+    if exit_code < 0:
+        return -exit_code
+    if 128 < exit_code < 160:
+        return exit_code - 128
+    return None
 
 
 def _raw(obj: Any) -> dict[str, Any] | None:
@@ -589,7 +599,7 @@ class AnthropicProvider(ProviderAdapter):
         except ProcessError as exc:
             stderr = "\n".join(stderr_tail)
             msg = f"{exc}\n{stderr}" if stderr else str(exc)
-            signum = _SIGNALS_BY_EXIT_CODE.get(exc.exit_code) if exc.exit_code else None
+            signum = _exit_signal(exc.exit_code)
             if signum is not None:
                 raise ProcessTerminatedError(signum, message=msg, cause=exc) from exc
             if classify(stderr) == TRANSIENT:
