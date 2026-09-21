@@ -397,7 +397,7 @@ def _load_cli_config(path: Path | None) -> tuple[dict[str, Any], Path | None]:
             config = json.loads(text)
         else:
             config = tomllib.loads(text)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"could not read config file {path}: {exc}") from exc
     except (json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"could not parse config file {path}: {exc}") from exc

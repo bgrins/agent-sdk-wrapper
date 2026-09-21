@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import os
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
@@ -260,10 +261,12 @@ class Agent:
         _check_overrides(overrides)
         req = self._build_request(prompt, overrides)
         self._provider.validate_request(req)
+        trace_path = overrides.get("trace_file", self.trace_file)
+        _check_output_paths(req.artifacts_dir, trace_path)
         return _Run(
             req=req,
             session_overridden="session_id" in overrides,
-            trace_path=overrides.get("trace_file", self.trace_file),
+            trace_path=trace_path,
             on_event=overrides.get("on_event", self.on_event),
             raise_on_error=bool(overrides.get("raise_on_error", self.raise_on_error)),
         )
@@ -378,20 +381,23 @@ class Agent:
             return env
 
         try:
-            artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
-            trace_path = _resolve_trace_path(trace_path, artifacts_dir)
-            if artifacts_dir is not None:
-                # Remove the previous result before the new trace replaces the old one.
-                clear_stale_artifacts(artifacts_dir)
-                write_manifest(
-                    artifacts_dir,
-                    run_id=run_id,
-                    provider=req.provider,
-                    model=req.model,
-                    status="running",
-                    trace_file=trace_path,
-                )
-            writer = TraceWriter(trace_path)
+            try:
+                artifacts_dir = normalize_artifacts_dir(req.artifacts_dir)
+                trace_path = _resolve_trace_path(trace_path, artifacts_dir)
+                if artifacts_dir is not None:
+                    # Remove the previous result before the new trace replaces the old one.
+                    clear_stale_artifacts(artifacts_dir)
+                    write_manifest(
+                        artifacts_dir,
+                        run_id=run_id,
+                        provider=req.provider,
+                        model=req.model,
+                        status="running",
+                        trace_file=trace_path,
+                    )
+                writer = TraceWriter(trace_path)
+            except OSError as exc:
+                raise ConfigError(f"could not prepare the run's output files: {exc}") from exc
             yield record(
                 RunStarted(
                     provider=req.provider,
@@ -581,6 +587,20 @@ def _check_overrides(overrides: dict[str, Any]) -> None:
 
 def _as_str(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _check_output_paths(artifacts_dir: Any, trace_file: Any) -> None:
+    """Reject output paths that already exist with the wrong type."""
+
+    for name, value in (("artifacts_dir", artifacts_dir), ("trace_file", trace_file)):
+        if value is not None and not isinstance(value, str | os.PathLike):
+            raise ConfigError(f"{name} must be a path, got {type(value).__name__}")
+    artifacts_path = None if artifacts_dir is None else Path(artifacts_dir)
+    if artifacts_path is not None and artifacts_path.exists() and not artifacts_path.is_dir():
+        raise ConfigError(f"artifacts_dir {artifacts_path} is not a directory")
+    trace_path = _resolve_trace_path(trace_file, artifacts_path)
+    if trace_path and Path(trace_path).is_dir():
+        raise ConfigError(f"trace_file {trace_path} is a directory")
 
 
 def _resolve_trace_path(trace_path: Any, artifacts_dir: Path | None) -> str | Path | None:

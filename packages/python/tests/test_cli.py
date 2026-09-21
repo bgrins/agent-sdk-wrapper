@@ -411,6 +411,16 @@ def test_run_rejects_unknown_config_field(tmp_path, capsys):
     assert "unknown config field(s): unknown" in captured.err
 
 
+def test_run_rejects_a_config_file_that_is_not_utf8(tmp_path, capsys):
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_bytes(b'provider = "\xff"\n')
+
+    rc = cli.main(["run", "--config", str(config_path), "--prompt", "x"])
+
+    assert rc == 2
+    assert "could not read config file" in capsys.readouterr().err
+
+
 def test_stream_rejects_json_output(monkeypatch, capsys):
     monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
 

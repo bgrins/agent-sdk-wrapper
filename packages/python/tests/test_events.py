@@ -1014,6 +1014,47 @@ def test_stream_raises_config_error_before_iterating(tmp_path):
     assert not trace_file.exists()
 
 
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_unknown_provider_options_raise_config_error(provider):
+    with pytest.raises(ConfigError, match="no_such_option"):
+        Agent(provider=provider, provider_options={"no_such_option": 1})
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (lambda tmp: {"artifacts_dir": tmp / "file"}, "not a directory"),
+        (lambda tmp: {"trace_file": tmp / "dir"}, "is a directory"),
+        (lambda tmp: {"artifacts_dir": tmp / "dir-with-trace-dir"}, "is a directory"),
+    ],
+    ids=["artifacts_dir-is-a-file", "trace_file-is-a-dir", "artifacts-trace-is-a-dir"],
+)
+def test_output_paths_of_the_wrong_type_raise_config_error(
+    monkeypatch, tmp_path, overrides, message
+):
+    install_fake_providers(monkeypatch)
+    (tmp_path / "file").write_text("keep")
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "dir-with-trace-dir" / "trace.jsonl").mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match=message):
+        Agent(provider="openai").stream("hi", **overrides(tmp_path))
+    assert (tmp_path / "file").read_text() == "keep"
+    assert not (tmp_path / "dir-with-trace-dir" / "manifest.json").exists()
+
+
+def test_uncreatable_artifacts_dir_raises_config_error_before_any_event(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch)
+    (tmp_path / "file").write_text("")
+    seen = []
+
+    with pytest.raises(ConfigError, match="output files"):
+        Agent(provider="openai", on_event=seen.append).run_sync(
+            "hi", artifacts_dir=tmp_path / "file" / "artifacts"
+        )
+    assert seen == []
+
+
 @pytest.mark.parametrize(
     "overrides",
     [{"timeout": "30"}, {"timeout": 0}, {"max_turns": 0}, {"max_turns": True}],
