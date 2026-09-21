@@ -1100,6 +1100,30 @@ def test_anthropic_structured_output_mismatch_is_a_typed_failure(monkeypatch):
     assert "value" in events[-1].message
 
 
+def test_anthropic_structured_run_without_structured_output_fails(monkeypatch):
+    from claude_agent_sdk import TextBlock
+    from pydantic import BaseModel
+
+    from agent_sdk_wrapper.events import Error, StructuredOutput
+
+    class Answer(BaseModel):
+        value: int
+
+    # The CLI reports success when the model answers in text instead of calling StructuredOutput.
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="The answer is 5."), message_id="m1"),
+            _result(result="The answer is 5.", structured_output=None),
+        ],
+        output_schema=Answer,
+    )
+
+    assert not any(isinstance(event, StructuredOutput) for event in events)
+    assert isinstance(events[-1], Error)
+    assert events[-1].error_type == "structured_output_failed"
+
+
 def test_anthropic_joins_text_frames_of_one_message(monkeypatch):
     from claude_agent_sdk import TextBlock, ThinkingBlock
 

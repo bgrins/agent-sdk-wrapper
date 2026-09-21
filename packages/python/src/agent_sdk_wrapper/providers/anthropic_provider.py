@@ -537,6 +537,16 @@ class AnthropicProvider(ProviderAdapter):
                                     return
                                 yield StructuredOutput(value=value)
                             error = _result_error(message, assistant_error)
+                            # The CLI reports success when the model never called StructuredOutput.
+                            if (
+                                error is None
+                                and req.output_schema is not None
+                                and message.structured_output is None
+                            ):
+                                error = Error(
+                                    message="Claude returned no structured output",
+                                    error_type="structured_output_failed",
+                                )
                             if error is not None:
                                 yield error
                             elif not seen_text and message.result:
