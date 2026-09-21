@@ -103,16 +103,17 @@ def live_view(case: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass
 class Scratch:
+    """A case's own directories; ``cwd`` is relative to ``root``."""
+
     root: Path
-    cwd: Path = field(init=False)
+    cwd: str = "work"
 
     def __post_init__(self) -> None:
-        for name in ("home", "codex_home", "claude_config", "anthropic_config", "work"):
+        for name in ("home", "codex_home", "claude_config", "anthropic_config", self.cwd):
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        self.cwd = self.root / "work"
 
     def dir(self, name: str) -> Path:
-        return self.cwd if name == "cwd" else self.root / name
+        return self.root / (self.cwd if name == "cwd" else name)
 
 
 def isolate(monkeypatch: pytest.MonkeyPatch, scratch: Scratch, *, live: bool) -> None:
@@ -243,10 +244,7 @@ class Context:
                 value = [mcp_server(spec) for spec in value]
             elif key == "subagents":
                 value = {name: SubagentDef(**spec) for name, spec in value.items()}
-            elif key == "cwd":
-                value = self.path(value)
-                value.mkdir(parents=True, exist_ok=True)
-            elif key in ("trace_file", "artifacts_dir"):
+            elif key in ("cwd", "trace_file", "artifacts_dir"):
                 value = self.path(value)
             elif key == "on_event" and value is True:
                 value = self.events.append
@@ -294,14 +292,12 @@ async def run_case(
     case: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, live: bool
 ) -> None:
     provider = case["provider"]
-    scratch = Scratch(tmp_path)
+    scratch = Scratch(tmp_path, case.get("options", {}).get("cwd", "work"))
     isolate(monkeypatch, scratch, live=live)
     setup = case.get("setup", {})
+    prepare(setup, scratch)
     async with _mock(provider, case.get("mock", [{"text": "ok"}]), monkeypatch, live) as api:
         ctx = Context(provider, scratch, api, setup)
-        scratch.cwd = ctx.path(case.get("options", {}).get("cwd", "work"))
-        scratch.cwd.mkdir(parents=True, exist_ok=True)
-        prepare(setup, scratch)
         async with ctx.clients:
             await _runs(case, ctx, live)
 

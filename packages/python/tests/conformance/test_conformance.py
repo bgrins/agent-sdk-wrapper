@@ -26,26 +26,26 @@ CASES = SPEC["cases"]
 ADAPTERS = {"anthropic": AnthropicProvider, "codex": OpenAIProvider}
 
 
-def _params(cases: list[dict[str, Any]]) -> list[Any]:
+def _params(*, live: bool) -> list[Any]:
     params = []
-    for case in cases:
+    for case in CASES:
+        if live and "live" not in case:
+            continue
         view = python_view(case)
-        marks = [pytest.mark.skip(reason=view)] if isinstance(view, str) else []
-        params.append(pytest.param(view, id=case["id"], marks=marks))
+        if isinstance(view, str):
+            params.append(pytest.param(case, id=case["id"], marks=pytest.mark.skip(reason=view)))
+        elif not (live and view["expect"].get("config_error")):
+            params.append(pytest.param(view, id=case["id"]))
     return params
 
 
-@pytest.mark.parametrize("case", _params(CASES))
+@pytest.mark.parametrize("case", _params(live=False))
 async def test_case(case, tmp_path, monkeypatch):
     await run_case(case, tmp_path, monkeypatch, live=False)
 
 
-def _live_case(case: dict[str, Any]) -> bool:
-    return "live" in case and not case["expect"].get("config_error")
-
-
 @pytest.mark.integration
-@pytest.mark.parametrize("case", _params([c for c in CASES if _live_case(c)]))
+@pytest.mark.parametrize("case", _params(live=True))
 async def test_live_case(case, tmp_path, monkeypatch):
     if os.environ.get("AGENT_SDK_WRAPPER_RUN_INTEGRATION") != "1":
         pytest.skip("live cases require AGENT_SDK_WRAPPER_RUN_INTEGRATION=1")
