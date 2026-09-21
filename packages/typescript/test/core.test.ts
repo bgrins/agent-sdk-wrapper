@@ -579,6 +579,54 @@ test("a kill after a provider error records both", async () => {
   );
   assert.deepEqual(errors, ["transient_api_error", "process_terminated"]);
 });
+test("provider-event callback exceptions propagate unclassified and close the adapter", async () => {
+  let closed = 0;
+  const adapters = [
+    // Built-in adapters classify whatever their native loop throws.
+    fake(async function* (_req, context) {
+      try {
+        context.onNativeEvent({ type: "native" });
+        yield { type: "text", text: "unreachable" };
+      } catch (cause) {
+        throw nativeError(cause);
+      } finally {
+        closed++;
+      }
+    }),
+    fake(async function* (_req, context) {
+      try {
+        try {
+          context.onNativeEvent({ type: "native" });
+        } catch {}
+        yield { type: "text", text: "after a swallowed callback error" };
+        yield { type: "text", text: "unreachable" };
+      } finally {
+        closed++;
+      }
+    }),
+  ];
+  for (const adapter of adapters) {
+    const error = new Error("my webhook: request timed out");
+    const agent = new Agent(
+      {
+        provider: "openai",
+        onProviderEvent: () => {
+          throw error;
+        },
+      },
+      { openai: adapter },
+    );
+    const types: string[] = [];
+    await assert.rejects(
+      collectRun(agent.stream("callback"), (env) => {
+        types.push(env.event.type);
+      }),
+      (thrown) => thrown === error,
+    );
+    assert.deepEqual(types, ["run_started"]);
+  }
+  assert.equal(closed, 2);
+});
 test("a mid-stream ConfigError is recorded and finishes the run before it throws", async () => {
   const agent = new Agent(
     { provider: "openai" },

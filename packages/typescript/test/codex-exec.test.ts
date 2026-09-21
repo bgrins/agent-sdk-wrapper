@@ -99,16 +99,14 @@ test("closing a real Codex stream early exits cleanly and kills the runtime", as
   await exited();
 });
 
-test("a throwing provider-event callback fails the run and kills the runtime", async (t) => {
+test("a throwing provider-event callback propagates and kills the runtime", async (t) => {
+  const error = new Error("callback boom");
   const { agent, exited } = await fakeCodex(t, [...started, answer], "hang", {
     onProviderEvent: (event) => {
-      if ((event as ThreadEvent).type === "turn.started")
-        throw new Error("callback boom");
+      if ((event as ThreadEvent).type === "turn.started") throw error;
     },
   });
-  const run = await agent.run("callback");
-  assert.equal(run.status, "failure");
-  assert.equal(run.error, "callback boom");
+  await assert.rejects(agent.run("callback"), (thrown) => thrown === error);
   await exited();
 });
 

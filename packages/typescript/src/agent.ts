@@ -150,11 +150,20 @@ export class Agent {
       let failure: ErrorEvent | undefined;
       let threw = false;
       let thrown: unknown;
+      // A callback exception is the caller's, not the provider's: rethrow it unclassified.
+      let callback: { error: unknown } | undefined;
+      const onNativeEvent = (native: unknown) => {
+        try {
+          req.onProviderEvent?.(native);
+        } catch (error) {
+          callback ??= { error };
+          throw error;
+        }
+      };
       try {
         req.signal?.throwIfAborted();
-        for await (const event of adapter.stream(req, {
-          onNativeEvent: (native) => req.onProviderEvent?.(native),
-        })) {
+        for await (const event of adapter.stream(req, { onNativeEvent })) {
+          if (callback) throw callback.error;
           if (event.type === "error") failure ??= event;
           if (event.type === "session_info") {
             this.sessions.set(req.provider, event.id);
@@ -162,7 +171,9 @@ export class Agent {
           }
           yield frame(event);
         }
+        if (callback) throw callback.error;
       } catch (cause) {
+        if (callback) throw callback.error;
         if (cause instanceof TraceWriteError) throw cause;
         // A runtime killed by the caller's abort was cancelled, not terminated.
         const terminated =
