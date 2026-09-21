@@ -193,6 +193,9 @@ export class CodexAdapter implements ProviderAdapter {
     let sawReasoning = false;
     const started = new Set<string>();
     const completed = new Set<string>();
+    // A fatal failure repeats its error notice in turn.failed; hold the notice
+    // one event so it isn't reported twice.
+    let notice: ProviderEvent | undefined;
     try {
       const client = await this.client(req);
       const native =
@@ -218,9 +221,6 @@ export class CodexAdapter implements ProviderAdapter {
       const frames = {
         [Symbol.asyncIterator]: () => ({ next: () => source.next() }),
       };
-      // A fatal failure repeats its error notice in turn.failed; hold the notice
-      // one event so it isn't reported twice.
-      let notice: ProviderEvent | undefined;
       for await (const event of frames) {
         context.onNativeEvent(event);
         const raw = req.includeRaw
@@ -337,11 +337,12 @@ export class CodexAdapter implements ProviderAdapter {
             };
         }
       }
-      if (notice) yield notice;
       throw new ProviderProtocolError(
         "Codex stream ended without turn.completed or turn.failed",
       );
     } catch (cause) {
+      // Without turn.failed, the held notice may be the only explanation.
+      if (notice) yield notice;
       throw nativeError(cause);
     } finally {
       req.signal?.removeEventListener("abort", onAbort);

@@ -192,6 +192,33 @@ test("a Codex stream without turn.completed or turn.failed is a protocol error",
   assert.equal(errors[0]?.error_type, "provider_protocol_error");
 });
 
+test("a held Codex error notice is kept when the stream ends without turn.failed", async (t) => {
+  const notice =
+    "Reconnecting... 2/5 (stream disconnected before completion: idle timeout)";
+  for (const [after, status] of [
+    ["exit", "failure"],
+    ["exit1", "failure"],
+    ["hang", "cancelled"],
+  ] as const) {
+    const { agent } = await fakeCodex(
+      t,
+      [...started, { type: "error", message: notice }],
+      after,
+      after === "hang" ? { signal: AbortSignal.timeout(500) } : {},
+    );
+    const run = await agent.run("notice");
+    assert.equal(run.status, status, after);
+    assert.deepEqual(
+      run.events
+        .map((env) => env.event)
+        .filter((event) => event.type === "warning" || event.type === "error")
+        .map((event) => event.type === "warning" && event.message),
+      [notice, false],
+      after,
+    );
+  }
+});
+
 test("a cancel between Codex stdout EOF and exit reports cancelled", async (t) => {
   const controller = new AbortController();
   const { agent, exited } = await fakeCodex(t, started, "close-stdout", {
