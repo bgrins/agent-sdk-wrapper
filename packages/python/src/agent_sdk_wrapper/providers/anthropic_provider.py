@@ -68,7 +68,7 @@ from ..events import (
     WarningEvent,
 )
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
-from ..request import RunRequest, normalize_effort_for_provider
+from ..request import INHERIT_MODEL, RunRequest, normalize_effort_for_provider
 from ..structured import json_schema_of_type, validate_output
 from ..tools import json_schema_for, to_anthropic_tools, validate_tool_names
 from .base import ProviderAdapter
@@ -314,7 +314,8 @@ class AnthropicProvider(ProviderAdapter):
                     description=sub.description,
                     prompt=sub.prompt,
                     tools=sub.tools,
-                    model=sub.model,
+                    # Without a model the CLI uses CLAUDE_CODE_SUBAGENT_MODEL from the host.
+                    model=sub.model or INHERIT_MODEL,
                     maxTurns=sub.max_turns,
                 )
                 for name, sub in req.subagents.items()

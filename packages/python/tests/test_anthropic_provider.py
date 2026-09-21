@@ -165,6 +165,29 @@ def test_anthropic_options_reject_builtin_tools_extra_option_conflict():
         AnthropicProvider()._build_options(req)
 
 
+def test_anthropic_subagents_without_a_model_inherit_the_parent_model():
+    from agent_sdk_wrapper import INHERIT_MODEL
+
+    options = AnthropicProvider()._build_options(
+        RunRequest(
+            provider="anthropic",
+            prompt="x",
+            subagents={
+                "unset": SubagentDef(description="d", prompt="p"),
+                "inherit": SubagentDef(description="d", prompt="p", model=INHERIT_MODEL),
+                "pinned": SubagentDef(description="d", prompt="p", model="claude-haiku-4-5"),
+            },
+        )
+    )
+
+    # Without a model, the CLI would use CLAUDE_CODE_SUBAGENT_MODEL from the host env.
+    assert {name: agent.model for name, agent in options.agents.items()} == {
+        "unset": "inherit",
+        "inherit": "inherit",
+        "pinned": "claude-haiku-4-5",
+    }
+
+
 def test_every_native_option_a_first_class_field_sets_is_owned(tmp_path):
     from claude_agent_sdk import ClaudeAgentOptions
     from pydantic import BaseModel
