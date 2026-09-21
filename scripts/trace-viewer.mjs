@@ -20,6 +20,7 @@ const urlPath = (path) => path.split("/").map(encodeURIComponent).join("/");
 export const MAX_RUNS = 500;
 // Bounds one scan; the depth limit normally keeps real scans far below it.
 export const MAX_DIRECTORIES = 5000;
+export const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const PARALLEL_READS = 16;
 
 async function listRuns(directory, depth) {
@@ -95,6 +96,7 @@ async function readRunDirectory(directory, relative, depth, runs, next) {
         trace: hasManifest ? null : `/results/${urlPath(path)}`,
         manifest: hasManifest ? `/results/${urlPath(path)}` : null,
         updated_at: info.mtime.toISOString(),
+        too_large: info.size > MAX_FILE_BYTES,
       });
     }),
   );
@@ -219,7 +221,7 @@ export function createTraceServer(directory, { depth = 20 } = {}) {
         if (!(await openedSafely(handle, file, nested)))
           return send(403, "text/plain", "Forbidden");
         const info = await handle.stat();
-        if (!info.isFile() || info.nlink !== 1 || info.size > 16 * 1024 * 1024)
+        if (!info.isFile() || info.nlink !== 1 || info.size > MAX_FILE_BYTES)
           return send(413, "text/plain", "Unsupported file");
         // Keep one descriptor and a bounded read if the file changes or grows.
         const bytes = Buffer.alloc(info.size);

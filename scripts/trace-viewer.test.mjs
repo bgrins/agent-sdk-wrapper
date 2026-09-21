@@ -23,6 +23,7 @@ import {
   contentSecurityPolicy,
   createTraceServer,
   MAX_DIRECTORIES,
+  MAX_FILE_BYTES,
   MAX_RUNS,
 } from "./trace-viewer.mjs";
 
@@ -135,7 +136,7 @@ test("server discovers new traces and reads updates without exposing files outsi
   for (const [replace, status] of [
     [() => symlink(join(root, ".env"), trace), 403],
     [() => execFileSync("mkfifo", [trace]), 413],
-    [() => writeFile(trace, Buffer.alloc(16 * 1024 * 1024 + 1)), 413],
+    [() => writeFile(trace, Buffer.alloc(MAX_FILE_BYTES + 1)), 413],
   ]) {
     await rm(trace);
     await writeFile(trace, "trace fixture");
@@ -757,6 +758,38 @@ test("mounted job traces update directly without reading agent-created directori
     assert.equal(response.status, status);
     assert.ok(!(await response.text()).includes("private"));
   }
+});
+
+test("the run list marks traces too large to serve", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-size-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const job = join(root, "fake", "job-1");
+  await mkdir(job, { recursive: true });
+  await writeFile(join(job, "small.trace.jsonl"), "{}\n");
+  await writeFile(join(job, "large.trace.jsonl"), "");
+  await fs.truncate(join(job, "large.trace.jsonl"), MAX_FILE_BYTES + 1);
+  const base = await listen(t, root);
+  const listed = JSON.parse((await get(base, "/api/runs")).body);
+  assert.deepEqual(listed.map((run) => [run.label, run.too_large]).sort(), [
+    ["fake/job-1/large.trace.jsonl", true],
+    ["fake/job-1/small.trace.jsonl", false],
+  ]);
+  for (const run of listed)
+    assert.equal((await get(base, run.trace)).status, run.too_large ? 413 : 200);
+
+  const context = await loadViewer(
+    `${base}/docs/trace-viewer.html?index=/api/runs`,
+  );
+  context.fetch = fetch;
+  await vm.runInContext("discoverResults()", context);
+  const meta = Object.fromEntries(
+    vm.runInContext("runsEl", context).children.map(({ children: [button] }) => [
+      button.title,
+      button.find((node) => node.classes.has("run-meta")).textContent,
+    ]),
+  );
+  assert.match(meta["fake/job-1/large.trace.jsonl"], /^too large to serve · /);
+  assert.doesNotMatch(meta["fake/job-1/small.trace.jsonl"], /too large/);
 });
 
 test("an untrusted manifest cannot fetch outside its run directory", async () => {

@@ -1419,6 +1419,7 @@
           manifestUrl,
           label: typeof entry.label === "string" ? entry.label : "",
           updatedAt: typeof entry.updated_at === "string" ? entry.updated_at : "",
+          tooLarge: entry.too_large === true,
         });
       }
       // The server sends each count only when its limit shortened the list.
@@ -1508,6 +1509,8 @@
     function runMeta(run) {
       const manifest = run.manifest || {};
       const parts = [
+        // The server refuses files over its size limit.
+        run.tooLarge ? "too large to serve" : "",
         manifest.model || manifest.provider || "",
         relativeTime(run.updatedAt || manifest.updated_at),
       ].filter(Boolean);
