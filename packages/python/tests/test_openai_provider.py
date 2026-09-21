@@ -1857,7 +1857,9 @@ def test_codex_optional_nulls_follow_the_matching_union_member():
         ("require", ("OPENAI_API_KEY", "CODEX_API_KEY")),
     ],
 )
-def test_codex_login_policy_blanks_credential_env(monkeypatch, cli_login, blanked):
+def test_codex_login_policy_keeps_credentials_out_of_the_runtime_env(
+    monkeypatch, cli_login, blanked
+):
     import openai_codex
 
     seen = {}
@@ -1865,6 +1867,7 @@ def test_codex_login_policy_blanks_credential_env(monkeypatch, cli_login, blanke
     class CapturingCodex:
         def __init__(self, config=None):
             seen["env"] = dict(config.env or {})
+            seen["overrides"] = config.config_overrides
 
         async def __aenter__(self):
             raise RuntimeError("stop after capturing config")
@@ -1882,6 +1885,7 @@ def test_codex_login_policy_blanks_credential_env(monkeypatch, cli_login, blanke
     with pytest.raises(AgentSdkWrapperError):
         asyncio.run(collect())
     assert {name: seen["env"].get(name) for name in blanked} == dict.fromkeys(blanked, "")
+    assert "features.shell_snapshot=false" in seen["overrides"]
 
 
 def test_codex_recursive_output_schemas_terminate():

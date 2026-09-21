@@ -350,11 +350,10 @@ async def test_an_env_api_key_stays_out_of_codex_home_and_commands(
     assert [r["authorization"] for r in mock_api.posts()] == [f"Bearer {SECRET_KEY}"] * 2
     [shell] = [e.event for e in result.events if e.event.type == "tool_result"]
     assert shell.output == "unset"
-    assert list(codex_home.glob("shell_snapshots/*"))
     assert files_containing(codex_home, SECRET_KEY) == []
 
 
-async def test_a_provider_env_key_keeps_the_key_but_no_shell_snapshot(
+async def test_a_provider_env_key_keeps_the_key_without_persisting_it(
     mock_api, codex_home, tmp_path
 ):
     mock_api.plan = [{"shell": "true"}, {"text": "done"}]
@@ -716,12 +715,14 @@ async def test_signal_killed_app_server_raises_process_terminated(
 
 async def test_cli_login_require_uses_the_stored_chatgpt_login(mock_api, codex_home, tmp_path):
     access = seed_chatgpt_login(codex_home)
-    mock_api.plan = [{"text": "hello"}]
+    mock_api.plan = [{"shell": "true"}, {"text": "hello"}]
 
     result = await login_agent(mock_api, codex_home, tmp_path, "require").run("hi")
 
     assert result.ok, result.error
-    assert [r["authorization"] for r in mock_api.posts()] == [f"Bearer {access}"]
+    assert [r["authorization"] for r in mock_api.posts()] == [f"Bearer {access}"] * 2
+    # The runtime env is not copied into CODEX_HOME.
+    assert list(codex_home.glob("shell_snapshots/*")) == []
 
 
 async def test_cli_login_require_rejects_a_stored_api_key_before_any_request(

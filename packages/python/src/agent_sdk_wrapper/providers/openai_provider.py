@@ -286,6 +286,12 @@ class OpenAIProvider(ProviderAdapter):
             api_key = None if req.cli_login == "require" else self._login_api_key(req)
             with _runtime_config(req) as runtime_config:
                 config_overrides = runtime_config.config_overrides
+                if self._launches_codex():
+                    # Shell snapshots copy the runtime's env, credentials included, into
+                    # CODEX_HOME.
+                    config_overrides += (
+                        _config_override("features", "shell_snapshot", value=False),
+                    )
                 if req.cli_login != "require" and self._launches_codex():
                     # Never read or write auth.json; an API key stays in memory.
                     config_overrides += (
@@ -368,15 +374,10 @@ class OpenAIProvider(ProviderAdapter):
         # Codex treats an empty value as unset. An access token is a ChatGPT login.
         removed = list(_API_KEY_ENVS if req.cli_login == "require" else (_ACCESS_TOKEN_ENV,))
         if logs_in:
-            # Codex writes its env into CODEX_HOME shell snapshots and passes it to
-            # commands, so the key it logs in with stays out of the env unless a
-            # model provider reads it from there; then snapshots are off.
+            # Commands inherit the runtime's env and their output is recorded, so the
+            # key it logs in with stays out unless a model provider reads it from there.
             kept = self._provider_env_keys(req)
             removed += [name for name in _API_KEY_ENVS if name not in kept]
-            if kept & set(_API_KEY_ENVS):
-                config_overrides += (
-                    _config_override("features", "shell_snapshot", value=False),
-                )
         for name in removed:
             env[name] = ""
         config = _codex_config(
