@@ -430,13 +430,10 @@ class Agent:
                 if error is not None and not reported:
                     yield record(_error_event(error))
             except _DeadlineExceeded:
-                yield record(
-                    Error(message=f"run timed out after {req.timeout}s", error_type="timeout")
-                )
-                status = RunStatus.TIMEOUT
-                ended_reason = RunEndedReason.TIMEOUT
-                error_msg = "timeout"
-                error_type = "timeout"
+                if error_msg is None:
+                    yield record(
+                        Error(message=f"run timed out after {req.timeout}s", error_type="timeout")
+                    )
             except (ProcessTerminatedError, ConfigError) as exc:
                 yield record(_error_event(exc))
                 yield finish()
@@ -451,11 +448,8 @@ class Agent:
             raise
         except asyncio.CancelledError:
             if writer is not None and not finished:
-                record(Error(message="run cancelled", error_type="cancelled"))
-                status = RunStatus.CANCELLED
-                ended_reason = RunEndedReason.CANCELLED
-                error_msg = "cancelled"
-                error_type = "cancelled"
+                if error_msg is None:
+                    record(Error(message="run cancelled", error_type="cancelled"))
                 finish()
             raise
         finally:

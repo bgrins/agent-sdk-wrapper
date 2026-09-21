@@ -47,6 +47,56 @@ def test_a_transient_failure_ends_the_run_with_its_type(monkeypatch):
     assert (result.error, result.error_type) == ("rate limit", "transient_api_error")
 
 
+def trace_events(path):
+    return [json.loads(line)["event"] for line in path.read_text().splitlines()]
+
+
+async def hangs_after_an_error(req):
+    yield Error(message="bad key", error_type="authentication_failed")
+    await asyncio.Event().wait()
+
+
+def test_a_deadline_after_a_provider_error_keeps_that_error(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=hangs_after_an_error)
+
+    result = Agent(provider="openai", timeout=0.2, artifacts_dir=tmp_path).run_sync("hi")
+
+    assert (result.status, result.error, result.error_type) == (
+        RunStatus.FAILURE,
+        "bad key",
+        "authentication_failed",
+    )
+    saved = json.loads((tmp_path / "result.json").read_text())
+    assert (saved["status"], saved["error_type"]) == ("failure", "authentication_failed")
+    assert trace_events(tmp_path / "trace.jsonl")[-1]["status"] == "failure"
+
+
+def test_cancelling_after_a_provider_error_keeps_that_error(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=hangs_after_an_error)
+    agent = Agent(provider="openai", artifacts_dir=tmp_path)
+
+    async def cancel_run() -> None:
+        task = asyncio.create_task(agent.run("hi"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_run())
+
+    saved = json.loads((tmp_path / "result.json").read_text())
+    assert (saved["status"], saved["error"], saved["error_type"]) == (
+        "failure",
+        "bad key",
+        "authentication_failed",
+    )
+    assert [event["type"] for event in trace_events(tmp_path / "trace.jsonl")] == [
+        "run_started",
+        "error",
+        "run_finished",
+    ]
+
+
 def test_the_first_provider_error_sets_the_result_error(monkeypatch):
     play, _ = script(
         Text(text="partial"),

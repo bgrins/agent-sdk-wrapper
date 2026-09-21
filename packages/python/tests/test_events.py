@@ -746,7 +746,7 @@ def test_run_cancellation_writes_cancelled_artifacts(monkeypatch, tmp_path):
     assert saved_result["status"] == "cancelled"
     assert saved_result["ended_reason"] == "cancelled"
     assert saved_result["final_text"] == "started"
-    assert saved_result["error"] == "cancelled"
+    assert saved_result["error"] == "run cancelled"
     assert trace_events[-1]["type"] == "run_finished"
     assert trace_events[-1]["status"] == "cancelled"
     assert trace_events[-1]["ended_reason"] == "cancelled"
@@ -893,7 +893,7 @@ def test_run_records_timeout_in_result_and_trace(monkeypatch, tmp_path):
     result = asyncio.run(agent.run("ignored"))
 
     assert result.status == RunStatus.TIMEOUT
-    assert result.error == "timeout"
+    assert result.error == "run timed out after 0.001s"
     assert any(
         isinstance(event.event, Error) and event.event.error_type == "timeout"
         for event in result.events
