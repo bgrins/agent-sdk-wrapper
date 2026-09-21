@@ -9,7 +9,6 @@ import json
 import pytest
 
 from agent_sdk_wrapper import (
-    AgentSdkWrapperError,
     ConfigError,
     McpHttpServer,
     McpStdioServer,
@@ -350,33 +349,29 @@ def test_anthropic_runtime_retries_are_warnings(monkeypatch):
     ]
 
 
-def test_anthropic_stream_rejects_unexpected_stream_events(monkeypatch):
-    import claude_agent_sdk
-    from claude_agent_sdk import StreamEvent
+def test_anthropic_partial_stream_events_are_a_protocol_error(monkeypatch):
+    from claude_agent_sdk import StreamEvent, TextBlock
 
-    async def fake_query(**kwargs):
-        yield StreamEvent(
-            uuid="partial-uuid",
-            session_id="sess-partial",
-            event={
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": "partial"},
-            },
-        )
+    from agent_sdk_wrapper.events import Error, Text
 
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    events, _ = _stream(
+        monkeypatch,
+        [
+            _assistant(TextBlock(text="done"), message_id="m1"),
+            StreamEvent(
+                uuid="partial-uuid",
+                session_id="sess-partial",
+                event={
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "partial"},
+                },
+            ),
+        ],
+    )
 
-    async def collect():
-        return [
-            event
-            async for event in AnthropicProvider().stream(
-                RunRequest(provider="anthropic", prompt="ignored")
-            )
-        ]
-
-    with pytest.raises(AgentSdkWrapperError, match="partial StreamEvent"):
-        asyncio.run(collect())
+    assert [type(event) for event in events] == [Text, Error]
+    assert events[-1].error_type == "provider_protocol_error"
 
 
 def _result(**kwargs):

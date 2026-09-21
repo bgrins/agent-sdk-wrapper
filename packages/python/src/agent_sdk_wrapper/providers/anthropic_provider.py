@@ -584,11 +584,12 @@ class AnthropicProvider(ProviderAdapter):
                         elif isinstance(message, RateLimitEvent):
                             yield _rate_limit_warning(message, include_raw=req.include_raw)
                         elif isinstance(message, StreamEvent):
-                            raise AgentSdkWrapperError(
-                                "Claude Agent SDK emitted a partial StreamEvent, but "
-                                "agent-sdk-wrapper does not support Claude partial messages. "
-                                "Do not enable extra_options['include_partial_messages']."
+                            yield Error(
+                                message="Claude Agent SDK emitted a partial StreamEvent; "
+                                "agent-sdk-wrapper does not support Claude partial messages",
+                                error_type="provider_protocol_error",
                             )
+                            return
             except Exception:
                 # Keep a completed answer even when the runtime then fails.
                 text = pending.flush()
