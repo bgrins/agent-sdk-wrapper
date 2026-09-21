@@ -15,6 +15,7 @@ from agent_sdk_wrapper import (
     EventFactory,
     EventSource,
     FakeProvider,
+    McpStdioServer,
     ProviderEventEnvelope,
     ProviderNotAvailableError,
     RunEndedReason,
@@ -1059,6 +1060,26 @@ def test_output_paths_of_the_wrong_type_raise_config_error(
         Agent(provider="openai").stream("hi", **overrides(tmp_path))
     assert (tmp_path / "file").read_text() == "keep"
     assert not (tmp_path / "dir-with-trace-dir" / "manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    "names", [["repo", "repo"], ["agent_sdk_wrapper_tools"]], ids=["duplicate", "reserved"]
+)
+def test_mcp_server_names_must_be_unique_and_not_reserved(monkeypatch, names):
+    install_fake_providers(monkeypatch)
+    servers = [McpStdioServer(name=name, command="true") for name in names]
+
+    with pytest.raises(ConfigError, match="MCP server name"):
+        Agent(provider="openai", mcp_servers=servers).stream("hi")
+
+
+@pytest.mark.parametrize("cwd", ["missing", "file"])
+def test_cwd_must_be_an_existing_directory(monkeypatch, tmp_path, cwd):
+    install_fake_providers(monkeypatch)
+    (tmp_path / "file").write_text("")
+
+    with pytest.raises(ConfigError, match="cwd"):
+        Agent(provider="openai").stream("hi", cwd=tmp_path / cwd)
 
 
 def test_uncreatable_artifacts_dir_raises_config_error_before_any_event(monkeypatch, tmp_path):

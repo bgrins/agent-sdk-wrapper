@@ -60,6 +60,7 @@ from .request import (
     normalize_subagents_for_provider,
     resolve_provider,
 )
+from .tools import ANTHROPIC_TOOL_SERVER, CODEX_TOOL_SERVER
 
 DEFAULT_CONTEXT_DUMP_PROMPT = (
     "Summarize the current conversation as durable context for a future run. "
@@ -287,6 +288,11 @@ class Agent:
             isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns < 1
         ):
             raise ConfigError(f"max_turns must be a positive integer, got {max_turns!r}")
+        cwd = pick("cwd", self.cwd)
+        if cwd is not None and not (isinstance(cwd, str | os.PathLike) and Path(cwd).is_dir()):
+            raise ConfigError(f"cwd must be an existing directory, got {cwd!r}")
+        mcp_servers = list(pick("mcp_servers", self.mcp_servers))
+        _check_mcp_server_names(mcp_servers)
 
         return RunRequest(
             provider=self.provider,
@@ -297,13 +303,13 @@ class Agent:
             subagents=normalize_subagents_for_provider(
                 self.provider, dict(pick("subagents", self.subagents))
             ),
-            mcp_servers=list(pick("mcp_servers", self.mcp_servers)),
+            mcp_servers=mcp_servers,
             output_schema=pick("output_schema", self.output_schema),
             max_turns=max_turns,
             effort=normalize_effort_for_provider(
                 self.provider, pick("effort", self.effort)
             ),
-            cwd=pick("cwd", self.cwd),
+            cwd=cwd,
             env=dict(pick("env", self.env)),
             timeout=timeout,
             include_raw=bool(pick("include_raw", self.include_raw)),
@@ -583,6 +589,18 @@ def _check_overrides(overrides: dict[str, Any]) -> None:
         raise ConfigError(
             f"unknown Agent.run/stream override(s): {', '.join(unknown)}"
         )
+
+
+def _check_mcp_server_names(servers: list[McpServer]) -> None:
+    """Adapters key servers by name, so a repeated or reserved name would replace another."""
+
+    seen: set[str] = set()
+    for server in servers:
+        if server.name in (ANTHROPIC_TOOL_SERVER, CODEX_TOOL_SERVER):
+            raise ConfigError(f"MCP server name {server.name!r} is reserved for callable tools")
+        if server.name in seen:
+            raise ConfigError(f"duplicate MCP server name {server.name!r}")
+        seen.add(server.name)
 
 
 def _as_str(value: Any) -> str | None:
