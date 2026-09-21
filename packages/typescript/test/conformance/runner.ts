@@ -188,7 +188,8 @@ export function resolveCase(c: Case, mode: Mode): Plan | string {
 
 // Python option names mapped onto the TypeScript request. Each mapper returns
 // the fields it sets: `request` for RunRequest, `anthropic` for Claude's
-// native options, `client`/`thread` for Codex's.
+// native options, `client`/`thread` for Codex's. Options TypeScript reserves
+// map to the reserved name, which it rejects; a missing entry fails the case.
 type Layer = "request" | "anthropic" | "client" | "thread";
 type Fragment = Partial<Record<Layer, Options>>;
 interface Context {
@@ -219,10 +220,6 @@ const client = (key: keyof CodexNativeOptions) => (value: unknown) => ({
 });
 const thread = (key: keyof CodexThreadOptions) => (value: unknown) => ({
   thread: { [key]: value },
-});
-/** A name TypeScript does not know, so its unknown-key check must reject it. */
-const unknownKey = (key: string) => (value: unknown) => ({
-  request: { [key]: value },
 });
 const webTools = ["WebSearch", "WebFetch"];
 
@@ -274,18 +271,9 @@ export const pythonOptions: Record<string, Entry> = {
     codex: (enabled: boolean) =>
       thread("webSearchMode")(enabled ? "live" : "disabled"),
   },
-  allowed_tools: {
-    anthropic: claude("allowedTools"),
-    codex: unknownKey("allowedTools"),
-  },
-  disallowed_tools: {
-    anthropic: claude("disallowedTools"),
-    codex: unknownKey("disallowedTools"),
-  },
-  setting_sources: {
-    anthropic: claude("settingSources"),
-    codex: unknownKey("settingSources"),
-  },
+  allowed_tools: { anthropic: claude("allowedTools") },
+  disallowed_tools: { anthropic: claude("disallowedTools") },
+  setting_sources: { anthropic: claude("settingSources") },
   tools: request("tools"),
   subagents: request("subagents"),
   mcp_servers: request("mcpServers"),

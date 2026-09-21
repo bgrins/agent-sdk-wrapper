@@ -13,7 +13,9 @@ npm run verify
 ```
 
 `npm run verify` runs unit/viewer tests, typecheck, lint, format and package checks.
-Package checks require `tar` and symlinks on macOS/Linux.
+Package checks require `tar` and symlinks on macOS/Linux. `npm test` includes the
+shared conformance cases (`docs/fixtures/CONFORMANCE.md`), run against the bundled
+Claude CLI and `codex exec` with local mock APIs.
 
 ## Containers
 
