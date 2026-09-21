@@ -106,7 +106,8 @@ _PROVIDER_FLAG_ENV = (
 _SYNTHETIC_MODEL = "<synthetic>"
 _SUBAGENT_TASK_TYPES = frozenset({"local_agent", "remote_agent"})
 # Native keys first-class options compute; extra_options may set one only when
-# its option is unused. The wrapper always computes env.
+# its option is unused. The wrapper always computes env. A native tools list
+# would drop the web tools and the Agent tool the wrapper relies on.
 _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
     "agents": lambda req: bool(req.subagents),
     "allowed_tools": lambda req: bool(
@@ -126,6 +127,9 @@ _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
     "resume": lambda req: bool(req.session_id),
     "setting_sources": lambda req: req.setting_sources is not None,
     "system_prompt": lambda req: req.system_prompt is not None,
+    "tools": lambda req: (
+        req.builtin_tools is not None or req.web_tools is True or bool(req.subagents)
+    ),
 }
 
 _SUBTYPE_ERRORS = {
@@ -265,10 +269,6 @@ class AnthropicProvider(ProviderAdapter):
         if owned:
             raise ConfigError(
                 f"extra_options {owned} conflict with first-class Agent options that set them"
-            )
-        if req.builtin_tools is not None and "tools" in req.extra_options:
-            raise ConfigError(
-                "builtin_tools cannot be combined with extra_options['tools']"
             )
         if req.extra_options.get("include_partial_messages"):
             raise ConfigError(

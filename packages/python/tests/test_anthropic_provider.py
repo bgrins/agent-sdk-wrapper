@@ -153,18 +153,6 @@ def test_anthropic_options_reject_partial_messages():
         AnthropicProvider()._build_options(req)
 
 
-def test_anthropic_options_reject_builtin_tools_extra_option_conflict():
-    req = RunRequest(
-        provider="anthropic",
-        prompt="ignored",
-        builtin_tools="none",
-        extra_options={"tools": []},
-    )
-
-    with pytest.raises(ConfigError, match="builtin_tools"):
-        AnthropicProvider()._build_options(req)
-
-
 def test_anthropic_subagents_without_a_model_inherit_the_parent_model():
     from agent_sdk_wrapper import INHERIT_MODEL
 
@@ -239,8 +227,8 @@ def test_every_native_option_a_first_class_field_sets_is_owned(tmp_path):
         for f in dataclasses.fields(options)
         if getattr(options, f.name) != getattr(defaults, f.name)
     }
-    # Wrapper defaults extra_options may replace; builtin_tools guards tools separately.
-    replaceable = {"max_buffer_size", "stderr", "thinking", "tools"}
+    # Wrapper defaults extra_options may replace.
+    replaceable = {"max_buffer_size", "stderr", "thinking"}
     assert changed - replaceable <= set(_WRAPPER_OWNED_OPTIONS)
     assert set(_WRAPPER_OWNED_OPTIONS) <= _native_option_names()
 
@@ -827,6 +815,16 @@ def test_anthropic_options_leave_buffer_headroom_unless_overridden():
         ({"extra_options": {"env": {}}}, "env"),
         ({"web_tools": True, "builtin_tools": "none"}, "web_tools"),
         ({"web_tools": True, "disallowed_tools": ["WebFetch"]}, "WebFetch"),
+        # A native tools list would drop the tools these options need.
+        ({"builtin_tools": "none", "extra_options": {"tools": []}}, "tools"),
+        ({"web_tools": True, "extra_options": {"tools": ["Read"]}}, "tools"),
+        (
+            {
+                "subagents": {"helper": SubagentDef(description="d", prompt="p")},
+                "extra_options": {"tools": ["Read"]},
+            },
+            "tools",
+        ),
     ],
 )
 def test_anthropic_rejects_options_the_sdk_would_ignore_or_override(request_kwargs, match):
