@@ -134,6 +134,59 @@ def test_a_stream_method_that_raises_is_a_failed_run(monkeypatch):
     assert "adapter bug" in (result.error or "")
 
 
+def assert_failed_artifacts(artifacts_dir) -> list[dict]:
+    saved = json.loads((artifacts_dir / "result.json").read_text())
+    manifest = json.loads((artifacts_dir / "manifest.json").read_text())
+    trace = trace_events(artifacts_dir / "trace.jsonl")
+    assert (saved["status"], manifest["status"]) == ("failure", "failure")
+    assert (trace[-1]["type"], trace[-1]["status"]) == ("run_finished", "failure")
+    return trace
+
+
+def test_a_failed_trace_write_fails_the_run(monkeypatch, tmp_path):
+    from agent_sdk_wrapper.logging import TraceWriter
+
+    install_fake_providers(monkeypatch, events=[Text(text="hi")])
+    write = TraceWriter.write
+
+    def fail_on_text(self, env):
+        if isinstance(env.event, Text):
+            raise OSError("disk full")
+        write(self, env)
+
+    monkeypatch.setattr(TraceWriter, "write", fail_on_text)
+
+    with pytest.raises(OSError, match="disk full"):
+        Agent(provider="openai", artifacts_dir=tmp_path).run_sync("hi")
+
+    assert assert_failed_artifacts(tmp_path)[-2]["message"] == "OSError: disk full"
+
+
+def test_a_non_event_from_the_provider_fails_the_run(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=[Text(text="a"), "not an event", Text(text="b")])
+
+    with pytest.raises(TypeError, match="not an event"):
+        Agent(provider="openai", artifacts_dir=tmp_path).run_sync("hi")
+
+    trace = assert_failed_artifacts(tmp_path)
+    assert [event["type"] for event in trace] == ["run_started", "text", "error", "run_finished"]
+    lines = (tmp_path / "trace.jsonl").read_text().splitlines()
+    assert [json.loads(line)["sequence"] for line in lines] == [0, 1, 2, 3]
+
+
+def test_system_exit_from_on_event_fails_the_run(monkeypatch, tmp_path):
+    install_fake_providers(monkeypatch, events=[Text(text="a")])
+
+    def exit_on_text(env):
+        if isinstance(env.event, Text):
+            raise SystemExit(3)
+
+    with pytest.raises(SystemExit):
+        Agent(provider="openai", artifacts_dir=tmp_path, on_event=exit_on_text).run_sync("hi")
+
+    assert assert_failed_artifacts(tmp_path)[-2]["message"] == "SystemExit: 3"
+
+
 @pytest.mark.parametrize("mode", ["run", "stream"])
 def test_process_terminated_is_recorded_then_raised(monkeypatch, tmp_path, mode):
     play, _ = script(ProcessTerminatedError(9), Text(text="unreachable"))

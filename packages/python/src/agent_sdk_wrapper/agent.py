@@ -414,6 +414,8 @@ class Agent:
                             break
                         if ev is _END:
                             break
+                        if not isinstance(ev, AgentEvent):
+                            raise TypeError(f"provider yielded {type(ev).__name__}, not an event")
                         yield record(ev)
                 except BaseException:
                     # The original failure wins; never yield while being closed.
@@ -433,17 +435,15 @@ class Agent:
                 raise
 
             yield finish()
-        except GeneratorExit:
+        except BaseException as exc:
             if writer is not None and not finished:
-                if error_msg is None:
-                    record(Error(message="stream closed before completion", error_type="cancelled"))
-                finish()
-            raise
-        except asyncio.CancelledError:
-            if writer is not None and not finished:
-                if error_msg is None:
-                    record(Error(message="run cancelled", error_type="cancelled"))
-                finish()
+                try:
+                    if error_msg is None:
+                        record(_interrupted_error(exc))
+                    finish()
+                except Exception as write_error:
+                    # The trace may be what failed; the result still records the failure.
+                    get_logger().warning("could not record the end of the run: %s", write_error)
             raise
         finally:
             if writer is not None:
@@ -543,6 +543,17 @@ async def _next_event(native: AsyncIterator[AgentEvent], deadline: float | None)
             raise
     except StopAsyncIteration:
         return _END
+
+
+def _interrupted_error(exc: BaseException) -> Error:
+    """The error for a run that stopped before its provider finished."""
+
+    if isinstance(exc, GeneratorExit):
+        return Error(message="stream closed before completion", error_type="cancelled")
+    if isinstance(exc, asyncio.CancelledError):
+        return Error(message="run cancelled", error_type="cancelled")
+    message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return Error(message=message, error_type="provider_exception")
 
 
 def _error_event(exc: BaseException) -> Error:
