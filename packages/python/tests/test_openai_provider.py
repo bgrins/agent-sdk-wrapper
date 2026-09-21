@@ -60,14 +60,10 @@ class FakeCollabAgentState:
 class FakeTurn:
     def __init__(self, events):
         self._events = events
-        self.interrupt_count = 0
 
     async def stream(self):
         for event in self._events:
             yield event
-
-    async def interrupt(self):
-        self.interrupt_count += 1
 
 
 def turn_completed(status: str = "completed", error: Any = None) -> SimpleNamespace:
@@ -661,89 +657,6 @@ def test_codex_tool_server_gets_env_names_and_a_long_timeout(tmp_path, monkeypat
 WRAPPER_SERVER = "mcp_servers.agent_sdk_wrapper_tools"
 
 
-def _command_completed(item_id: str = "cmd-1") -> SimpleNamespace:
-    return SimpleNamespace(
-        method="item/completed",
-        payload=SimpleNamespace(
-            item=SimpleNamespace(
-                root=SimpleNamespace(
-                    type="commandExecution",
-                    id=item_id,
-                    command="python -m pytest",
-                    status="completed",
-                    aggregated_output="passed",
-                )
-            )
-        ),
-    )
-
-
-def _usage_update(input_tokens: int, output_tokens: int) -> SimpleNamespace:
-    breakdown = {
-        "inputTokens": input_tokens,
-        "outputTokens": output_tokens,
-        "totalTokens": input_tokens + output_tokens,
-    }
-    return SimpleNamespace(
-        method="thread/tokenUsage/updated",
-        payload=SimpleNamespace(token_usage={"last": breakdown, "total": breakdown}),
-    )
-
-
-@pytest.mark.asyncio
-async def test_codex_max_turns_drains_the_interrupted_turn():
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
-    turn = FakeTurn(
-        [
-            SimpleNamespace(
-                method="item/agentMessage/delta",
-                payload=SimpleNamespace(item_id="msg-1", delta="checking"),
-            ),
-            _command_completed(),
-            _usage_update(100, 10),
-            turn_completed("interrupted"),
-        ]
-    )
-
-    out = [event async for event in _stream_turn(turn, req)]
-
-    assert turn.interrupt_count == 1
-    assert [type(event) for event in out] == [ToolCall, ToolResult, Text, Usage, Error]
-    assert out[2].text == "checking"
-    assert out[3].usage.input_tokens == 100
-    assert out[-1].error_type == "max_turns"
-    assert "max_turns=1" in out[-1].message
-
-
-@pytest.mark.asyncio
-async def test_codex_max_turns_ignores_an_interrupt_after_the_turn_finished():
-    from openai_codex.errors import InvalidRequestError
-
-    class FinishedTurn(FakeTurn):
-        async def interrupt(self):
-            await super().interrupt()
-            raise InvalidRequestError(-32600, "no active turn to interrupt")
-
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
-    turn = FinishedTurn(
-        [
-            _command_completed(),
-            SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="done"))
-                ),
-            ),
-            turn_completed(),
-        ]
-    )
-
-    out = [event async for event in _stream_turn(turn, req)]
-
-    assert turn.interrupt_count == 1
-    assert [type(event) for event in out] == [ToolCall, ToolResult, Text]
-
-
 @pytest.mark.asyncio
 async def test_codex_interrupt_the_wrapper_did_not_request_is_cancelled():
     req = RunRequest(provider="openai", prompt="ignored")
@@ -751,32 +664,6 @@ async def test_codex_interrupt_the_wrapper_did_not_request_is_cancelled():
     out = [event async for event in _stream_turn(FakeTurn([turn_completed("interrupted")]), req)]
 
     assert [(type(event), event.error_type) for event in out] == [(Error, "cancelled")]
-
-
-@pytest.mark.asyncio
-async def test_codex_max_turns_does_not_interrupt_simple_message():
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
-    turn = FakeTurn(
-        [
-            SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(
-                        root=SimpleNamespace(type="agentMessage", text="done")
-                    )
-                ),
-            ),
-            SimpleNamespace(
-                method="turn/completed",
-                payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
-            ),
-        ]
-    )
-
-    out = [event async for event in _stream_turn(turn, req)]
-
-    assert turn.interrupt_count == 0
-    assert out == [Text(text="done")]
 
 
 @pytest.mark.asyncio
@@ -944,16 +831,10 @@ def test_codex_filters_require_wrapper_managed_tools():
         _validate_supported(req)
 
 
-def test_codex_accepts_positive_max_turns():
+def test_codex_rejects_max_turns():
     req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
 
-    _validate_supported(req)
-
-
-def test_codex_rejects_non_positive_max_turns():
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=0)
-
-    with pytest.raises(ConfigError, match="max_turns < 1"):
+    with pytest.raises(ConfigError, match="max_turns. Codex has no turn limit"):
         _validate_supported(req)
 
 

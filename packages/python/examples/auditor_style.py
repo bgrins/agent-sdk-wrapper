@@ -476,7 +476,8 @@ async def run_stage(
         system_prompt=STAGE_SYSTEM_PROMPTS[stage],
         output_schema=output_schema,
         artifacts_dir=artifacts_dir,
-        max_turns=MAX_TURNS_BY_STAGE[stage],
+        # Codex has no turn limit.
+        max_turns=MAX_TURNS_BY_STAGE[stage] if provider == "anthropic" else None,
         mcp_servers=mcp_servers,
         allowed_tools=ALLOWED_MCP_TOOLS if mcp_servers else None,
         on_event=recorder.on_event(stage),

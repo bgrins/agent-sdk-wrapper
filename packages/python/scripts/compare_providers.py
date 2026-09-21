@@ -83,7 +83,7 @@ async def run_scenario(
         provider=provider,
         model=model,
         artifacts_dir=artifacts_dir,
-        max_turns=8,
+        max_turns=8 if provider == "anthropic" else None,
         **spec,  # type: ignore[arg-type]
     )
     try:

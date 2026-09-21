@@ -516,16 +516,6 @@ async def test_non_ascii_error_body_keeps_its_text(mock_api, codex_home, tmp_pat
     assert [e.message for e in errors] == ["Offline gateway probe ✓"]
 
 
-async def test_max_turns_interrupt_keeps_the_turn_usage(mock_api, codex_home, tmp_path):
-    mock_api.plan = [{"shell": "echo hi", "usage": (120, 12)}, {"hang": 30}]
-
-    result = await codex_agent(mock_api, codex_home, tmp_path, max_turns=1).run("go")
-
-    assert result.ended_reason == "max_turns"
-    assert event_types(result)[-4:] == ["tool_result", "usage", "error", "run_finished"]
-    assert result.usage is not None and result.usage.input_tokens == 120
-
-
 async def test_signal_killed_app_server_raises_process_terminated(
     mock_api, codex_home, tmp_path
 ):

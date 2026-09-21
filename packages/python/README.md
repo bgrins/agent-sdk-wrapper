@@ -71,7 +71,7 @@ error's type, from the [shared vocabulary](../typescript/PARITY.md#error-types).
 | Structured output | Supported | Strict JSON schema: object root, no free-form dicts or `Any`; optional fields are sent as nullable |
 | External MCP, resume | Supported | Supported |
 | Subagents | Native definitions; background tasks disabled | Native multi-agent config; per-subagent tools/turn limits rejected |
-| `max_turns` | Native turn limit | Wrapper limit on completed action items |
+| `max_turns` | Native turn limit | Unsupported; Codex has no turn limit |
 | Built-in tool filtering | Native controls | Unsupported; `web_tools` sets the `web_search` mode |
 
 Tool names must be unique and match `[A-Za-z0-9_-]{1,64}`; a `**kwargs` tool receives

@@ -424,9 +424,7 @@ async def _stream_turn(
     texts: list[str] = []
     usage = _TurnUsage()
     started_calls: set[str] = set()
-    completed_action_items = 0
     latest_plan: list[Any] | None = None
-    interrupted_for_max_turns = False
     # A non-retried error notification precedes the failed turn/completed; emit one Error.
     reported_error: Error | None = None
 
@@ -505,16 +503,6 @@ async def _stream_turn(
                     yield call
                 started_calls.discard(call.id)
                 yield result
-            if _counts_toward_max_turns(root_type):
-                completed_action_items += 1
-                if (
-                    req.max_turns is not None
-                    and completed_action_items >= req.max_turns
-                    and not interrupted_for_max_turns
-                ):
-                    interrupted_for_max_turns = True
-                    # Keep draining so buffered text and usage still arrive.
-                    await _interrupt_for_max_turns(turn, req.max_turns)
             continue
 
         if method == "turn/plan/updated":
@@ -559,17 +547,6 @@ async def _stream_turn(
                 yield usage_event
             turn_info = _field(payload, "turn", "turn")
             status = _status_value(_field(turn_info, "status", "status"))
-            # A turn that finished before the interrupt landed stays a success.
-            if interrupted_for_max_turns and status != "completed":
-                yield Error(
-                    message=(
-                        f"Codex max_turns={req.max_turns} reached after "
-                        f"{completed_action_items} completed action item(s); "
-                        "interrupted turn"
-                    ),
-                    error_type="max_turns",
-                )
-                return
             if status == "failed":
                 error = _field(turn_info, "error", "error")
                 if error is not None:
@@ -685,8 +662,8 @@ def _validate_supported(req: RunRequest) -> None:
         _validate_config_key_part(name)
         _toml_literal([subagent.description, subagent.prompt, subagent.model or ""])
     unsupported: list[str] = []
-    if req.max_turns is not None and req.max_turns < 1:
-        unsupported.append("max_turns < 1")
+    if req.max_turns is not None:
+        unsupported.append("max_turns. Codex has no turn limit")
     if req.builtin_tools is not None:
         unsupported.append(
             "builtin_tools. Codex built-in tools cannot be disabled or allowlisted "
@@ -720,18 +697,6 @@ def _validate_supported(req: RunRequest) -> None:
             "the OpenAI Codex SDK provider does not support: "
             f"{', '.join(unsupported)}"
         )
-
-
-_CODEX_ACTION_ITEM_TYPES = {
-    "collabAgentToolCall",
-    "commandExecution",
-    "dynamicToolCall",
-    "fileChange",
-    "imageGeneration",
-    "imageView",
-    "mcpToolCall",
-    "webSearch",
-}
 
 
 _USAGE_FIELDS = {
@@ -788,10 +753,6 @@ def _usage_breakdown(data: Any) -> dict[str, int]:
     return values
 
 
-def _counts_toward_max_turns(root_type: str) -> bool:
-    return root_type in _CODEX_ACTION_ITEM_TYPES
-
-
 def _codex_item_id(value: Any) -> str | None:
     item_id = getattr(value, "item_id", None)
     if item_id is None:
@@ -821,21 +782,6 @@ def _drain_delta_buffers(buffers: dict[str | None, list[str]]) -> list[str]:
 def _buffer_sort_key(item: tuple[str | None, list[str]]) -> str:
     key, _ = item
     return "" if key is None else key
-
-
-async def _interrupt_for_max_turns(turn: Any, max_turns: int) -> None:
-    from openai_codex.errors import InvalidRequestError
-
-    interrupt = getattr(turn, "interrupt", None)
-    if not callable(interrupt):
-        raise AgentSdkWrapperError(
-            f"Codex max_turns={max_turns} reached, but the SDK turn cannot be interrupted"
-        )
-    try:
-        await interrupt()
-    except InvalidRequestError:
-        # The turn finished before the interrupt landed; its turn/completed still follows.
-        pass
 
 
 @dataclasses.dataclass(frozen=True)
