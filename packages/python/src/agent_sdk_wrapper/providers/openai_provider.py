@@ -135,13 +135,6 @@ class OpenAIProvider(ProviderAdapter):
         self._turn_options = dict(turn_options or {})
 
     def ensure_available(self) -> None:
-        try:
-            import openai_codex  # noqa: F401
-        except ImportError as exc:
-            raise ProviderNotAvailableError(
-                "the 'openai_codex' package is not installed. Install the "
-                "OpenAI Codex Python SDK with 'pip install openai-codex'."
-            ) from exc
         if _config_has_codex_bin(self._config):
             return
         if _codex_cli_bin_available() or shutil.which("codex"):
@@ -153,15 +146,12 @@ class OpenAIProvider(ProviderAdapter):
         )
 
     def validate_request(self, req: RunRequest) -> None:
+        from openai_codex import ApprovalMode, Sandbox
+
         _validate_supported(req)
         self._validate_native_options(req)
-        try:
-            from openai_codex import ApprovalMode, Sandbox
-        except ImportError:
-            pass
-        else:
-            _enum_value(ApprovalMode, self._approval_mode)
-            _enum_value(Sandbox, self._sandbox)
+        _enum_value(ApprovalMode, self._approval_mode)
+        _enum_value(Sandbox, self._sandbox)
         caller_keys = _override_keys(self._config)
         controlled = sorted(caller_keys & _CREDENTIAL_OVERRIDE_KEYS)
         if controlled:
@@ -391,6 +381,8 @@ class OpenAIProvider(ProviderAdapter):
             yield codex
 
     def _native_options(self, req: RunRequest) -> tuple[dict[str, Any], dict[str, Any]]:
+        from openai_codex import ApprovalMode, Sandbox
+
         extra = dict(req.extra_options)
         thread_options = {**self._thread_options, **extra.pop("thread_options", {})}
         turn_options = {**self._turn_options, **extra.pop("turn_options", {})}
@@ -400,6 +392,11 @@ class OpenAIProvider(ProviderAdapter):
                 "unsupported Codex SDK extra_options keys: "
                 f"{keys}. Use 'thread_options' or 'turn_options'."
             )
+        # The SDK maps these enums itself and rejects their string values after launch.
+        for options in (thread_options, turn_options):
+            for key, enum_type in (("approval_mode", ApprovalMode), ("sandbox", Sandbox)):
+                if key in options:
+                    options[key] = _enum_value(enum_type, options[key])
         return thread_options, turn_options
 
     def _validate_native_options(self, req: RunRequest) -> None:
@@ -413,8 +410,6 @@ class OpenAIProvider(ProviderAdapter):
                 "app-server, so session_id and continue_session would not find the thread"
             )
         names = _sdk_option_names()
-        if names is None:
-            return
         method = "thread_resume" if resuming else "thread_start"
         # Resuming drops the start-only ephemeral flag, which is false by now.
         allowed = names[method] | ({"ephemeral"} if resuming else set())
@@ -914,13 +909,10 @@ def _unsupported_subagent_controls(subagents: dict[str, Any]) -> list[str]:
 
 
 @functools.cache
-def _sdk_option_names() -> dict[str, frozenset[str]] | None:
+def _sdk_option_names() -> dict[str, frozenset[str]]:
     """Keyword options the SDK's thread and turn methods accept."""
 
-    try:
-        from openai_codex import AsyncCodex, AsyncThread
-    except ImportError:
-        return None
+    from openai_codex import AsyncCodex, AsyncThread
 
     def keywords(method: Any) -> frozenset[str]:
         return frozenset(

@@ -806,6 +806,12 @@ def _options_request(**kwargs: Any) -> RunRequest:
         ({"codex": object()}, {"web_tools": False}, "launch Codex"),
         ({"sandbox": "workspace"}, {}, "invalid Sandbox value"),
         ({"approval_mode": "sometimes"}, {}, "invalid ApprovalMode value"),
+        ({"thread_options": {"sandbox": "workspace"}}, {}, "invalid Sandbox value"),
+        (
+            {},
+            {"extra_options": {"turn_options": {"approval_mode": "sometimes"}}},
+            "invalid ApprovalMode value",
+        ),
         (
             {"config": {"launch_args_override": ("codex",)}},
             {"tools": [sample_importable_tool]},
@@ -819,16 +825,30 @@ def test_codex_rejects_options_the_sdk_cannot_take(provider_options, request_opt
 
 
 def test_codex_accepts_sdk_native_options():
+    from openai_codex import ApprovalMode, Sandbox
+
     provider = OpenAIProvider(
         ephemeral=False,
-        thread_options={"base_instructions": "Be brief.", "service_tier": "flex"},
-        turn_options={"turn_service_tier": "flex", "summary": "concise"},
+        thread_options={
+            "base_instructions": "Be brief.",
+            "service_tier": "flex",
+            "sandbox": "workspace-write",
+        },
+        turn_options={
+            "turn_service_tier": "flex",
+            "summary": "concise",
+            "approval_mode": "deny_all",
+        },
     )
 
     provider.validate_request(_options_request())
     provider.validate_request(_options_request(session_id="t", continue_session=True))
-    thread_options, _ = provider._build_options(_options_request(session_id="t"), None, None)
+    thread_options, turn_options = provider._build_options(
+        _options_request(session_id="t"), None, None
+    )
     assert "ephemeral" not in thread_options
+    assert thread_options["sandbox"] is Sandbox.workspace_write
+    assert turn_options["approval_mode"] is ApprovalMode.deny_all
 
 
 def test_codex_filters_require_wrapper_managed_tools():
