@@ -923,11 +923,62 @@ test("timeline rows show the content of lifecycle events", async () => {
     { type: "subagent_started", task_id: "t1", name: "reviewer", description: "check diff" },
     { type: "subagent_ended", task_id: "t1", status: "completed", summary: "looks fine" },
     { type: "context_compacted", trigger: "auto", pre_tokens: 1200 },
+    { type: "thinking", text: "", redacted_bytes: 512 },
     { type: "run_finished", status: "failed", ended_reason: "timeout", duration_ms: 1500 },
   ];
   assert.deepEqual(
     events.map((event) => evaluate(context, `eventBody(${JSON.stringify(event)})`)),
-    ["planner", "check diff", "looks fine", "trigger: auto", "reason: timeout · 1.5 s"],
+    [
+      "planner",
+      "check diff",
+      "looks fine",
+      "trigger: auto",
+      "not exposed — 512 bytes redacted",
+      "reason: timeout · 1.5 s",
+    ],
+  );
+});
+
+test("the summary, conversation and timeline show the first error and its type", async () => {
+  const context = await loadViewer();
+  const error = (message, error_type) => ({ type: "error", message, error_type });
+  const rows = [
+    { type: "run_started", provider: "anthropic" },
+    error("prompt is too long", "context_window_exceeded"),
+    error("cleanup failed", "provider_exception"),
+    { type: "run_finished", status: "failure", ended_reason: "error", duration_ms: 5 },
+  ].map((event, sequence) => ({ run_id: "r", sequence, event }));
+  context.files = [new File([traceText(rows)], "trace.jsonl")];
+  await vm.runInContext("loadFiles(files)", context);
+  const badges = evaluate(
+    context,
+    "runBadgesEl.children.map((node) => node.textContent)",
+  );
+  assert.ok(badges.includes("context_window_exceeded: prompt is too long"));
+  assert.ok(!badges.some((text) => text.includes("cleanup failed")));
+  assert.deepEqual(
+    evaluate(
+      context,
+      "buildConversation(shown.trace).filter((item) => item.type === 'error').map((item) => item.title)",
+    ),
+    ["error: context_window_exceeded", "error: provider_exception"],
+  );
+  vm.runInContext('switchView("timeline-view")', context);
+  assert.deepEqual(
+    evaluate(
+      context,
+      "timelineEl.children.map((row) => row.children[0].children[0].textContent).slice(1, 3)",
+    ),
+    ["error context_window_exceeded", "error provider_exception"],
+  );
+
+  // Without trace events, result.json supplies the error.
+  const result = { status: "failure", error: "quota", error_type: "usage_limit_exceeded" };
+  context.files = [new File([JSON.stringify(result)], "result.json")];
+  await vm.runInContext("loadFiles(files)", context);
+  assert.equal(
+    vm.runInContext("resultEl.textContent", context),
+    "usage_limit_exceeded: quota",
   );
 });
 

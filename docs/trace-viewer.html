@@ -1803,6 +1803,10 @@
       const finished = current.findLast((row) => row.event?.type === "run_finished")?.event;
       const durations = trace.filter((row) => row.event?.type === "run_finished" && Number.isFinite(row.event.duration_ms));
       const reported = current.findLast((row) => row.event?.type === "session_info" && row.event.model);
+      // Like RunResult, report the run's first error.
+      const failed = finished?.status === "failure"
+        ? current.find((row) => row.event?.type === "error")?.event
+        : undefined;
       return {
         ...started?.event,
         // Prefer the model the runtime reported over the requested one.
@@ -1812,7 +1816,8 @@
         ended_reason: finished?.ended_reason,
         session_id: current.findLast((row) => row.event?.type === "session_info")?.event.id,
         duration_ms: durations.length ? durations.reduce((total, row) => total + row.event.duration_ms, 0) : undefined,
-        error: finished?.status === "failure" ? current.findLast((row) => row.event?.type === "error")?.event.message : undefined,
+        error: failed?.message,
+        error_type: failed?.error_type,
         updated_at: trace.at(-1)?.timestamp,
       };
     }
@@ -1824,7 +1829,7 @@
       const provider = metadata.provider || "";
       const model = metadata.model || "";
       const endedReason = metadata.ended_reason || "";
-      const error = metadata.error || "";
+      const error = errorText(metadata.error_type, metadata.error);
 
       const badges = [statusBadge(status)];
       if (endedReason && endedReason !== "success" && endedReason !== "unknown") {
@@ -1976,7 +1981,7 @@
       } else if (result.error) {
         const error = document.createElement("div");
         error.className = "status-failure";
-        error.textContent = textOf(result.error);
+        error.textContent = errorText(result.error_type, result.error);
         nodes.push(error);
       } else {
         nodes.push(emptyNode("Result has no final text."));
@@ -2046,14 +2051,7 @@
         const text = textOf(event.text);
         if (event.type === "thinking" && !text.trim()) {
           flushMessage();
-          items.push({
-            kind: "note",
-            key,
-            label: "Thinking",
-            text: event.redacted_bytes
-              ? `not exposed — ${textOf(event.redacted_bytes)} bytes redacted`
-              : "not exposed by the provider",
-          });
+          items.push({ kind: "note", key, label: "Thinking", text: hiddenThinking(event) });
           return;
         }
         if (event.type === "text" || event.type === "thinking") {
@@ -2121,7 +2119,7 @@
             kind: "banner",
             key,
             type: event.type,
-            title: event.type,
+            title: event.error_type ? `error: ${textOf(event.error_type)}` : event.type,
             body: textOf(event.message),
           });
         } else if (event.type === "agent_updated") {
@@ -2385,10 +2383,14 @@
       if (event.type === "session_info") {
         return `session_info ${textOf(event.id)}`.trim();
       }
+      if (event.type === "error") {
+        return `error ${textOf(event.error_type)}`.trim();
+      }
       return textOf(event.type) || "event";
     }
 
     function eventBody(event) {
+      if (event.type === "thinking" && !textOf(event.text).trim()) return hiddenThinking(event);
       if (event.type === "agent_updated") return textOf(event.name);
       if (event.type === "subagent_started") return textOf(event.description || event.task_id);
       if (event.type === "subagent_ended") return textOf(event.summary || event.task_id);
@@ -2486,6 +2488,16 @@
     function textOf(value) {
       if (typeof value === "string") return value;
       return value === undefined || value === null ? "" : JSON.stringify(value);
+    }
+
+    function errorText(type, message) {
+      return [textOf(type), textOf(message)].filter(Boolean).join(": ");
+    }
+
+    function hiddenThinking(event) {
+      return event.redacted_bytes
+        ? `not exposed — ${textOf(event.redacted_bytes)} bytes redacted`
+        : "not exposed by the provider";
     }
 
     function stringifyBody(value) {
