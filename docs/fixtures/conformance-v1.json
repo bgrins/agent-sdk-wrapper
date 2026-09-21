@@ -1,0 +1,86 @@
+{
+  "description": "Cross-language conformance cases. Each case runs the real Claude or Codex runtime in both packages: offline against a local mock API that answers with `mock` steps and records requests, and live (opt-in, billed) when the case has a `live` section. Format: docs/fixtures/CONFORMANCE.md.",
+  "version": 1,
+  "cases": [
+    {
+      "id": "anthropic.basic",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Reply with the single word PONG.",
+      "mock": [{ "text": "PONG" }],
+      "expect": {
+        "status": "success",
+        "final_text": "PONG",
+        "events": { "includes": ["run_started", "session_info", "text", "usage", "run_finished"] },
+        "requests": { "count": 1, "match": [{ "path": "model", "equals": "claude-haiku-4-5" }] }
+      },
+      "live": { "expect": { "status": "success", "final_text_contains": "PONG" } }
+    },
+    {
+      "id": "anthropic.effort",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5", "effort": "low" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": { "match": [{ "path": "output_config.effort", "equals": "low" }] }
+      }
+    },
+    {
+      "id": "anthropic.rate_limit",
+      "provider": "anthropic",
+      "options": { "model": "claude-haiku-4-5" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 429,
+          "headers": { "retry-after": "1" },
+          "body": { "type": "error", "error": { "type": "rate_limit_error", "message": "Rate limited" } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "transient_api_error" }
+    },
+    {
+      "id": "codex.basic",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Reply with the single word PONG.",
+      "mock": [{ "text": "PONG" }],
+      "expect": {
+        "status": "success",
+        "final_text": "PONG",
+        "events": { "includes": ["run_started", "session_info", "text", "usage", "run_finished"] },
+        "requests": { "count": 1, "match": [{ "path": "model", "equals": "gpt-5.4" }] }
+      },
+      "live": {
+        "options": { "model": "gpt-5.6-luna" },
+        "expect": { "status": "success", "final_text_contains": "PONG" }
+      }
+    },
+    {
+      "id": "codex.effort",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4", "effort": "low" },
+      "prompt": "Say ok.",
+      "mock": [{ "text": "ok" }],
+      "expect": {
+        "status": "success",
+        "requests": { "match": [{ "path": "reasoning.effort", "equals": "low" }] }
+      }
+    },
+    {
+      "id": "codex.invalid_key",
+      "provider": "codex",
+      "options": { "model": "gpt-5.4" },
+      "prompt": "Say ok.",
+      "mock": [
+        {
+          "status": 401,
+          "body": { "error": { "message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key" } }
+        }
+      ],
+      "expect": { "status": "failure", "error_type": "authentication_failed" }
+    }
+  ]
+}
