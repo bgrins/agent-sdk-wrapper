@@ -11,48 +11,59 @@ import re
 
 TRANSIENT = "transient_api_error"
 
+# JavaScript semantics, so non-ASCII text classifies as in TypeScript: ASCII \b, \d and
+# case folding (re.ASCII), JavaScript's \s, and . stopping at JavaScript line terminators.
+_FLAGS = re.ASCII | re.IGNORECASE
+_SPACE = r"[\t\n\v\f\r    -     　﻿]"
+_ANY = r"[^\n\r  ]"
+
 # Status codes only count next to an HTTP marker, never as bare numbers.
 _STATUS_PATTERNS = (
-    re.compile(r"\b(?:status(?: code)?|HTTP(?: status)?|API Error)\s*:?\s*(\d{3})\b", re.I),
+    re.compile(
+        rf"\b(?:status(?: code)?|HTTP(?: status)?|API Error){_SPACE}*:?{_SPACE}*(\d{{3}})\b",
+        _FLAGS,
+    ),
     re.compile(
         r"\b(\d{3}) (?:Bad Request|Unauthorized|Payment Required|Forbidden|Not Found"
         r"|Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable"
         r"|Gateway Timeout)\b",
-        re.I,
+        _FLAGS,
     ),
 )
 # "upgrade to Plus" is Codex's text for a ChatGPT plan without Codex access.
 _USAGE_LIMIT = re.compile(
     r"\busage limits?\b|\bquota exceeded\b|\binsufficient_quota\b"
     r"|\bexceeded your current quota\b|\bupgrade to (?:Plus|Pro)\b",
-    re.I,
+    _FLAGS,
 )
 _CONTEXT_WINDOW = re.compile(
     r"\bprompt is too long\b|\bcontext[_ ]length[_ ]exceeded\b|\bcontext[ _-]?window\b"
     r"|\bmaximum context length\b",
-    re.I,
+    _FLAGS,
 )
-_BILLING = re.compile(r"\bcredit balance\b|\bbilling\b", re.I)
+_BILLING = re.compile(r"\bcredit balance\b|\bbilling\b", _FLAGS)
 _AUTHENTICATION = re.compile(
     r"\bunauthorized\b|\bauthentication(?:_error)?\b|\binvalid[_ ](?:x-)?api[_ -]?key\b"
     r"|\bincorrect api key\b|\bnot logged in\b|\bmissing api key\b",
-    re.I,
+    _FLAGS,
 )
-_PERMISSION = re.compile(r"\bforbidden\b|\bpermission denied\b|\bpermission_error\b", re.I)
+_PERMISSION = re.compile(r"\bforbidden\b|\bpermission denied\b|\bpermission_error\b", _FLAGS)
 # "Model provider `x` not found" is a configuration error, not a missing model.
 _MODEL_NOT_FOUND = re.compile(
     r"\bmodel_not_found\b|\bunknown model\b"
-    r"|\bmodel\b(?! provider).{0,80}?\b(?:not found|does not exist|is not supported)\b",
-    re.I,
+    rf"|\bmodel\b(?! provider){_ANY}{{0,80}}?\b(?:not found|does not exist|is not supported)\b",
+    _FLAGS,
 )
-_INVALID_REQUEST = re.compile(r"\binvalid_request_error\b|\binvalid prompt\b|\bbad request\b", re.I)
+_INVALID_REQUEST = re.compile(
+    r"\binvalid_request_error\b|\binvalid prompt\b|\bbad request\b", _FLAGS
+)
 _TRANSIENT = re.compile(
     r"\brate[ _-]?limit|\boverloaded(?:_error)?\b|\bhigh (?:demand|load)\b"
     r"|\btemporarily unavailable\b|\bat capacity\b|\bserver (?:is )?busy\b|\bstream disconnected\b"
     r"|\b(?:connection|request) timed out\b|\bconnection (?:refused|reset|error)\b"
     r"|\bconnection closed before message completed\b"
     r"|\bConnectionRefused\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b",
-    re.I,
+    _FLAGS,
 )
 
 
