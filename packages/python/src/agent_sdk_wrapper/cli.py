@@ -59,7 +59,11 @@ def _parser() -> argparse.ArgumentParser:
             "Defaults to jsonl, or text when --stream is set."
         ),
     )
-    run.add_argument("--stream", action="store_true", help="Stream text deltas to stdout.")
+    run.add_argument(
+        "--stream",
+        action="store_true",
+        help="Print each completed assistant message as it arrives.",
+    )
     run.add_argument("--trace-file", default=None, type=Path)
     run.add_argument(
         "--artifacts-dir",
@@ -124,12 +128,6 @@ def _parser() -> argparse.ArgumentParser:
         "--session-id",
         default=None,
         help="Resume an existing provider session/thread.",
-    )
-    run.add_argument(
-        "--continue-session",
-        action="store_true",
-        default=None,
-        help="Store emitted session ids and continue the same session for later calls.",
     )
     run.add_argument(
         "--env",
@@ -265,11 +263,6 @@ async def _run(args: argparse.Namespace) -> int:
         disallowed_tools=_merge_string_lists(config, "disallowed_tools", args.disallowed_tool),
         mcp_servers=_parse_mcp_servers(config.get("mcp_servers"), config_base_dir),
         session_id=args.session_id or _config_str(config, "session_id"),
-        continue_session=bool(
-            args.continue_session
-            if args.continue_session is not None
-            else _config_bool(config, "continue_session", False)
-        ),
         permission_mode=args.permission_mode or _config_str(config, "permission_mode"),
         cli_login=args.cli_login or _config_str(config, "cli_login") or "deny",
         setting_sources=(
@@ -336,7 +329,6 @@ _CONFIG_KEYS = {
     "builtin_tools",
     "cli_login",
     "setting_sources",
-    "continue_session",
     "cwd",
     "disallowed_tools",
     "effort",

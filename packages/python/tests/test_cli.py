@@ -120,7 +120,6 @@ def test_run_forwards_extended_cli_options(monkeypatch, capsys):
             "repo.write_file",
             "--session-id",
             "sess-123",
-            "--continue-session",
             "--env",
             "MODE=test",
             "--env",
@@ -147,7 +146,6 @@ def test_run_forwards_extended_cli_options(monkeypatch, capsys):
     assert req.allowed_tools == ["repo.read_file"]
     assert req.disallowed_tools == ["repo.write_file"]
     assert req.session_id == "sess-123"
-    assert req.continue_session is True
     assert req.env == {"MODE": "test", "TOKEN": "a=b"}
     assert req.extra_options == {"sandbox": {"mode": "workspace-write"}}
 
@@ -276,7 +274,6 @@ model = "gpt-5"
 system_prompt = "system from config"
 cwd = "."
 effort = "high"
-continue_session = true
 builtin_tools = "none"
 allowed_tools = ["repo.read_file"]
 disallowed_tools = ["repo.delete_file"]
@@ -348,7 +345,6 @@ tool_approval_modes = { search = "approve" }
     assert req.system_prompt == "system from config"
     assert req.cwd == tmp_path
     assert req.effort == "high"
-    assert req.continue_session is True
     assert req.builtin_tools == "none"
     assert req.allowed_tools == ["repo.read_file", "repo.search"]
     assert req.disallowed_tools == ["repo.delete_file"]
@@ -409,6 +405,17 @@ def test_run_rejects_unknown_config_field(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "unknown config field(s): unknown" in captured.err
+
+
+def test_run_rejects_session_continuation_it_cannot_honor(tmp_path, capsys):
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_text('provider = "openai"\ncontinue_session = true\n', encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["run", "--provider", "openai", "--prompt", "x", "--continue-session"])
+    assert exc_info.value.code == 2
+    assert cli.main(["run", "--config", str(config_path), "--prompt", "x"]) == 2
+    assert "unknown config field(s): continue_session" in capsys.readouterr().err
 
 
 def test_run_rejects_a_config_file_that_is_not_utf8(tmp_path, capsys):
