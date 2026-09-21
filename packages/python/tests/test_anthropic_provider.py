@@ -1564,3 +1564,34 @@ async def test_anthropic_subagents_ignore_the_host_subagent_model(claude_cli, mo
 
     assert result.status == "success"
     assert [r["body"]["model"] for r in api.requests] == ["claude-haiku-4-5"] * 5
+
+
+@pytest.mark.parametrize(
+    ("server_options", "output", "is_error"),
+    [
+        ({}, "LIVE_MCP_OK", False),
+        # A server-wide approval does not outrank a disabled tool.
+        ({"disabled_tools": ["read_brief"]}, "No such tool available", True),
+    ],
+)
+async def test_anthropic_approves_every_tool_of_a_server_without_enabled_tools(
+    claude_cli, server_options, output, is_error
+):
+    import sys
+    from pathlib import Path
+
+    from agent_sdk_wrapper import Agent
+
+    api, cwd = claude_cli
+    fixture = Path(__file__).parent / "fixtures" / "simple_mcp_server.py"
+    server = McpStdioServer(
+        name="brief_tools", command=sys.executable, args=[str(fixture)], **server_options
+    )
+    api.set_steps([{"tool": {"name": "mcp__brief_tools__read_brief", "input": {}}}, {"text": "ok"}])
+    result = await Agent(
+        provider="anthropic", model="claude-haiku-4-5", cwd=cwd, mcp_servers=[server]
+    ).run("go")
+
+    [tool_result] = [env.event for env in result.events if env.event.type == "tool_result"]
+    assert output in tool_result.output
+    assert tool_result.is_error is is_error

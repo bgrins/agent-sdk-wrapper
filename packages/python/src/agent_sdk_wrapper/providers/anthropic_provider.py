@@ -931,6 +931,10 @@ def _validate_anthropic_mcp_servers(servers: list[McpServer]) -> None:
 def _anthropic_tool_names(servers: list[McpServer], *, enabled: bool) -> list[str]:
     out: list[str] = []
     for server in servers:
+        if enabled and server.enabled_tools is None:
+            # The CLI approves every tool of a server named without a tool.
+            out.append(f"mcp__{server.name}")
+            continue
         tools = server.enabled_tools if enabled else server.disabled_tools
         for tool in tools or []:
             out.append(f"mcp__{server.name}__{tool}")
