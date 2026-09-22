@@ -555,3 +555,38 @@ async def test_signal_killed_app_server_raises_process_terminated(mock_api, cwd)
         await killer
 
     assert raised.value.signal == signal.SIGKILL
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        pytest.param("exec {python} {script}", id="killed-runtime"),
+        # sh reports its killed child with exit status 128 + 9.
+        pytest.param("{python} {script}", id="killed-child-of-a-launcher"),
+    ],
+)
+async def test_a_runtime_killed_during_the_handshake_raises_process_terminated(
+    cwd, tmp_path, monkeypatch, launch
+):
+    from agent_sdk_wrapper import ProcessTerminatedError
+
+    script = tmp_path / "die.py"
+    script.write_text(
+        "import os, signal, sys\nsys.stdin.readline()\nos.kill(os.getpid(), signal.SIGKILL)\n",
+        encoding="utf-8",
+    )
+    codex_bin = tmp_path / "codex"
+    codex_bin.write_text(
+        "#!/bin/sh\n" + launch.format(python=sys.executable, script=script) + "\n",
+        encoding="utf-8",
+    )
+    codex_bin.chmod(0o755)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-mock-key")
+    agent = Agent(
+        provider="codex", cwd=cwd, provider_options={"config": {"codex_bin": str(codex_bin)}}
+    )
+
+    with pytest.raises(ProcessTerminatedError) as raised:
+        await agent.run("hi")
+
+    assert raised.value.signal == signal.SIGKILL

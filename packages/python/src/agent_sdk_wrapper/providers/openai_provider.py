@@ -318,13 +318,25 @@ class OpenAIProvider(ProviderAdapter):
             return
 
         from openai_codex import AsyncCodex
+        from openai_codex.errors import TransportClosedError
 
         # An access token is a ChatGPT login that replaces the stored one and that
         # commands would inherit; Codex treats an empty value as unset.
         env = {**req.env, _ACCESS_TOKEN_ENV: ""}
         config = _codex_config(self._config, env, config_overrides=config_overrides)
-        async with AsyncCodex(config=config) as codex:
+        codex = AsyncCodex(config=config)
+        # A failed handshake closes the process, so keep its handle to read how it died.
+        await codex._client.start()
+        process = _codex_process(codex)
+        try:
+            await codex.__aenter__()
+        except TransportClosedError as exc:
+            await _raise_if_signaled(process, exc)
+            raise
+        try:
             yield codex
+        finally:
+            await codex.close()
 
     def _native_options(self, req: RunRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         from openai_codex import ApprovalMode, Sandbox
@@ -1862,9 +1874,15 @@ async def _raise_if_signaled(process: Any, exc: BaseException) -> None:
             returncode = await asyncio.to_thread(process.wait, 2)
         except Exception:
             return
-    if not isinstance(returncode, int) or returncode >= 0:
+    if not isinstance(returncode, int):
         return
-    number = -returncode
+    # -signum from Popen, or 128 + signum from a shell or launcher that relays the death.
+    if returncode < 0:
+        number = -returncode
+    elif 128 < returncode < 160:
+        number = returncode - 128
+    else:
+        return
     try:
         name = signal.Signals(number).name
     except ValueError:
