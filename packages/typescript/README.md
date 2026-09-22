@@ -86,7 +86,7 @@ Native options use `providerOptions.provider: "anthropic"` or `"openai"`:
 |---|---|
 | Claude `options` | `permissionMode`, `allowDangerouslySkipPermissions`, `tools`, `allowedTools`, `disallowedTools`, `settingSources`, `env`, `systemPrompt`, `maxTurns`, `thinking`, `pathToClaudeCodeExecutable` |
 | Codex `client` | `apiKey`, `baseUrl`, `env`, `codexPathOverride` |
-| Codex `thread` | `sandboxMode`, `approvalPolicy`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` |
+| Codex `thread` | `sandboxMode`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` (`codex exec` always uses approval policy `never`) |
 
 Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
 `allowedTools` grants approval, not a hard filter. Native `env` replaces inheritance

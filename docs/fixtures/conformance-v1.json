@@ -13,8 +13,7 @@
       "codex:client.baseUrl": "Selects the built-in provider, whose websocket transport and retries the mock cannot turn off; cases select a custom provider in CODEX_HOME/config.toml",
       "codex:client.codexPathOverride": "Runtime location; codex-exec.test.ts drives a fake runtime through it",
       "codex:thread.skipGitRepoCheck": "The runner sets it for every case because scratch directories are not repositories",
-      "codex:thread.additionalDirectories": "No Python counterpart; it only adds writable sandbox roots",
-      "codex:thread.approvalPolicy": "codex exec 0.154 runs with approval policy never: on-request and on-failure leave its instructions at never, and untrusted fails at startup"
+      "codex:thread.additionalDirectories": "No Python counterpart; it only adds writable sandbox roots"
     }
   },
   "cases": [
@@ -1298,7 +1297,7 @@
             "web_tools": false,
             "provider_options": { "sandbox": "read-only" }
           },
-          "reason": "codex exec runs with approval policy never whatever approvalPolicy says"
+          "reason": "TypeScript has no Codex approval option: codex exec always runs with approval policy never"
         }
       },
       "options": {
@@ -1584,7 +1583,7 @@
             "status": "success",
             "requests": { "match": [{ "path": "input", "contains": "`sandbox_mode` is `workspace-write`" }] }
           },
-          "reason": "codex exec runs with approval policy never whatever approvalPolicy says"
+          "reason": "TypeScript has no Codex approval option: codex exec always runs with approval policy never"
         }
       },
       "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "workspace-write", "approval_mode": "deny_all" } },

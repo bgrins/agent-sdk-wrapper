@@ -182,7 +182,6 @@ const surface = {
       skipGitRepoCheck: true,
       networkAccessEnabled: true,
       webSearchMode: true,
-      approvalPolicy: true,
       additionalDirectories: true,
     } satisfies Keys<CodexThreadOptions>).map((key) => `thread.${key}`),
   ],

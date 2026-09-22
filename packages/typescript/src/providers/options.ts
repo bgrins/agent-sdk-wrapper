@@ -27,7 +27,6 @@ export type CodexThreadOptions = Pick<
   | "skipGitRepoCheck"
   | "networkAccessEnabled"
   | "webSearchMode"
-  | "approvalPolicy"
   | "additionalDirectories"
 >;
 export type ProviderOptions =

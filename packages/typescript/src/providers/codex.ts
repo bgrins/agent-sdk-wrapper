@@ -61,7 +61,6 @@ export class CodexAdapter implements ProviderAdapter {
         "skipGitRepoCheck",
         "networkAccessEnabled",
         "webSearchMode",
-        "approvalPolicy",
         "additionalDirectories",
       ],
       "openai.thread",
@@ -76,11 +75,6 @@ export class CodexAdapter implements ProviderAdapter {
       thread?.webSearchMode,
       ["disabled", "cached", "live"],
       "webSearchMode",
-    );
-    enumOption(
-      thread?.approvalPolicy,
-      ["never", "on-request", "on-failure", "untrusted"],
-      "approvalPolicy",
     );
     for (const key of ["skipGitRepoCheck", "networkAccessEnabled"] as const)
       if (thread?.[key] !== undefined && typeof thread[key] !== "boolean")

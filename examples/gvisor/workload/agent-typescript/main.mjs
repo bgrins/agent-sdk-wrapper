@@ -48,7 +48,6 @@ const providerOptions =
         client: { apiKey: token, baseUrl: `${baseUrl}/v1` },
         thread: {
           sandboxMode: "danger-full-access",
-          approvalPolicy: "never",
           skipGitRepoCheck: true,
           webSearchMode: "disabled",
         },
