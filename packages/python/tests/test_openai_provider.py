@@ -12,7 +12,6 @@ import pytest
 from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import (
-    AgentSdkWrapperError,
     ConfigError,
     Error,
     McpHttpServer,
@@ -1860,41 +1859,31 @@ def test_codex_optional_nulls_follow_the_matching_union_member():
 
 
 @pytest.mark.parametrize(
-    ("cli_login", "blanked"),
+    ("overrides", "thread_config", "allowed"),
     [
-        ("deny", ("CODEX_ACCESS_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")),
-        ("require", ("OPENAI_API_KEY", "CODEX_API_KEY")),
+        (('shell_environment_policy.set={PATH="/bin"}',), None, False),
+        (('shell_environment_policy={inherit="core"}',), None, False),
+        (('shell_environment_policy.set.OPENAI_API_KEY="sk"',), None, False),
+        ((), {"shell_environment_policy": {"inherit": "core"}}, False),
+        ((), {"shell_environment_policy.set": {"PATH": "/bin"}}, False),
+        (('shell_environment_policy.set.PATH="/bin"',), None, True),
+        ((), {"shell_environment_policy.inherit": "core"}, True),
     ],
 )
-def test_codex_login_policy_keeps_credentials_out_of_the_runtime_env(
-    monkeypatch, cli_login, blanked
+def test_codex_config_cannot_replace_the_policy_that_hides_keys_from_commands(
+    overrides, thread_config, allowed
 ):
-    import openai_codex
+    provider = OpenAIProvider(
+        config={"config_overrides": overrides},
+        thread_options={"config": thread_config} if thread_config else None,
+    )
+    req = RunRequest(provider="openai", prompt="x")
 
-    seen = {}
-
-    class CapturingCodex:
-        def __init__(self, config=None):
-            seen["env"] = dict(config.env or {})
-            seen["overrides"] = config.config_overrides
-
-        async def __aenter__(self):
-            raise RuntimeError("stop after capturing config")
-
-        async def __aexit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(openai_codex, "AsyncCodex", CapturingCodex)
-    req = RunRequest(provider="openai", prompt="x", cli_login=cli_login)
-
-    async def collect():
-        provider = OpenAIProvider(api_key="sk-test" if cli_login == "deny" else None)
-        return [event async for event in provider.stream(req)]
-
-    with pytest.raises(AgentSdkWrapperError):
-        asyncio.run(collect())
-    assert {name: seen["env"].get(name) for name in blanked} == dict.fromkeys(blanked, "")
-    assert "features.shell_snapshot=false" in seen["overrides"]
+    if allowed:
+        provider.validate_request(req)
+    else:
+        with pytest.raises(ConfigError, match="hide OPENAI_API_KEY, CODEX_API_KEY"):
+            provider.validate_request(req)
 
 
 def test_codex_recursive_output_schemas_terminate():

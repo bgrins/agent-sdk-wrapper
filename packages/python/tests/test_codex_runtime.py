@@ -86,17 +86,6 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def login_agent(api: MockCodex, cwd: Path, cli_login: str) -> Agent:
-    return Agent(
-        provider="codex",
-        model=MODEL,
-        cwd=cwd,
-        timeout=60,
-        cli_login=cli_login,
-        provider_options={"config": codex_config(api)},
-    )
-
-
 async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_home, cwd):
     seed_chatgpt_login(codex_home)
     auth = codex_home / "auth.json"
@@ -111,59 +100,154 @@ async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_ho
     assert auth.read_text(encoding="utf-8") == before
 
 
-SECRET_KEY = "sk-mock-SECRET-4242"
-
-
-def env_key_agent(api: MockCodex, cwd: Path, *overrides: str) -> Agent:
-    """An agent whose only API key is OPENAI_API_KEY in the run env."""
-
-    return Agent(
-        provider="codex",
-        model=MODEL,
-        cwd=cwd,
-        timeout=60,
-        env={"OPENAI_API_KEY": SECRET_KEY},
-        provider_options={"config": codex_config(api, *overrides)},
-    )
+HOST_KEYS = {
+    "OPENAI_API_KEY": "sk-host-SECRET-1111",
+    "CODEX_API_KEY": "sk-codex-SECRET-2222",
+    "CODEX_ACCESS_TOKEN": "tok-access-SECRET-3333",
+}
+RUN_KEY = "sk-run-SECRET-4444"
+OPTION_KEY = "sk-option-SECRET-5555"
+SECRETS = [*HOST_KEYS.values(), RUN_KEY, OPTION_KEY]
+NO_OPENAI_AUTH = "model_providers.mock.requires_openai_auth=false"
 
 
 def files_containing(root: Path, text: str) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file() and text.encode() in p.read_bytes()]
 
 
-async def test_an_env_api_key_stays_out_of_codex_home_and_commands(mock_api, codex_home, cwd):
-    mock_api.steps = [{"shell": 'printf "%s" "${OPENAI_API_KEY:-unset}"'}, {"text": "done"}]
-
-    result = await env_key_agent(mock_api, cwd).run("hi")
-
-    assert result.ok, result.error
-    assert [r["headers"].get("authorization") for r in mock_api.requests] == [
-        f"Bearer {SECRET_KEY}"
-    ] * 2
-    [shell] = [e.event for e in result.events if e.event.type == "tool_result"]
-    assert shell.output == "unset"
-    assert files_containing(codex_home, SECRET_KEY) == []
-
-
-async def test_a_provider_env_key_keeps_the_key_without_persisting_it(
-    mock_api, codex_home, cwd
+@pytest.mark.parametrize(
+    ("host", "options", "overrides", "key"),
+    [
+        # Explicit ids: commands see PYTEST_CURRENT_TEST.
+        pytest.param(
+            HOST_KEYS, {"provider_options": {"api_key": OPTION_KEY}}, (), OPTION_KEY, id="api-key"
+        ),
+        pytest.param(HOST_KEYS, {}, (), HOST_KEYS["OPENAI_API_KEY"], id="host-key"),
+        pytest.param(HOST_KEYS, {"env": {"OPENAI_API_KEY": RUN_KEY}}, (), RUN_KEY, id="run-key"),
+        pytest.param(
+            HOST_KEYS,
+            {"env": {"OPENAI_API_KEY": RUN_KEY}},
+            (NO_OPENAI_AUTH, 'model_providers.mock.env_key="OPENAI_API_KEY"'),
+            RUN_KEY,
+            id="provider-env-key",
+        ),
+        pytest.param(
+            {name: HOST_KEYS[name] for name in ("CODEX_API_KEY", "CODEX_ACCESS_TOKEN")},
+            {},
+            (NO_OPENAI_AUTH,),
+            None,
+            id="custom-provider",
+        ),
+        pytest.param(HOST_KEYS, {"cli_login": "require"}, (), "stored", id="require"),
+    ],
+)
+async def test_commands_and_codex_home_never_see_credentials(
+    mock_api, codex_home, cwd, monkeypatch, host, options, overrides, key
 ):
-    mock_api.steps = [{"shell": "true"}, {"text": "done"}]
-    agent = env_key_agent(
-        mock_api,
-        cwd,
-        "model_providers.mock.requires_openai_auth=false",
-        'model_providers.mock.env_key="OPENAI_API_KEY"',
+    for name, value in host.items():
+        monkeypatch.setenv(name, value)
+    if key == "stored":
+        # A host CODEX_ACCESS_TOKEN would replace the stored login.
+        key = seed_chatgpt_login(codex_home)
+    mock_api.steps = [{"shell": "env"}, {"text": "done"}]
+    options = dict(options)
+    provider_options = {
+        "config": codex_config(mock_api, *overrides),
+        **options.pop("provider_options", {}),
+    }
+    agent = Agent(
+        provider="codex",
+        model=MODEL,
+        cwd=cwd,
+        timeout=60,
+        provider_options=provider_options,
+        **options,
     )
 
     result = await agent.run("hi")
 
     assert result.ok, result.error
-    assert [r["headers"].get("authorization") for r in mock_api.requests] == [
-        f"Bearer {SECRET_KEY}"
-    ] * 2
-    assert list(codex_home.glob("shell_snapshots/*")) == []
-    assert files_containing(codex_home, SECRET_KEY) == []
+    authorization = [r["headers"].get("authorization") for r in mock_api.requests]
+    assert authorization == [f"Bearer {key}" if key else None] * 2
+    [shell] = [e.event.output or "" for e in result.events if e.event.type == "tool_result"]
+    assert "PATH=" in shell
+    assert [secret for secret in SECRETS if secret in shell] == []
+    assert [path for secret in SECRETS for path in files_containing(codex_home, secret)] == []
+
+
+KEY_MCP_SERVER = '''
+import os
+
+from mcp.server.mcpserver import MCPServer as Server
+
+
+def key() -> str:
+    """Return OPENAI_API_KEY."""
+    return os.environ.get("OPENAI_API_KEY", "<unset>")
+
+
+server = Server("keys")
+server.add_tool(key, name="key", description="Key.", structured_output=False)
+server.run("stdio")
+'''
+
+
+async def test_mcp_servers_and_wrapper_tools_keep_the_api_key(mock_api, cwd, tmp_path, monkeypatch):
+    script = tmp_path / "key_server.py"
+    script.write_text(KEY_MCP_SERVER, encoding="utf-8")
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "key_tools.py").write_text(
+        "import os\n\n\ndef wrapper_key() -> str:\n"
+        '    """Return OPENAI_API_KEY."""\n'
+        "    return os.environ.get('OPENAI_API_KEY', '<unset>')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(modules))
+    monkeypatch.setenv("OPENAI_API_KEY", HOST_KEYS["OPENAI_API_KEY"])
+    server = McpStdioServer(
+        name="keys",
+        command=sys.executable,
+        args=[str(script)],
+        env_passthrough=["OPENAI_API_KEY"],
+        required=True,
+    )
+    mock_api.steps = [
+        {
+            "tool": [
+                {"name": "mcp__keys__key"},
+                {"name": "mcp__agent_sdk_wrapper_tools__wrapper_key"},
+            ]
+        },
+        {"shell": "env"},
+        {"text": "done"},
+    ]
+    agent = Agent(
+        provider="codex",
+        model=MODEL,
+        cwd=cwd,
+        timeout=60,
+        mcp_servers=[server],
+        tools=[importlib.import_module("key_tools").wrapper_key],
+        provider_options={"config": codex_config(mock_api)},
+    )
+
+    result = await agent.run("hi")
+
+    assert result.ok, result.error
+    outputs = {
+        e.event.name: e.event.output or "" for e in result.events if e.event.type == "tool_result"
+    }
+    tool_texts = {
+        name: json.loads(output)["content"][0]["text"]
+        for name, output in outputs.items()
+        if name != "command"
+    }
+    assert tool_texts == dict.fromkeys(
+        ["keys.key", "agent_sdk_wrapper_tools.wrapper_key"], HOST_KEYS["OPENAI_API_KEY"]
+    )
+    assert "PATH=" in outputs["command"]
+    assert HOST_KEYS["OPENAI_API_KEY"] not in outputs["command"]
 
 
 class Detail(BaseModel):
@@ -468,17 +552,3 @@ async def test_signal_killed_app_server_raises_process_terminated(mock_api, cwd)
         await killer
 
     assert raised.value.signal == signal.SIGKILL
-
-
-async def test_cli_login_require_uses_the_stored_chatgpt_login(mock_api, codex_home, cwd):
-    access = seed_chatgpt_login(codex_home)
-    mock_api.steps = [{"shell": "true"}, {"text": "hello"}]
-
-    result = await login_agent(mock_api, cwd, "require").run("hi")
-
-    assert result.ok, result.error
-    assert [r["headers"].get("authorization") for r in mock_api.requests] == [
-        f"Bearer {access}"
-    ] * 2
-    # The runtime env is not copied into CODEX_HOME.
-    assert list(codex_home.glob("shell_snapshots/*")) == []
