@@ -277,6 +277,19 @@
       }
     },
     {
+      "id": "anthropic.mcp_servers_all_tools",
+      "provider": "anthropic",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement MCP servers yet" } },
+      "options": { "model": "claude-haiku-4-5", "mcp_servers": [{ "name": "brief_tools", "fixture": "simple_mcp_server" }] },
+      "prompt": "Use read_brief, then reply with LIVE_MCP_OK.",
+      "mock": [{ "tool": { "name": "mcp__brief_tools__read_brief", "input": {} } }, { "text": "LIVE_MCP_OK" }],
+      "expect": {
+        "status": "success",
+        "tool_calls": ["mcp__brief_tools__read_brief"],
+        "tool_results": [{ "contains": "LIVE_MCP_OK: external MCP server returned the release-readiness brief." }]
+      }
+    },
+    {
       "id": "anthropic.mcp_codex_only_field",
       "provider": "anthropic",
       "options": {
@@ -545,6 +558,11 @@
       "id": "anthropic.no_credentials",
       "provider": "anthropic",
       "options": { "model": "claude-haiku-4-5", "cli_login": "deny", "env": { "ANTHROPIC_API_KEY": "" } },
+      "setup": {
+        "files": {
+          "claude_config/.credentials.json": "{\"claudeAiOauth\": {\"accessToken\": \"sk-ant-oat01-stored-conformance\", \"refreshToken\": \"sk-ant-ort01-stored-conformance\", \"expiresAt\": 4102444800000, \"scopes\": [\"user:inference\", \"user:profile\"], \"subscriptionType\": \"pro\"}}"
+        }
+      },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": { "setup_error": "authentication_failed" }
@@ -1132,7 +1150,8 @@
             "name": "brief_tools",
             "fixture": "simple_mcp_server",
             "enabled_tools": ["read_brief"],
-            "default_tools_approval_mode": "approve"
+            "default_tools_approval_mode": "approve",
+            "required": true
           }
         ],
         "allowed_tools": ["mcp__brief_tools__read_brief"],
@@ -1392,6 +1411,7 @@
       "mock": [{ "text": "ok" }],
       "expect": {
         "status": "success",
+        "files_unchanged": ["codex_home/auth.json"],
         "requests": {
           "match": [
             { "header": "authorization", "equals": "Bearer sk-mock-key" },
@@ -1559,22 +1579,22 @@
       "provider": "codex",
       "languages": {
         "typescript": {
-          "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "read-only" } },
+          "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "workspace-write" } },
           "expect": {
             "status": "success",
-            "requests": { "match": [{ "path": "input", "contains": "`sandbox_mode` is `read-only`" }] }
+            "requests": { "match": [{ "path": "input", "contains": "`sandbox_mode` is `workspace-write`" }] }
           },
           "reason": "codex exec runs with approval policy never whatever approvalPolicy says"
         }
       },
-      "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "read-only", "approval_mode": "deny_all" } },
+      "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "workspace-write", "approval_mode": "deny_all" } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": {
         "status": "success",
         "requests": {
           "match": [
-            { "path": "input", "contains": "`sandbox_mode` is `read-only`" },
+            { "path": "input", "contains": "`sandbox_mode` is `workspace-write`" },
             { "path": "input", "contains": "Approval policy is currently never." }
           ]
         }
@@ -1685,11 +1705,25 @@
       "id": "codex.prebuilt_client_stored_login",
       "provider": "codex",
       "languages": { "typescript": "unsupported: TypeScript has no prebuilt Codex client" },
-      "options": { "model": "gpt-5.4", "provider_options": { "codex": "client" } },
+      "options": {
+        "model": "gpt-5.4",
+        "provider_options": {
+          "codex": "client",
+          "config": { "config_overrides": ["cli_auth_credentials_store=\"ephemeral\"", "model_providers.mock.requires_openai_auth=false"] }
+        }
+      },
       "setup": { "codex_login": "chatgpt" },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
-      "expect": { "setup_error": "authentication_failed" }
+      "expect": { "status": "success", "requests": { "count": 1, "match": [{ "header": "authorization", "absent": true }] } },
+      "runs": [
+        {
+          "agent": "new",
+          "options": { "provider_options": { "config": {} } },
+          "prompt": "Say ok.",
+          "expect": { "setup_error": "authentication_failed" }
+        }
+      ]
     },
     {
       "id": "codex.prebuilt_client_tools",
