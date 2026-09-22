@@ -44,7 +44,21 @@ const sse = (events: Event[]) =>
     .join("");
 const json = "application/json";
 
-/** Serve Claude Messages or Codex Responses requests from `steps`; the last step repeats. */
+/** How often the last step repeats; a runtime that loops on it then fails within seconds. */
+export const repeats = 5;
+export const exhausted = "conformance mock: steps exhausted";
+const exhaustedStep = (provider: MockProvider): Step => ({
+  status: 400,
+  body:
+    provider === "anthropic"
+      ? {
+          type: "error",
+          error: { type: "invalid_request_error", message: exhausted },
+        }
+      : { error: { message: exhausted, type: "invalid_request_error" } },
+});
+
+/** Serve Claude Messages or Codex Responses requests from `steps`; the last step repeats `repeats` times. */
 export async function startMock(
   provider: MockProvider,
   steps: Step[],
@@ -74,7 +88,10 @@ export async function startMock(
       // The Claude CLI retries a failed stream once without streaming; that
       // request replays the failed step instead of taking the next one.
       const index = !streaming && used > 0 ? used - 1 : used++;
-      const step = steps[Math.min(index, steps.length - 1)] ?? {};
+      const step =
+        index >= steps.length + repeats
+          ? exhaustedStep(provider)
+          : (steps[Math.min(index, steps.length - 1)] ?? {});
       requests.push({ path, headers: req.headers, body, step: index });
       respond(provider, res, step, index, streaming, fields.model);
     });
@@ -135,6 +152,7 @@ function respond(
       ? claudeEvents(step, index, model)
       : codexEvents(step, index);
   res.writeHead(200, { "content-type": "text/event-stream", ...step.headers });
+  // Node chunks the body; destroying the socket leaves out the terminating chunk.
   if (step.truncate) res.write(sse(events.slice(0, 1)), () => res.destroy());
   else res.end(sse(events));
 }

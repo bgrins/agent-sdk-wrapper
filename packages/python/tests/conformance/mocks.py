@@ -2,7 +2,7 @@
 
 Steps are documented in docs/fixtures/CONFORMANCE.md. Each mock records every model
 request (method, path, lowercase headers, JSON body) and serves the next step; the
-last step repeats.
+last step repeats ``REPEATS`` times, then requests fail with HTTP 400 ``EXHAUSTED``.
 """
 
 from __future__ import annotations
@@ -12,11 +12,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+# A runtime that loops on the last step fails within seconds instead of at the run limit.
+REPEATS = 5
+EXHAUSTED = "conformance mock: steps exhausted"
+
 
 class MockApi:
     """A local HTTP server that records model requests and answers with scripted steps."""
 
     base_path = ""
+    exhausted: dict[str, Any] = {"error": {"message": EXHAUSTED, "type": "invalid_request_error"}}
 
     def __init__(self, steps: list[dict[str, Any]] | None = None) -> None:
         self.steps: list[dict[str, Any]] = steps or [{"text": "ok"}]
@@ -56,6 +61,8 @@ class MockApi:
         with self._lock:
             self.requests.append(request)
             index = self._step_index(request)
+            if index >= len(self.steps) + REPEATS:
+                return index, {"status": 400, "body": self.exhausted}
             return index, self.steps[min(index, len(self.steps) - 1)]
 
     def _step_index(self, request: dict[str, Any]) -> int:
@@ -110,16 +117,21 @@ class Handler(BaseHTTPRequestHandler):
     def sse(
         self, events: list[dict[str, Any]], headers: dict[str, str] | None, truncate: bool
     ) -> None:
-        """Send server-sent events; ``truncate`` closes the stream after the first."""
+        """Send server-sent events as a chunked body; ``truncate`` drops the connection
+        after the first event, before the terminating chunk."""
 
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
+        self.send_header("transfer-encoding", "chunked")
         self.send_header("connection", "close")
         self.end_headers()
         for event in events[:1] if truncate else events:
-            self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
+            data = f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+        if not truncate:
+            self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
         self.close_connection = True
 
@@ -159,6 +171,8 @@ class MockClaude(MockApi):
     After a failed stream the CLI retries once without streaming. That request replays
     the latest streaming step, so the fault reaches the run instead of the next step.
     """
+
+    exhausted = {"type": "error", "error": {"type": "invalid_request_error", "message": EXHAUSTED}}
 
     def __init__(self, steps: list[dict[str, Any]] | None = None) -> None:
         super().__init__(steps)
