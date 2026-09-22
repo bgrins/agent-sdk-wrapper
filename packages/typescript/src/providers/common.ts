@@ -131,17 +131,18 @@ export function nativeError(cause: unknown): AgentSdkWrapperError {
   if (cause instanceof AgentSdkWrapperError) return cause;
   const message = cause instanceof Error ? cause.message : String(cause);
   const data = object(cause);
-  // Shells report a signal exit as 128 + signal; some runtimes report -signal.
-  const code = Number(
-    /\bexited with (?:exit )?code (-?\d+)\b/i.exec(message)?.[1],
-  );
-  if (
-    data?.signal ||
-    (code >= 129 && code <= 159) ||
-    code < 0 ||
-    // Signal names are upper case; /i would match words like "sign" and "signal".
-    /\b(?:[Kk]illed|[Ee]xited|[Tt]erminated)\b.*\bSIG[A-Z]{2,}\b/.test(message)
-  )
+  const exit = /\bexited with (?:exit )?code (-?\d+)\b/i.exec(message)?.[1];
+  const code = exit === undefined ? undefined : Number(exit);
+  // Shells report a signal exit as 128 + signal; some runtimes report -signal. With an
+  // exit code, a signal name in the text belongs to something else, such as a model command.
+  const signaled =
+    code === undefined
+      ? // Signal names are upper case; /i would match words like "sign" and "signal".
+        /\b(?:[Kk]illed|[Ee]xited|[Tt]erminated)\b.*\bSIG[A-Z]{2,}\b/.test(
+          message,
+        )
+      : (code >= 129 && code <= 159) || code < 0;
+  if (data?.signal || signaled)
     return new ProcessTerminatedError(message, { cause });
   if (
     data?.code === "ENOENT" ||

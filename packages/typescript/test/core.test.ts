@@ -505,6 +505,9 @@ test("only real signal names mark a runtime as terminated", () => {
   for (const message of [
     "Codex Exec exited with code 1: 401 Unauthorized. Please log out and sign in again.",
     "Claude Code process exited: The request signature we calculated does not match",
+    // A known exit code outranks a signal named in the text.
+    "Codex Exec exited with code 1: ERROR: exec_command killed by SIGKILL after timeout",
+    "Claude Code process exited with code 1. stderr: hook terminated with SIGTERM",
   ])
     assert.ok(
       !(nativeError(new Error(message)) instanceof ProcessTerminatedError),
