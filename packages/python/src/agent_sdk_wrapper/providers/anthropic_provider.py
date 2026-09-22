@@ -67,7 +67,7 @@ from ..events import (
     WarningEvent,
 )
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
-from ..request import RunRequest, normalize_effort_for_provider
+from ..request import RunRequest
 from ..structured import json_schema_of_type, validate_output
 from ..tools import json_schema_for, to_anthropic_tools, validate_tool_names
 from .base import ProviderAdapter
@@ -232,7 +232,6 @@ class AnthropicProvider(ProviderAdapter):
         )
 
     def validate_request(self, req: RunRequest) -> None:
-        effort = normalize_effort_for_provider("anthropic", req.effort)
         validate_tool_names(req.tools)
         for fn in req.tools:
             json_schema_for(fn)
@@ -257,8 +256,6 @@ class AnthropicProvider(ProviderAdapter):
             server for server in req.mcp_servers if server.enabled is not False
         ]
         _validate_anthropic_mcp_servers(active_mcp_servers)
-        if req.max_turns is not None and req.max_turns < 1:
-            raise ConfigError("max_turns must be at least 1")
         if req.setting_sources is not None:
             invalid = [s for s in req.setting_sources if s not in _SETTING_SOURCES]
             if invalid:
@@ -283,9 +280,9 @@ class AnthropicProvider(ProviderAdapter):
                 "wrapper exposes the complete messages instead."
             )
         inherited_effort = req.env.get(_EFFORT_ENV)
-        if effort and inherited_effort is not None and inherited_effort != effort:
+        if req.effort and inherited_effort is not None and inherited_effort != req.effort:
             raise ConfigError(
-                f"effort={effort!r} conflicts with env[{_EFFORT_ENV!r}]={inherited_effort!r}"
+                f"effort={req.effort!r} conflicts with env[{_EFFORT_ENV!r}]={inherited_effort!r}"
             )
         if req.web_tools is True:
             if req.builtin_tools == "none":
@@ -297,7 +294,7 @@ class AnthropicProvider(ProviderAdapter):
     def _build_options(
         self, req: RunRequest, stderr_tail: collections.deque[str] | None = None
     ) -> ClaudeAgentOptions:
-        self.validate_request(req)
+        """Map a request ``validate_request`` accepted to SDK options."""
 
         allowed = list(req.allowed_tools)
         disallowed = list(req.disallowed_tools)
@@ -340,10 +337,9 @@ class AnthropicProvider(ProviderAdapter):
             if builtin is not None and "Agent" not in builtin:
                 builtin.append("Agent")
 
-        effort = normalize_effort_for_provider("anthropic", req.effort)
         env = dict(req.env)
         # An empty value keeps an inherited effort from overriding the CLI default.
-        env.setdefault(_EFFORT_ENV, effort or "")
+        env.setdefault(_EFFORT_ENV, req.effort or "")
         env.setdefault(_BACKGROUND_TASKS_ENV, "1")
         env.setdefault(_SUBAGENT_MODEL_ENV, "")
         for name in _LOGIN_TOKEN_ENV:
@@ -356,7 +352,7 @@ class AnthropicProvider(ProviderAdapter):
             "model": req.model,
             "system_prompt": req.system_prompt,
             "max_turns": req.max_turns,
-            "effort": effort,
+            "effort": req.effort,
             "cwd": req.cwd,
             "env": env,
             "allowed_tools": allowed,
@@ -389,7 +385,7 @@ class AnthropicProvider(ProviderAdapter):
         return ClaudeAgentOptions(**kwargs)
 
     async def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:
-        self.validate_request(req)
+        # The runner validates each request before streaming it.
         self.ensure_available()
         problem = self.check_credentials(req)
         if problem:

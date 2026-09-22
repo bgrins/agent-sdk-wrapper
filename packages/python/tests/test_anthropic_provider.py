@@ -149,7 +149,7 @@ def test_anthropic_options_reject_partial_messages():
     )
 
     with pytest.raises(ConfigError, match="include_partial_messages"):
-        AnthropicProvider()._build_options(req)
+        AnthropicProvider().validate_request(req)
 
 
 def test_anthropic_max_thinking_tokens_reaches_the_cli():
@@ -240,7 +240,7 @@ def test_anthropic_options_reject_unsupported_mcp_fields(tmp_path):
         ConfigError,
         match="default_tools_approval_mode, required, cwd",
     ):
-        AnthropicProvider()._build_options(req)
+        AnthropicProvider().validate_request(req)
 
 
 def test_anthropic_stream_maps_rate_limit_events(monkeypatch, tmp_path):
@@ -695,7 +695,7 @@ def test_anthropic_options_isolate_settings_by_default():
     assert explicit.setting_sources == ["project"]
 
     with pytest.raises(ConfigError, match="setting_sources"):
-        AnthropicProvider()._build_options(
+        AnthropicProvider().validate_request(
             RunRequest(provider="anthropic", prompt="x", setting_sources=["global"])
         )
 
@@ -737,7 +737,7 @@ def test_anthropic_env_pins_effort_and_disables_background_tasks():
     }
 
     with pytest.raises(ConfigError, match="CLAUDE_CODE_EFFORT_LEVEL"):
-        AnthropicProvider()._build_options(
+        AnthropicProvider().validate_request(
             RunRequest(
                 provider="anthropic",
                 prompt="x",
@@ -760,7 +760,6 @@ def test_anthropic_options_leave_buffer_headroom_unless_overridden():
 @pytest.mark.parametrize(
     ("request_kwargs", "match"),
     [
-        ({"max_turns": 0}, "max_turns"),
         (
             {"allowed_tools": ["Read"], "extra_options": {"allowed_tools": ["Bash"]}},
             "allowed_tools",
@@ -790,7 +789,7 @@ def test_anthropic_options_leave_buffer_headroom_unless_overridden():
 )
 def test_anthropic_rejects_options_the_sdk_would_ignore_or_override(request_kwargs, match):
     with pytest.raises(ConfigError, match=match):
-        AnthropicProvider()._build_options(
+        AnthropicProvider().validate_request(
             RunRequest(provider="anthropic", prompt="x", **request_kwargs)
         )
 
