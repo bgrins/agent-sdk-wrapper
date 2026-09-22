@@ -108,6 +108,33 @@ that replaces those `shell_environment_policy.set` entries and, with `web_tools`
 web-search keys, which fail. A stopped Codex run closes the app-server's stdin and gives it
 up to 2 s to exit, which stops its commands.
 
+For a run without a shell, Claude takes `builtin_tools="none"`, which leaves the model no
+tools. Codex always offers `apply_patch` and `request_user_input`. Its feature flags remove
+the other built-in tools, and a read-only sandbox with `deny_all` approvals refuses every
+file write:
+
+```python
+Agent(
+    provider="openai",
+    web_tools=False,
+    provider_options={
+        "sandbox": "read-only",
+        "approval_mode": "deny_all",
+        "config": {"config_overrides": [
+            "features.shell_tool=false",
+            "features.view_image=false",
+            "features.goals=false",
+            "features.multi_agent=false",
+        ]},
+    },
+)
+```
+
+`features.multi_agent=false` also removes the tool search Codex uses to find MCP tools, and
+turns off `subagents`. Under the SDK's default `auto_review` approvals, a reviewer model can
+approve a write the sandbox blocks. The flags belong to the pinned Codex release;
+`codex features list` shows them.
+
 See [examples](examples/) and [API differences](../typescript/PARITY.md).
 
 ## Events and traces

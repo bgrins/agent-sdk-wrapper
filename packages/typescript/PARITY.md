@@ -20,6 +20,8 @@ a subset of Python's API.
 | Callback exceptions | Logged and ignored | Propagate unclassified after closing the runtime, including rejected callback promises |
 | Native callback | Envelope with `.raw` SDK object | Original SDK object, typed `unknown` |
 | Native `env` | Merged over the parent environment | Replaces the parent environment |
+| Codex config | `config_overrides` strings, after the wrapper's | `client.config` tables, merged over the wrapper's |
+| Codex tool filters | `McpServer.enabled_tools`/`disabled_tools`; `allowed_tools`/`disallowed_tools` rejected | No MCP servers; native `config` can set `mcp_servers` |
 | Tools, structured output, MCP, subagent lifecycle | Supported with provider limits | Not yet implemented |
 | Traces | `trace_file` and managed artifacts | `traceFile`; no managed artifact bundle |
 | Effort | Codex includes `none`; input is lowercased | Codex includes `persistent`; input is exact |

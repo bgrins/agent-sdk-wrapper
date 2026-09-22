@@ -85,7 +85,7 @@ Native options use `providerOptions.provider: "anthropic"` or `"openai"`:
 | Group | Accepted keys |
 |---|---|
 | Claude `options` | `permissionMode`, `allowDangerouslySkipPermissions`, `tools`, `allowedTools`, `disallowedTools`, `settingSources`, `env`, `systemPrompt`, `maxTurns`, `thinking`, `pathToClaudeCodeExecutable` |
-| Codex `client` | `apiKey`, `baseUrl`, `env`, `codexPathOverride` |
+| Codex `client` | `apiKey`, `baseUrl`, `env`, `codexPathOverride`, `config` |
 | Codex `thread` | `sandboxMode`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` (`codex exec` always uses approval policy `never`) |
 
 Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
@@ -102,6 +102,30 @@ would copy the env to `CODEX_HOME`. Codex `error` notices are warnings, emitted 
 next event or before the run's final error; the shell tool is named `command`,
 web-search calls are emitted when the search completes, and todo lists appear as thinking.
 Host tool callbacks are unsupported. See [API limits](PARITY.md).
+
+Codex `client.config` takes Codex config tables, which the SDK sends as `--config`
+entries. The caller's keys win over the wrapper's `model_reasoning_summary: "auto"` and
+`features.shell_snapshot: false`; login-store keys, and any key that would replace the blank
+`CODEX_API_KEY` or `OPENAI_API_KEY` entries in `shell_environment_policy.set`, fail.
+
+For a run without a shell, Claude takes `options.tools: []`, which leaves the model no
+tools. Codex always offers `apply_patch` and `request_user_input`. Its feature flags remove
+the other built-in tools, and a read-only sandbox refuses every file write:
+
+```ts
+providerOptions: {
+  provider: "openai",
+  client: {
+    config: {
+      features: { shell_tool: false, view_image: false, goals: false, multi_agent: false },
+    },
+  },
+  thread: { sandboxMode: "read-only", webSearchMode: "disabled" },
+}
+```
+
+`multi_agent: false` also removes the tool search Codex uses to find MCP tools. The flags
+belong to the pinned Codex release; `codex features list` shows them.
 
 ## Native events and traces
 
