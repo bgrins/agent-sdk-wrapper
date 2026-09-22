@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,8 @@ from agent_sdk_wrapper import (  # noqa: E402
     Agent,
     AgentEvent,
     ConfigError,
+    EventFactory,
+    EventSource,
     ProviderNotAvailableError,
     RunRequest,
     SessionInfo,
@@ -35,11 +37,9 @@ from agent_sdk_wrapper import (  # noqa: E402
     ToolCall,
     ToolResult,
     Usage,
+    install_fake_providers,
     normalize_provider,
 )
-from agent_sdk_wrapper.providers import anthropic_provider as anthropic_mod  # noqa: E402
-from agent_sdk_wrapper.providers import openai_provider as openai_mod  # noqa: E402
-from agent_sdk_wrapper.providers.base import ProviderAdapter  # noqa: E402
 
 DEFAULT_OFFLINE_DIR = ROOT / "tests" / "fixtures" / "traces"
 DEFAULT_LIVE_ROOT = ROOT / "results" / "fixture-runs"
@@ -98,48 +98,18 @@ SAFE_TOKEN_FIELD_NAMES = {
 }
 
 
-class StaticProvider(ProviderAdapter):
-    """Fake provider that yields a fixed event list."""
-
-    def __init__(self, provider: str, events: Sequence[AgentEvent]) -> None:
-        self.name = provider
-        self.events = list(events)
-
-    async def stream(self, req: RunRequest):
-        for event in self.events:
-            yield event
-
-
-class UnavailableProvider(ProviderAdapter):
-    """Fake provider that behaves like a missing runtime."""
-
-    name = "anthropic"
-
-    async def stream(self, req: RunRequest):
-        raise ProviderNotAvailableError("missing runtime")
-        yield Text(text="unreachable")
-
-
 @contextlib.contextmanager
-def patched_provider(
-    provider: str,
-    factory: Callable[[], ProviderAdapter],
-) -> Iterator[None]:
-    if provider == "anthropic":
-        original = anthropic_mod.AnthropicProvider
-        anthropic_mod.AnthropicProvider = lambda **_: factory()  # type: ignore[assignment]
-        try:
-            yield
-        finally:
-            anthropic_mod.AnthropicProvider = original  # type: ignore[assignment]
-        return
+def fake_provider(provider: str, events: EventSource | EventFactory) -> Iterator[None]:
+    import pytest  # a dev dependency, like the trace validator's
 
-    original = openai_mod.OpenAIProvider
-    openai_mod.OpenAIProvider = lambda **_: factory()  # type: ignore[assignment]
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        install_fake_providers(monkeypatch, events=events, providers=[provider])
         yield
-    finally:
-        openai_mod.OpenAIProvider = original  # type: ignore[assignment]
+
+
+async def _unavailable(req: RunRequest) -> AsyncIterator[AgentEvent]:
+    raise ProviderNotAvailableError("missing runtime")
+    yield
 
 
 async def generate_offline_fixtures(output_dir: Path) -> list[Path]:
@@ -236,7 +206,7 @@ def _run_static_fixture(
     events: Sequence[AgentEvent],
 ) -> Callable[[Path], Any]:
     async def generate(path: Path) -> None:
-        with patched_provider(provider, lambda: StaticProvider(provider, events)):
+        with fake_provider(provider, events):
             agent = Agent(provider=provider, model=model)
             await agent.run("offline fixture", trace_file=path)
 
@@ -244,7 +214,7 @@ def _run_static_fixture(
 
 
 async def _run_provider_error_fixture(path: Path) -> None:
-    with patched_provider("anthropic", UnavailableProvider):
+    with fake_provider("anthropic", _unavailable):
         agent = Agent(provider="anthropic")
         await agent.run("offline provider error fixture", trace_file=path)
 
@@ -256,7 +226,7 @@ async def _run_stream_fixture(path: Path) -> None:
         Text(text="Streamed."),
         Usage(usage=TokenUsage(input_tokens=3, output_tokens=1, total_tokens=4)),
     ]
-    with patched_provider("openai", lambda: StaticProvider("openai", events)):
+    with fake_provider("openai", events):
         agent = Agent(provider="openai", model="gpt-5-mini")
         async for _ in agent.stream("offline stream fixture", trace_file=path):
             pass
