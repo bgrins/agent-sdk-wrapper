@@ -270,15 +270,20 @@ test("run discovery skips unreadable directories and keeps the newest runs when 
   );
 });
 
+// Batches stay under the open file limit.
+async function makeDirectories(parent, count) {
+  for (let index = 0; index < count; index += 500)
+    await Promise.all(
+      Array.from({ length: Math.min(500, count - index) }, (_, i) =>
+        mkdir(join(parent, `d${index + i}`), { recursive: true }),
+      ),
+    );
+}
+
 test("past the directory cap the scan skips the oldest directories and says so", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "run-directory-cap-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (let index = 0; index < MAX_DIRECTORIES + 10; index += 500)
-    await Promise.all(
-      Array.from({ length: Math.min(500, MAX_DIRECTORIES + 10 - index) }, (_, i) =>
-        mkdir(join(root, `old-${index + i}`)),
-      ),
-    );
+  await makeDirectories(root, MAX_DIRECTORIES + 10);
   const newest = join(root, "newest");
   await mkdir(newest);
   await writeFile(join(newest, "trace.jsonl"), "{}\n");
@@ -323,15 +328,17 @@ test("a fresh run's large subtree does not hide its older sibling runs", async (
   await utimes(join(old, "trace.jsonl"), hour, hour);
   await utimes(old, hour, hour);
   const fresh = join(root, "run-new");
-  await Promise.all(
-    Array.from({ length: 600 }, (_, index) =>
-      mkdir(join(fresh, "workspace", `d${index}`), { recursive: true }),
-    ),
-  );
+  // A scan that reads the fresh run's subtree first hits the cap inside it.
+  await makeDirectories(join(fresh, "workspace"), MAX_DIRECTORIES);
   await writeFile(join(fresh, "trace.jsonl"), "{}\n");
   const base = await listen(t, root, { depth: 3 });
-  const runs = JSON.parse((await get(base, "/api/runs")).body);
+  const response = await get(base, "/api/runs");
+  const runs = JSON.parse(response.body);
   assert.deepEqual(runs.map((run) => run.label).sort(), ["run-new", "run-old"]);
+  assert.equal(
+    response.headers["x-directories-scanned"],
+    String(MAX_DIRECTORIES),
+  );
 });
 
 test("a newer deep run is listed ahead of older shallow runs", async (t) => {
