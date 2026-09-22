@@ -188,7 +188,8 @@ class SubagentDef:
 
     Codex accepts ``tools=None`` or ``[]`` as defaults. Non-empty tool lists
     and any subagent ``max_turns`` raise ``ConfigError``.
-    ``model=None`` and ``INHERIT_MODEL`` inherit the parent model.
+    ``model=None`` and ``INHERIT_MODEL`` inherit the parent model; on Claude, a run
+    ``env`` value for ``CLAUDE_CODE_SUBAGENT_MODEL`` applies to subagents without a model.
     """
 
     description: str
