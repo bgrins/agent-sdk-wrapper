@@ -25,6 +25,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
+from pydantic import TypeAdapter, ValidationError
+
 from ..artifacts import ProviderEventLogger
 from ..classify import TRANSIENT, classify
 from ..errors import (
@@ -370,14 +372,25 @@ class OpenAIProvider(ProviderAdapter):
             )
         names = _sdk_option_names()
         method = "thread_resume" if resuming else "thread_start"
-        # Resuming drops the start-only ephemeral flag, which is false by now.
-        allowed = names[method] | ({"ephemeral"} if resuming else set())
+        # Resuming drops start-only options, so a continued session keeps its first run's.
+        allowed = names[method] | (_start_only_options() if resuming else set())
         unknown = sorted(set(thread_options) - allowed)
         if unknown:
             raise ConfigError(f"unsupported Codex {method} options: {', '.join(unknown)}")
         unknown = sorted(set(turn_options) - names["turn"])
         if unknown:
             raise ConfigError(f"unsupported Codex turn options: {', '.join(unknown)}")
+        for kind, options in (("thread", thread_options), ("turn", turn_options)):
+            validators = _sdk_option_validators()[kind]
+            for key, value in options.items():
+                if key not in validators:
+                    continue
+                try:
+                    validators[key].validate_python(value)
+                except ValidationError as exc:
+                    raise ConfigError(
+                        f"invalid Codex {kind} option {key}={value!r}: {exc.errors()[0]['msg']}"
+                    ) from exc
 
     def _build_options(
         self, req: RunRequest, approval_mode: Any, sandbox: Any
@@ -392,7 +405,8 @@ class OpenAIProvider(ProviderAdapter):
         thread_options.setdefault("approval_mode", approval_mode)
         thread_options.setdefault("sandbox", sandbox)
         if req.session_id:
-            thread_options.pop("ephemeral", None)
+            for key in _start_only_options():
+                thread_options.pop(key, None)
 
         turn_options.setdefault("model", req.model)
         turn_options.setdefault("cwd", _as_str(req.cwd))
@@ -870,6 +884,48 @@ def _sdk_option_names() -> dict[str, frozenset[str]]:
         "thread_start": keywords(AsyncCodex.thread_start),
         "thread_resume": keywords(AsyncCodex.thread_resume),
         "turn": keywords(AsyncThread.turn),
+    }
+
+
+def _start_only_options() -> frozenset[str]:
+    names = _sdk_option_names()
+    return names["thread_start"] - names["thread_resume"]
+
+
+# SDK keywords whose wire params field has another name.
+_SDK_PARAM_FIELDS = {
+    "include_turns": "exclude_turns",
+    "source": "turn_trigger",
+    "turn_service_tier": "service_tier_for_turn",
+}
+
+
+@functools.cache
+def _sdk_option_validators() -> dict[str, dict[str, TypeAdapter[Any]]]:
+    """Validators for option values from the SDK's wire params, which it checks after launch.
+
+    ``approval_mode`` and ``sandbox`` are SDK enums mapped to other wire types.
+    """
+
+    from openai_codex.generated.v2_all import (
+        ThreadResumeParams,
+        ThreadStartParams,
+        TurnStartParams,
+    )
+
+    def validators(keywords: frozenset[str], fields: dict[str, Any]) -> dict[str, TypeAdapter[Any]]:
+        out = {}
+        for key in keywords - {"approval_mode", "sandbox"}:
+            field = fields.get(_SDK_PARAM_FIELDS.get(key, key))
+            if field is not None:
+                out[key] = TypeAdapter(field.annotation)
+        return out
+
+    names = _sdk_option_names()
+    thread_fields = {**ThreadResumeParams.model_fields, **ThreadStartParams.model_fields}
+    return {
+        "thread": validators(names["thread_start"] | names["thread_resume"], thread_fields),
+        "turn": validators(names["turn"], TurnStartParams.model_fields),
     }
 
 

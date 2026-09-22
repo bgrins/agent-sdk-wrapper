@@ -795,8 +795,16 @@ def _options_request(**kwargs: Any) -> RunRequest:
 @pytest.mark.parametrize(
     ("provider_options", "request_options", "match"),
     [
-        ({"thread_options": {"thread_source": "user"}}, {"session_id": "t"}, "thread_resume"),
+        ({"thread_options": {"bogus": 1}}, {"session_id": "t"}, "thread_resume options: bogus"),
         ({"thread_options": {"include_turns": True}}, {}, "thread_start options: include_turns"),
+        ({"turn_options": {"summary": "bogus"}}, {}, "turn option summary='bogus'"),
+        ({"turn_options": {"source": 5}}, {}, "turn option source=5"),
+        ({"thread_options": {"personality": "x"}}, {}, "thread option personality='x'"),
+        (
+            {"thread_options": {"session_start_source": "nope"}},
+            {"session_id": "t"},
+            "thread option session_start_source='nope'",
+        ),
         ({"turn_options": {"output_format": "json"}}, {}, "turn options: output_format"),
         ({}, {"extra_options": {"thread": {}}}, "extra_options keys: thread"),
         ({"thread_options": {"ephemeral": True}}, {"session_id": "t"}, "ephemeral"),
@@ -830,9 +838,10 @@ def test_codex_rejects_options_the_sdk_cannot_take(provider_options, request_opt
 def test_codex_accepts_sdk_native_options():
     from openai_codex import ApprovalMode, Sandbox
 
+    start_only = {"ephemeral": False, "service_name": "svc", "thread_source": "user"}
     provider = OpenAIProvider(
         thread_options={
-            "ephemeral": False,
+            **start_only,
             "base_instructions": "Be brief.",
             "service_tier": "flex",
             "sandbox": "workspace-write",
@@ -845,11 +854,12 @@ def test_codex_accepts_sdk_native_options():
     )
 
     provider.validate_request(_options_request())
+    # A continued session resumes with the start-only options of its first run.
     provider.validate_request(_options_request(session_id="t", continue_session=True))
     thread_options, turn_options = provider._build_options(
         _options_request(session_id="t"), None, None
     )
-    assert "ephemeral" not in thread_options
+    assert not set(start_only) & set(thread_options)
     assert thread_options["sandbox"] is Sandbox.workspace_write
     assert turn_options["approval_mode"] is ApprovalMode.deny_all
 
