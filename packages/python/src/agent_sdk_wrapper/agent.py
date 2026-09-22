@@ -410,6 +410,10 @@ class Agent:
                 # The provider's own terminal error wins over a later exception.
                 if error is not None and error_msg is None:
                     yield record(_error_event(error))
+                elif error is not None:
+                    get_logger().warning(
+                        "provider raised after reporting an error: %s", error, exc_info=error
+                    )
             except _DeadlineExceeded:
                 if error_msg is None:
                     yield record(

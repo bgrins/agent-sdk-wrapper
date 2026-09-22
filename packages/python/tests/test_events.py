@@ -709,7 +709,7 @@ def test_run_cancellation_writes_cancelled_artifacts(monkeypatch, tmp_path):
     assert trace_events[-1]["ended_reason"] == "cancelled"
 
 
-def test_run_keeps_provider_error_when_sdk_raises_afterward(monkeypatch):
+def test_run_keeps_provider_error_when_sdk_raises_afterward(monkeypatch, caplog):
     from agent_sdk_wrapper.providers import base
     from agent_sdk_wrapper.providers import openai_provider as op_mod
 
@@ -734,6 +734,8 @@ def test_run_keeps_provider_error_when_sdk_raises_afterward(monkeypatch):
     assert [
         event.event.message for event in result.events if isinstance(event.event, Error)
     ] == ["actual provider error"]
+    logged = [record for record in caplog.records if "misleading cleanup" in record.message]
+    assert [record.levelname for record in logged] == ["WARNING"]
 
 
 def test_run_result_distinguishes_max_turns_from_generic_error(monkeypatch):
