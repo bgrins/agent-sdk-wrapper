@@ -170,7 +170,6 @@ test("Codex cliLogin deny keeps logins and stored credentials out of the child",
     },
   });
   await agent.run("deny");
-  assert.equal(clients[0]?.config?.cli_auth_credentials_store, "ephemeral");
   assert.deepEqual(clients[0]?.config?.features, { shell_snapshot: false });
   // The SDK passes apiKey to the child as CODEX_API_KEY.
   assert.equal(clients[0]?.apiKey, "k");
@@ -448,7 +447,7 @@ test("explicit Codex env does not inherit the host API key", async () => {
   );
   assert.equal(clients.length, 0);
 });
-test("Codex cliLogin require keeps API keys out of the child and skips the ephemeral store", async () => {
+test("Codex cliLogin require keeps API keys out of the child", async () => {
   assert.throws(
     () =>
       harness([], {
@@ -467,7 +466,6 @@ test("Codex cliLogin require keeps API keys out of the child and skips the ephem
   await agent.run("login");
   assert.equal(clients[0]?.apiKey, undefined);
   assert.deepEqual(clients[0]?.env, { HOME: "/h" });
-  assert.equal(clients[0]?.config?.cli_auth_credentials_store, undefined);
   assert.deepEqual(clients[0]?.config?.features, { shell_snapshot: false });
 });
 test("Codex cliLogin require accepts only a stored ChatGPT login", async (t) => {

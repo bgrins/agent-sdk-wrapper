@@ -103,8 +103,8 @@ export class CodexAdapter implements ProviderAdapter {
         ? req.providerOptions.client
         : undefined;
     const inherited = native?.env ?? process.env;
-    // deny: never read or write stored logins, and pass the key only as the
-    // SDK's CODEX_API_KEY; require: keep API keys out of the child.
+    // deny: pass the key only as the SDK's CODEX_API_KEY, which `codex exec` uses
+    // without reading or writing stored logins; require: keep API keys out of the child.
     const removed =
       req.cliLogin === "require"
         ? apiKeyEnv
@@ -123,12 +123,9 @@ export class CodexAdapter implements ProviderAdapter {
         model_reasoning_summary: "auto",
         // Shell snapshots write the child env, credentials included, to CODEX_HOME.
         features: { shell_snapshot: false },
+        // The SDK passes the key as CODEX_API_KEY; hide it from model commands.
         ...(req.cliLogin !== "require"
-          ? {
-              cli_auth_credentials_store: "ephemeral",
-              // The SDK passes the key as CODEX_API_KEY; hide it from model commands.
-              shell_environment_policy: { set: { CODEX_API_KEY: "" } },
-            }
+          ? { shell_environment_policy: { set: { CODEX_API_KEY: "" } } }
           : {}),
       },
     };
