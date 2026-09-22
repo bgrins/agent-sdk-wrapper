@@ -695,20 +695,8 @@ const errorType = (thrown: unknown) =>
     : thrown instanceof RuntimeUnavailableError
       ? "runtime_unavailable"
       : String(thrown);
-type Shape = [sequence: number, type: string][];
-const shape = (envelopes: EventEnvelope[]): Shape =>
+const shape = (envelopes: EventEnvelope[]) =>
   envelopes.map(({ sequence, event }) => [sequence, event.type]);
-
-/** Envelopes a run wrote: sequences from 0 without gaps, run_started to run_finished, as the result keeps them. */
-function checkEnvelopes(seen: Shape, kept: Shape): void {
-  assert.deepEqual(
-    seen.map(([sequence]) => sequence),
-    seen.map((_, index) => index),
-  );
-  assert.equal(seen[0]?.[1], "run_started");
-  assert.equal(seen.at(-1)?.[1], "run_finished");
-  assert.deepEqual(seen, kept);
-}
 
 async function checkFiles(expect: Expect, files: Files): Promise<void> {
   for (const name of expect.files_unchanged ?? [])
@@ -828,7 +816,8 @@ async function check(
     const lines = (await readFile(outcome.traceFile, "utf8"))
       .trim()
       .split("\n");
-    checkEnvelopes(
+    // collectRun already checked the result's sequences and bounds.
+    assert.deepEqual(
       shape(lines.map((line) => JSON.parse(line))),
       shape(result.events),
     );

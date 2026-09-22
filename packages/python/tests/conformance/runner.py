@@ -458,7 +458,7 @@ def _check_result(expect: dict[str, Any], result: RunResult, ctx: Context) -> No
     if "structured_output" in expect:
         value = result.structured_output
         value = value.model_dump() if isinstance(value, BaseModel) else value
-        assert json_equal(value, expect["structured_output"]), (value, detail)
+        assert _json_equal(value, expect["structured_output"]), (value, detail)
     if "same_session" in expect:
         assert (result.session_id == ctx.session_id) == expect["same_session"], result.session_id
     for name in expect.get("raw", []):
@@ -517,20 +517,20 @@ def _text(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-def json_equal(a: Any, b: Any) -> bool:
+def _json_equal(a: Any, b: Any) -> bool:
     """JSON value equality: object key order is irrelevant and booleans are not numbers."""
 
     if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(json_equal(a[key], b[key]) for key in a)
+        return a.keys() == b.keys() and all(_json_equal(a[key], b[key]) for key in a)
     if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(map(json_equal, a, b))
+        return len(a) == len(b) and all(map(_json_equal, a, b))
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
     numbers = (int, float)
     return (type(a) is type(b) or (type(a) in numbers and type(b) in numbers)) and a == b
 
 
-def matches(match: dict[str, Any], request: dict[str, Any]) -> bool:
+def _matches(match: dict[str, Any], request: dict[str, Any]) -> bool:
     if "header" in match:
         value = request["headers"].get(match["header"], _MISSING)
     else:
@@ -542,7 +542,7 @@ def matches(match: dict[str, Any], request: dict[str, Any]) -> bool:
     if value is _MISSING:
         return False
     if "equals" in match:
-        return json_equal(value, match["equals"])
+        return _json_equal(value, match["equals"])
     return match["contains"] in _text(value)
 
 
@@ -550,9 +550,9 @@ def check_match(match: dict[str, Any], requests: list[dict[str, Any]]) -> None:
     if "request" in match:
         index = match["request"]
         assert -len(requests) <= index < len(requests), (match, len(requests))
-        assert matches(match, requests[index]), (match, requests[index])
+        assert _matches(match, requests[index]), (match, requests[index])
         return
     if match.get("absent") or "excludes" in match:
-        assert all(matches(match, request) for request in requests), match
+        assert all(_matches(match, request) for request in requests), match
     else:
-        assert any(matches(match, request) for request in requests), (match, requests)
+        assert any(_matches(match, request) for request in requests), (match, requests)
