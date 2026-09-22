@@ -95,6 +95,17 @@ export class Agent {
     );
     this.active = true;
     let writer: TraceWriter | undefined;
+    let released = false;
+    // Runs before the final envelope is yielded: a consumer may stop pulling there.
+    const release = () => {
+      if (released) return;
+      released = true;
+      try {
+        writer?.close();
+      } finally {
+        this.active = false;
+      }
+    };
     try {
       await adapter.ensureAvailable(req);
       if (req.traceFile !== undefined) writer = new TraceWriter(req.traceFile);
@@ -135,7 +146,7 @@ export class Agent {
               : failure.error_type === "refused"
                 ? "refused"
                 : "error";
-        return frame({
+        const envelope = frame({
           type: "run_finished",
           status:
             reason === "success"
@@ -146,6 +157,8 @@ export class Agent {
           ended_reason: reason,
           duration_ms: Math.max(0, Math.round(performance.now() - start)),
         });
+        release();
+        return envelope;
       };
       let failure: ErrorEvent | undefined;
       let threw = false;
@@ -224,11 +237,7 @@ export class Agent {
       }
       yield finished(failure);
     } finally {
-      try {
-        writer?.close();
-      } finally {
-        this.active = false;
-      }
+      release();
     }
   }
 }

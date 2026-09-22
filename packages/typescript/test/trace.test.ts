@@ -19,6 +19,7 @@ import {
   RuntimeUnavailableError,
   TraceWriteError,
 } from "../src/index.js";
+import { TraceWriter } from "../src/trace.js";
 
 function directory(t: TestContext): string {
   const root = mkdtempSync(join(tmpdir(), "agent-trace-"));
@@ -145,6 +146,43 @@ test("breaking iteration and killed runtimes preserve partial traces and release
   assert.equal(
     killed[3]?.type === "run_finished" && killed[3].status,
     "failure",
+  );
+});
+
+test("stopping at run_finished without draining closes the trace and releases the Agent", async (t) => {
+  const root = directory(t);
+  let closed = 0;
+  const close = TraceWriter.prototype.close;
+  TraceWriter.prototype.close = function () {
+    closed++;
+    close.call(this);
+  };
+  t.after(() => {
+    TraceWriter.prototype.close = close;
+  });
+  const agent = new Agent(
+    { provider: "openai", traceFile: join(root, "first.jsonl") },
+    {
+      openai: provider(async function* () {
+        yield { type: "text", text: "ok" };
+      }),
+    },
+  );
+  const events = agent.stream("first");
+  for (;;) {
+    const { value } = await events.next();
+    if (value?.event.type === "run_finished") break;
+  }
+  assert.equal(closed, 1);
+  const second = await agent.run({
+    prompt: "second",
+    traceFile: join(root, "second.jsonl"),
+  });
+  assert.equal(second.status, "success");
+  assert.equal(closed, 2);
+  assert.deepEqual(
+    readTrace(join(root, "first.jsonl")).map((env) => env.event.type),
+    ["run_started", "text", "run_finished"],
   );
 });
 
