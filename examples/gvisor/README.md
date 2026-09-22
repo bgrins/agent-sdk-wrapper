@@ -56,14 +56,16 @@ They write files to `/job/output` and results to stdout as ASCII JSON lines; the
 launcher drops other bytes. A session lasts one job: cleanup deletes its state,
 so a later job cannot resume it. Cloud deployment is not included.
 
-`test.sh` builds only its test images. Compose never pulls the worker images
-(`pull_policy: never`), so run `build.sh` first and again after changing a worker
-or an SDK package.
+`test.sh` needs Node and uv. It first runs the output-file and Python worker
+tests, which need neither Docker nor gVisor, then builds only its test images.
+Compose never pulls the worker images (`pull_policy: never`), so run `build.sh`
+first and again after changing a worker or an SDK package. With Colima, run
+`test.sh` in either mode from the checkout whose `results/gvisor-output` the VM
+mounts (see macOS setup).
 
 ```sh
 bash examples/gvisor/scripts/build.sh
-bash examples/gvisor/scripts/test.sh  # offline; requires Node and uv
-# Run from the checkout whose results/gvisor-output the VM mounts (see macOS setup).
+bash examples/gvisor/scripts/test.sh  # offline
 AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 \
   bash examples/gvisor/scripts/test.sh --live
 bash examples/gvisor/workload/run.sh cleanup  # remove leftover example resources
