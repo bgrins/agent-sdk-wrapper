@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import builtins
+import contextlib
 import dataclasses
 import dis
 import functools
@@ -15,6 +16,7 @@ import queue
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -85,6 +87,7 @@ _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
 _WRAPPER_TOOL_TIMEOUT_SEC = 600
+_SHUTDOWN_GRACE_S = 2
 
 
 class OpenAIProvider(ProviderAdapter):
@@ -336,7 +339,10 @@ class OpenAIProvider(ProviderAdapter):
         try:
             yield codex
         finally:
-            await codex.close()
+            try:
+                await asyncio.to_thread(_let_exit, process)
+            finally:
+                await codex.close()
 
     def _native_options(self, req: RunRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         from openai_codex import ApprovalMode, Sandbox
@@ -1857,6 +1863,21 @@ def _account_problem(response: Any, cli_login: str) -> str | None:
 
 def _codex_process(codex: Any) -> Any:
     return getattr(getattr(getattr(codex, "_client", None), "_sync", None), "_proc", None)
+
+
+def _let_exit(process: Any) -> None:
+    """Close the app-server's stdin and wait for it to exit, which stops its commands.
+
+    The SDK's close sends SIGTERM right after closing stdin; the app-server dies at once
+    and commands it started keep running.
+    """
+
+    if process is None or process.poll() is not None:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        process.stdin.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(_SHUTDOWN_GRACE_S)
 
 
 async def _raise_if_signaled(process: Any, exc: BaseException) -> None:

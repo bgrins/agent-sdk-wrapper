@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -517,6 +518,37 @@ async def test_reasoning_tokens_without_a_reasoning_item_yield_empty_thinking(mo
         ("usage", None),
     ]
     assert events[1].usage.reasoning_output_tokens == 7
+
+
+def _running(marker: str) -> list[int]:
+    found = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout
+    return [int(pid) for pid in found.split()]
+
+
+@pytest.mark.parametrize("stop", ["deadline", "close"])
+async def test_stopping_a_run_stops_its_commands(mock_api, cwd, stop):
+    marker = f"sleep {60 + os.getpid() % 1000}.{len(stop)}"
+    mock_api.steps = [{"shell": marker}, {"text": "done"}]
+    agent = codex_agent(mock_api, cwd)
+    try:
+        stream = agent.stream("hi", timeout=5)
+        errors = []
+        async for envelope in stream:
+            if envelope.event.type == "error":
+                errors.append(envelope.event.error_type)
+            if envelope.event.type == "tool_call":
+                await asyncio.sleep(1)
+                assert _running(marker)
+                if stop == "close":
+                    break
+        await stream.aclose()
+        assert errors == (["timeout"] if stop == "deadline" else [])
+        async with asyncio.timeout(5):
+            while _running(marker):
+                await asyncio.sleep(0.1)
+    finally:
+        for pid in _running(marker):
+            os.kill(pid, signal.SIGKILL)
 
 
 async def test_non_ascii_error_body_keeps_its_text(mock_api, cwd):
