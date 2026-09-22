@@ -745,8 +745,15 @@ async function check(
     return;
   }
   if (expect.setup_error !== undefined) {
-    // The schema allows only files_unchanged beside setup_error, since TypeScript
-    // throws setup failures where Python returns failed results.
+    // TypeScript throws setup failures where Python returns failed results, so
+    // no other expectation has a result to check.
+    assert.deepEqual(
+      Object.keys(expect).filter(
+        (key) => key !== "setup_error" && key !== "files_unchanged",
+      ),
+      [],
+      "setup_error takes only files_unchanged",
+    );
     assert.equal(requests.length, 0, "setup errors precede model requests");
     if (thrown) assert.equal(errorType(thrown), expect.setup_error);
     else
