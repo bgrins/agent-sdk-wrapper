@@ -32,7 +32,6 @@ from ..errors import (
     ConfigError,
     ProcessTerminatedError,
     ProviderNotAvailableError,
-    TransientError,
 )
 from ..events import (
     AgentEvent,
@@ -251,8 +250,6 @@ class OpenAIProvider(ProviderAdapter):
             yield Error(message=problem, error_type="authentication_failed")
             return
 
-        from openai_codex import is_retryable_error
-
         codex: Any = None
         try:
             api_key = None if req.cli_login == "require" else self._login_api_key(req)
@@ -276,13 +273,11 @@ class OpenAIProvider(ProviderAdapter):
                     except Exception as exc:
                         await _raise_if_signaled(process, exc)
                         raise
-        except (ProviderNotAvailableError, ConfigError, AgentSdkWrapperError):
+        except AgentSdkWrapperError:
             raise
         except FileNotFoundError as exc:
             raise ProviderNotAvailableError(str(exc), cause=exc) from exc
         except Exception as exc:
-            if is_retryable_error(exc) or _looks_transient(exc):
-                raise TransientError(str(exc), cause=exc) from exc
             raise AgentSdkWrapperError(f"{type(exc).__name__}: {exc}", cause=exc) from exc
 
     async def _run(
@@ -1046,9 +1041,6 @@ def _source_for_tool(fn: Any) -> str:
     try:
         return textwrap.dedent(inspect.getsource(fn))
     except (OSError, TypeError) as exc:
-        source = _source_for_tool_from_repo_path(fn)
-        if source is not None:
-            return source
         raise ConfigError(
             "Codex Python callable tools must be importable or have inspectable source"
         ) from exc
@@ -1120,24 +1112,6 @@ def _signature_nodes(definition: ast.FunctionDef | ast.AsyncFunctionDef) -> list
     if definition.returns is not None:
         nodes.append(definition.returns)
     return nodes
-
-
-def _source_for_tool_from_repo_path(fn: Any) -> str | None:
-    code = getattr(fn, "__code__", None)
-    filename = getattr(code, "co_filename", None)
-    first_line = getattr(code, "co_firstlineno", None)
-    if not filename or first_line is None:
-        return None
-    parts = Path(filename).parts
-    for marker in ("src", "tests", "examples"):
-        if marker not in parts:
-            continue
-        candidate = Path.cwd().joinpath(*parts[parts.index(marker) :])
-        if not candidate.exists():
-            continue
-        lines = candidate.read_text(encoding="utf-8").splitlines(keepends=True)
-        return textwrap.dedent("".join(inspect.getblock(lines[first_line - 1 :])))
-    return None
 
 
 def _tool_server_script() -> str:
@@ -2231,7 +2205,3 @@ def _to_plain(value: Any) -> Any:
 
 def _as_str(value: Any) -> str | None:
     return None if value is None else str(value)
-
-
-def _looks_transient(exc: BaseException) -> bool:
-    return classify(str(exc)) == TRANSIENT

@@ -621,6 +621,22 @@ def test_codex_rejects_tools_the_server_cannot_rebuild_from_source(problem):
         OpenAIProvider().validate_request(req)
 
 
+def test_codex_rejects_tools_without_source_even_if_cwd_has_a_same_named_file(
+    tmp_path, monkeypatch
+):
+    namespace: dict[str, Any] = {"__name__": "ghostmod"}
+    source = "def add(a: int) -> int:\n    return a\n"
+    exec(compile(source, "/gone/src/pkg/tools.py", "exec"), namespace)
+    decoy = tmp_path / "src" / "pkg" / "tools.py"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("def add(a: int) -> int:\n    return -a\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    req = RunRequest(provider="openai", prompt="x", tools=[namespace["add"]])
+
+    with pytest.raises(ConfigError, match="inspectable source"):
+        OpenAIProvider().validate_request(req)
+
+
 def test_codex_accepts_self_contained_local_tools():
     def scale(value: float, factor: int = 2, label: str | None = None) -> dict[str, float]:
         import math
@@ -1570,23 +1586,6 @@ async def test_codex_error_text_survives_empty_messages_and_unparsed_payloads():
 
     assert [(type(e), e.message) for e in first] == [(Error, probe)]
     assert [(type(e), e.message) for e in second] == [(Error, probe)]
-
-
-@pytest.mark.parametrize(
-    ("message", "transient"),
-    [
-        ("Connection reset by peer", True),
-        ("request timed out", True),
-        ("unexpected status 502 Bad Gateway", True),
-        ("wrote 1500 tokens", False),
-        ("tool_timeout_sec must be positive", False),
-        ("unexpected status 400 Bad Request", False),
-    ],
-)
-def test_codex_transient_exception_patterns_are_word_bounded(message, transient):
-    from agent_sdk_wrapper.providers.openai_provider import _looks_transient
-
-    assert _looks_transient(RuntimeError(message)) is transient
 
 
 # Payloads captured from Codex 0.154 against a mock Responses API.
