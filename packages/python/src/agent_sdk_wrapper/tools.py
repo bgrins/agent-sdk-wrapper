@@ -198,22 +198,3 @@ def _make_anthropic_handler(fn: Callable[..., Any]):
         return out
 
     return handler
-
-
-def to_anthropic_tools(callables: list[Callable[..., Any]]):
-    """Return ``(mcp_server_config | None, allowed_tool_names)``."""
-    if not callables:
-        return None, []
-    from claude_agent_sdk import create_sdk_mcp_server, tool
-
-    sdk_tools = []
-    allowed: list[str] = []
-    for fn in callables:
-        name = tool_name(fn)
-        sdk_tool = tool(name, tool_description(fn), json_schema_for(fn))(
-            _make_anthropic_handler(fn)
-        )
-        sdk_tools.append(sdk_tool)
-        allowed.append(f"mcp__{ANTHROPIC_TOOL_SERVER}__{name}")
-    server = create_sdk_mcp_server(name=ANTHROPIC_TOOL_SERVER, version="1.0.0", tools=sdk_tools)
-    return server, allowed
