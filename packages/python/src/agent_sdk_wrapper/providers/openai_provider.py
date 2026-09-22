@@ -1018,7 +1018,6 @@ def _tool_entry(fn: Any) -> dict[str, Any]:
         "module": getattr(fn, "__module__", None),
         "qualname": getattr(fn, "__qualname__", None),
         "source": source,
-        "source_name": getattr(fn, "__name__", None),
     }
 
 
@@ -1139,7 +1138,7 @@ def _tool_server_script() -> str:
                 return obj
             namespace = {}
             exec("from __future__ import annotations\\n" + entry["source"], namespace)
-            return namespace[entry["source_name"]]
+            return namespace[entry["name"]]
 
 
         def _load():
@@ -1805,8 +1804,6 @@ def _account_problem(response: Any, cli_login: str) -> str | None:
         if kind == "chatgpt":
             return None
         return "cli_login='require' needs a stored ChatGPT login; run `codex login`"
-    if kind == "chatgpt":
-        return "Codex is using a stored ChatGPT login; cli_login='deny' requires an API key"
     if kind in ("apiKey", "amazonBedrock") or not getattr(response, "requires_openai_auth", True):
         return None
     return (
@@ -1882,7 +1879,7 @@ def _build_tool_events(root: Any, event: Any, include_raw: bool) -> list[AgentEv
         item_id = getattr(root, "id", None)
         command = getattr(root, "command", None)
         status = getattr(root, "status", None)
-        output = _command_output(root)
+        output = getattr(root, "aggregated_output", None) or ""
         return [
             ToolCall(
                 id=item_id,
@@ -2048,13 +2045,6 @@ def _reasoning_text(root: Any) -> str:
         if value:
             parts.append(str(value))
     return "\n".join(parts)
-
-
-def _command_output(root: Any) -> str:
-    """The command's output, or its status when it printed nothing."""
-
-    output = getattr(root, "aggregated_output", None)
-    return str(output) if output else _status_value(getattr(root, "status", None))
 
 
 def _tool_name(namespace: Any, name: Any) -> str | None:

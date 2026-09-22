@@ -736,7 +736,7 @@ async def test_codex_stream_maps_failed_tool_like_items():
     results = [event for event in out if isinstance(event, ToolResult)]
     assert [event.is_error for event in results] == [True, True, True]
     assert [event.id for event in results] == [None, None, None]
-    assert results[0].output == "declined"
+    assert results[0].output == ""
     assert results[1].output == "File not found"
 
 
