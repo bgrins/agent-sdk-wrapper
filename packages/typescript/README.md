@@ -43,8 +43,8 @@ overridden per field, without deep merging. One active run per Agent.
 
 | Options | Meaning |
 |---|---|
-| `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings; conflicts fail. A `provider:` prefix counts only for `anthropic`, `openai` or `codex`, so Bedrock IDs and ARNs stay whole; `cwd` must be an existing directory |
-| `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider |
+| `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings; conflicts fail. A `provider:` prefix counts only for `anthropic`, `openai` or `codex`, so Bedrock IDs and ARNs stay whole; blank values mean omitted; `cwd` must be an existing directory |
+| `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider; a constructor `sessionId` gives way to the latest reported session |
 | `signal` | Cancellation or `AbortSignal.timeout(ms)`; ignored after the terminal frame |
 | `cliLogin` | `"deny"` (default) or Codex-only `"require"` for the runtime's stored login |
 | `traceFile` | Write normalized JSONL during `run()` or `stream()` |
@@ -57,7 +57,8 @@ usage, warnings and errors. `RunResult` contains status, text, usage/cost,
 session ID, the first error and its `error_type`, and events. `final_text` is the last
 assistant message. Runs are never retried; see [retrying](PARITY.md#retrying). For Claude,
 `session_info.model` reports the model the runtime used, including a fallback model after
-`model_fallback` (with a warning); Codex exec doesn't expose it. `error_type` uses the
+`model_fallback` or a `model_refusal_fallback` that retracts nothing (a warning precedes
+it); Codex exec doesn't expose it. `error_type` uses the
 [shared vocabulary](PARITY.md#error-types). `collectRun` rejects incomplete or
 misordered streams.
 
@@ -91,11 +92,12 @@ Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
 `allowedTools` grants approval, not a hard filter. Native `env` replaces inheritance
 for both providers; without it, the child gets `process.env`. Claude also receives
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `env` sets it and
-`CLAUDE_CODE_EFFORT_LEVEL` set to `effort` (blank without it); claude.ai login tokens
-are removed, and a login token in `env` is rejected. Claude server-tool results (web
+`CLAUDE_CODE_EFFORT_LEVEL` set to `effort` (blank without it) and a blank
+`CLAUDE_CODE_SUBAGENT_MODEL` unless `env` sets them; claude.ai login tokens are removed,
+and a login token in `env` is rejected. Claude server-tool results (web
 search, advisor) are `tool_result` events. Codex drops `CODEX_ACCESS_TOKEN` and
 `OPENAI_API_KEY` from the child (the key reaches it only as `CODEX_API_KEY`, which model
-commands see blank; `require` drops both API keys) and disables shell snapshots, which
+commands see blank; `require` drops both API keys too) and disables shell snapshots, which
 would copy the env to `CODEX_HOME`. Codex `error` notices are warnings, emitted with the
 next event or before the run's final error; the shell tool is named `command`,
 web-search calls are emitted when the search completes, and todo lists appear as thinking.
@@ -104,8 +106,9 @@ Host tool callbacks are unsupported. See [API limits](PARITY.md).
 ## Native events and traces
 
 `onProviderEvent` receives original SDK events, typed `unknown`, including unmapped
-frames. Callback exceptions propagate unchanged from `run()`/`stream()` after the
-runtime is closed; the trace then has no `run_finished`. Import native SDK symbols from their
+frames. Callback exceptions, and rejections of a promise the callback returns, propagate
+unchanged from `run()`/`stream()` after the runtime is closed; the trace then has no
+`run_finished`. Stopping iteration at `run_finished` releases the Agent and trace file. Import native SDK symbols from their
 packages; the wrapper does not re-export them or expose client handles.
 
 ```ts

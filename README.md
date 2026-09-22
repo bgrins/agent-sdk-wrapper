@@ -37,6 +37,7 @@ docker compose up --build --abort-on-container-failure python-verify typescript-
 Run `npm run trace-viewer -- results` and open the printed URL. It lists the 500 most
 recently updated runs from at most 5000 directories, read newest first, and `?index=`
 must be same-origin. Except on macOS and on Linux with `/proc`, it serves only files
-directly in the results directory.
+directly in the results directory. It marks traces over 16 MiB as too large to serve;
+open those with Open Files.
 For the [gVisor example](examples/gvisor/README.md), use
 `npm run trace-viewer -- results/gvisor-output --depth 1`.

@@ -52,18 +52,20 @@ counts only for `anthropic`, `openai` or `codex`, so IDs like
 | `cli_login`, `setting_sources` | Stored-login policy; Claude on-disk settings (default none) |
 | `provider_options`, `extra_options` | Provider-specific settings; unsupported combinations fail |
 
-`run()` and `stream()` raise `ConfigError` for invalid settings before any event,
-including duplicate MCP server names or the reserved `agent_sdk_wrapper_tools`, unknown
-`provider_options` keys and output paths of the wrong type. Other failures produce failed
-results; check `result.status`, or call `run(..., raise_on_error=True)` for
-`RunFailedError`, whose `.result` is the failed `RunResult`. Signal-killed runtimes are recorded,
-then raise `ProcessTerminatedError`. Runs are never retried; the runtimes retry API
+`Agent()` raises `ConfigError` for unknown `provider_options` keys; `run()` and `stream()`
+raise it for invalid settings before any event, including duplicate MCP server names or the
+reserved `agent_sdk_wrapper_tools`, a bare string where a list is expected, and output
+paths of the wrong type. Other failures produce failed results; check `result.status`, or
+call `run(..., raise_on_error=True)` for `RunFailedError`, whose `.result` is the failed
+`RunResult`. Signal-killed runtimes are recorded, then raise `ProcessTerminatedError`;
+from `run()`, its `.result` is the failed `RunResult`. Runs are never retried; the runtimes retry API
 errors themselves ([limits](../typescript/PARITY.md#shared-limits)). `timeout` is a deadline from
 the start of the run: consumer code is never cancelled, but the next provider wait
 after it fails with `timeout`. Concurrent runs on one Agent are allowed but need distinct
 `artifacts_dir` and `trace_file`; with `continue_session` the Agent keeps the last session
 a run reported, so a new run may resume a session another run is still using. `check_runtime()`
-validates settings, runtime and credentials. `run_sync()` works outside an event loop.
+validates settings, runtime and credentials (for Codex, not under `require` or with a
+custom `model_provider`). `run_sync()` works outside an event loop.
 
 `result.final_text` is the last assistant message. `result.error_type` is the first
 error's type, from the [shared vocabulary](../typescript/PARITY.md#error-types).
@@ -81,22 +83,29 @@ error's type, from the [shared vocabulary](../typescript/PARITY.md#error-types).
 
 Tool names must be unique and match `[A-Za-z0-9_-]{1,64}`. Both providers validate
 arguments with the same schema, pass a `**kwargs` tool the arguments it doesn't name and
-return a raised exception to the model as `Error: ...`; positional-only parameters are
-rejected.
+return a raised exception to the model as `Error: <message>` (the type name when the
+message is empty); positional-only parameters are rejected.
 
 The Claude child env sets `CLAUDE_CODE_EFFORT_LEVEL` to `effort` (blank without it; the
 CLI ranks it above `--effort`), sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless
-`env` sets it, and blanks claude.ai login tokens; a login token in `env` is rejected.
+`env` sets it, blanks `CLAUDE_CODE_SUBAGENT_MODEL` unless `env` sets it (so subagents
+inherit the run's model), and blanks claude.ai login tokens; a login token in `env` is
+rejected. MCP servers without `enabled_tools` have all their tools pre-approved.
 Claude `extra_options` must be Claude Agent SDK options, and cannot set a key a
-first-class option sets, nor `env`; `tools` counts as set whenever `builtin_tools`,
+first-class option sets, nor `env` or `cli_path` (use `provider_options`); `tools` counts as set whenever `builtin_tools`,
 `web_tools=True` or `subagents` is. Thinking defaults to adaptive with summarized display
 unless `extra_options` sets `thinking` or `max_thinking_tokens`. Codex drops
-`CODEX_ACCESS_TOKEN` and API keys from the runtime env, keeping a key only when a
-`model_providers.<id>.env_key` names it, and disables shell snapshots, which would copy
-the env to `CODEX_HOME`. Codex `env_passthrough` names are read from the run env. Codex `sandbox` applies per thread;
-`thread_options`/`turn_options` override first-class values; caller
-`config_overrides` take precedence, except login-store keys and, with `web_tools`,
-web-search keys, which fail.
+`CODEX_ACCESS_TOKEN` from the runtime env, since it would replace the stored login. Model
+commands get blank `OPENAI_API_KEY` and `CODEX_API_KEY` through
+`shell_environment_policy.set`, while MCP servers, tools and model providers keep them.
+Shell snapshots, which would copy the env to `CODEX_HOME`, are disabled. Codex
+`env_passthrough` names are read from the run env. Codex `sandbox` applies per thread;
+`thread_options`/`turn_options` override first-class values, start-only thread options
+are dropped on resume, and native option values are checked against the SDK's params
+before launch. Caller `config_overrides` take precedence, except login-store keys, config
+that replaces those `shell_environment_policy.set` entries and, with `web_tools`,
+web-search keys, which fail. A stopped Codex run closes the app-server's stdin and gives it
+up to 2 s to exit, which stops its commands.
 
 See [examples](examples/) and [API differences](../typescript/PARITY.md).
 
@@ -109,15 +118,17 @@ See [examples](examples/) and [API differences](../typescript/PARITY.md).
 - `on_provider_event`: native envelopes; `.raw` is the SDK object, `.message` is serialized.
 - `trace_file`: normalized JSONL.
 - `artifacts_dir`: trace, result, manifest and native-event files. The manifest records
-  status, `ended_reason`, `error_type` and the reported model. Native-event lines carry
-  `run_id`; each run replaces the file.
+  status, `ended_reason`, `error_type` and the reported model; its file paths are relative
+  to `artifacts_dir`, or absolute for files outside it. Native-event lines carry `run_id`;
+  each run replaces the file.
 
 From the repository root, run `npm run trace-viewer -- packages/python/results`.
 Open the printed URL and select a trace.
 Claude token totals include subagents via `model_usage`; `requests` remains a
 main-loop turn-count proxy. Codex usage is per turn; its cost is unavailable.
 `SessionInfo.model` reports the model the runtime actually used; after a Claude model
-fallback, a warning precedes a new `SessionInfo`.
+fallback, the original model's text, then a warning, precede a new `SessionInfo`, and a
+changed session ID also emits one.
 [Accounting limits](../typescript/PARITY.md).
 
 CLI: `uv run agent-sdk-wrapper run --provider codex --prompt "Say hello" --output jsonl`.
@@ -125,7 +136,10 @@ CLI: `uv run agent-sdk-wrapper run --provider codex --prompt "Say hello" --outpu
 set those options. `--config` reads a TOML or JSON file whose keys are `Agent` keywords
 (except tools, `output_schema`, callbacks and `continue_session`) plus `prompt`,
 `prompt_file`, `output` and `stream`; `mcp_servers` entries are `McpStdioServer` or, with a
-`url`, `McpHttpServer` fields. Relative paths resolve against the file. Flags replace its
+`url`, `McpHttpServer` fields. Values must match the keyword's type exactly: `"false"` is
+not a boolean and a string is not a list. Relative `cwd`, `trace_file`, `artifacts_dir`,
+`prompt_file` and `mcp_servers[].cwd` paths resolve against the file. Flags replace its
 values, except that `--env`, `--provider-option` and `--extra-option` merge by key.
-Exit codes: 1 failed run, 2 invalid settings, 128+N killed runtime.
+Exit codes: 1 failed run, 2 invalid settings, 128+N killed runtime (`--output json` or
+`text` prints the result first).
 Run tests with `uv run pytest`; see [validation](../typescript/VALIDATION.md) for Compose and live tests.

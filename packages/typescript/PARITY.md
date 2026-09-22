@@ -13,11 +13,11 @@ a subset of Python's API.
 | Codex key check | Skipped with a custom `model_provider` | Required, including with `baseUrl` |
 | Claude text at a deadline or cancel | A message still receiving frames is dropped | Kept |
 | Claude stop latency | Up to 5 s after a deadline or cancel (SDK close grace); an early close returns before the CLI exits | About 2 s |
-| Session IDs | Automatically updated with `continue_session` | Always recorded per provider; `continueSession` controls reuse |
+| Session IDs | Automatically updated with `continue_session` | Always recorded per provider; `continueSession` reuses the latest reported session, even after a constructor `sessionId` |
 | Setup failures | `ConfigError` raises at call; missing runtime or credentials give failed results | `ConfigError`, `RuntimeUnavailableError` and `ProviderError` throw |
 | Deadlines | `timeout` bounds provider waits; timeout status | `AbortSignal`; cancelled status |
 | Failure handling | Optional `run(raise_on_error=True)`; `RunFailedError.result` | Check status; setup errors throw |
-| Callback exceptions | Logged and ignored | Propagate unclassified after closing the runtime |
+| Callback exceptions | Logged and ignored | Propagate unclassified after closing the runtime, including rejected callback promises |
 | Native callback | Envelope with `.raw` SDK object | Original SDK object, typed `unknown` |
 | Native `env` | Merged over the parent environment | Replaces the parent environment |
 | Tools, structured output, MCP, subagent lifecycle | Supported with provider limits | Not yet implemented |
@@ -27,15 +27,23 @@ a subset of Python's API.
 | `cli_login="require"` check | Codex account type after startup | `codex login status` before startup |
 
 Signal-killed runtimes record a `process_terminated` error, then raise. Exit codes
-129–159 and negative codes count as signal kills.
+129–159 and negative codes count as signal kills, including a Codex app-server killed
+during startup. TypeScript reads the exit code from the error text; a signal name in the
+text counts only when no exit code is given.
 
 `cli_login` defaults to `deny`: stored logins are never used and credentials are
-never persisted. Codex shell snapshots, which would copy the env to `CODEX_HOME`, are
-disabled, and model commands never see the API key. Claude rejects `require`.
+never persisted by the wrapper. Codex shell snapshots, which would copy the env to
+`CODEX_HOME`, are disabled, `CODEX_ACCESS_TOKEN` is dropped under both policies, and
+model commands see blank API keys (`shell_environment_policy.set`) while MCP servers,
+tools and model providers keep them. Claude model commands can read `ANTHROPIC_API_KEY`,
+and the Claude CLI stores command output in its session transcript
+(`CLAUDE_CONFIG_DIR/projects/…`), so a command that prints the key writes it there.
+Claude rejects `require`.
 
 Both packages share one error classifier for message text and HTTP status, after each
-adapter's structured native signals; `docs/fixtures/error-classification-v1.json` holds
-the cases both replay.
+adapter's structured native signals, and apply it to raised exceptions too, else
+`provider_exception`; `docs/fixtures/error-classification-v1.json` holds the cases both
+replay.
 
 SDK symbols and internal client/thread handles are not re-exported in either package.
 Unsupported options fail validation; native permission policies are not interchangeable.
@@ -74,13 +82,23 @@ in that session.
   still runs in the background; a run that allows it can end at its first result,
   before the workflow finishes.
 - Claude retractions fail with `provider_protocol_error`; prior text remains partial output
-  and usage is still reported. Retractions of subagent output (`scope: "local"`
-  notices, subagent `supersedes` frames) are ignored. Python sees only
-  `model_refusal_fallback` notices, because its SDK drops `supersedes` and `aborted` frames.
+  and usage is still reported. Only `scope: "local"` notices and subagent `supersedes`
+  frames are ignored. Python sees only `model_refusal_fallback` notices, because its SDK
+  drops the `supersedes` and `aborted` fields.
+- After a Claude model fallback, text from the original model comes first, then a warning
+  (the CLI's `content`, else `Claude fell back from <original> to <fallback>`), then a
+  `session_info` with the fallback model. A `model_refusal_fallback` that retracts nothing
+  counts as a fallback; a `scope: "local"` fallback is ignored. A session ID that changes
+  mid-run emits a new `session_info`.
+- Claude built-in and defined subagents without a model inherit the run's model:
+  `CLAUDE_CODE_SUBAGENT_MODEL` is blanked unless `env` sets it.
+- Python emits no Claude web-search or web-fetch results: its SDK drops those blocks.
+  TypeScript emits every server-tool result as a `tool_result`.
 - Custom system prompts persist across resume in both runtimes; Codex ignores a new
   `system_prompt` on resume. Start a new session to change instructions.
-- Configured MCP servers are trusted: Claude pre-approves their tools, and Python Codex
-  defaults `default_tools_approval_mode` to `"approve"` (otherwise the default
+- Configured MCP servers are trusted: Python Claude pre-approves every tool of a server,
+  or only its `enabled_tools` when set (`disabled_tools` stay unavailable), and Python
+  Codex defaults `default_tools_approval_mode` to `"approve"` (otherwise the default
   `auto_review` asks the model to judge each call, and `deny_all` rejects every call).
 - Codex defers MCP tools behind its tool search; prompts may need to tell the model to search.
 - Runtimes retry before the wrapper sees an error. By default the Claude CLI retries 429, 5xx, 529 and 401 ten times over about 3 minutes, and
@@ -98,6 +116,9 @@ in that session.
 - Breaking iteration leaves an incomplete run.
 - Codex web-search results expose no result body.
 - `structured_output` and `artifacts_dir` stay null. Compaction and Python-only event variants are omitted.
+- Codex model commands keep running after a cancel, timeout or callback failure: `codex exec`
+  exits on SIGTERM without stopping them. Python closes the app-server's stdin first, which
+  stops them.
 
 ## Token accounting
 
@@ -107,7 +128,7 @@ report thinking tokens and `num_turns` requests. Dollar cost is Claude-only.
 
 Codex output includes reasoning; cache-write tokens are reported. Codex usage excludes
 subagent threads and the model calls of the default `auto_review` approval mode.
-Python counts each request of a turn from the runtime's per-request usage, so resumed
-history and failed attempts are excluded; a turn with no completed request reports no
-usage. TypeScript diffs cumulative snapshots per session and warns when a resumed
+Python counts each request of a turn, including requests that stream no item, from the
+runtime's per-request usage, so resumed history and failed attempts are excluded; a turn
+with no completed request reports no usage. TypeScript diffs cumulative snapshots per session and warns when a resumed
 thread has no baseline; it reports zero requests.

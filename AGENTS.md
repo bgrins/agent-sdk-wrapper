@@ -37,8 +37,8 @@
 - Signal-killed runtimes record a `process_terminated` error, then raise
   `ProcessTerminatedError`; never retry them.
 - Keep runs isolated from the host: Claude `setting_sources` defaults to `[]`,
-  `effort` is pinned through the child env, `cli_login` defaults to `deny`, and
-  credentials are never persisted.
+  `effort` is pinned and `CLAUDE_CODE_SUBAGENT_MODEL` blanked through the child env,
+  `cli_login` defaults to `deny`, and credentials are never persisted.
 - `final_text` is the last `Text`; adapters emit one `Text` per contiguous text run of
   an assistant message, even across frames.
 - Changes to Python `_tool_server_script()` or `mcp` require the real offline
