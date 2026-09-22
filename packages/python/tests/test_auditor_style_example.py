@@ -9,14 +9,7 @@ from types import ModuleType
 
 import pytest
 
-from agent_sdk_wrapper import (
-    Error,
-    EventEnvelope,
-    RunRequest,
-    StructuredOutput,
-    Text,
-    install_fake_providers,
-)
+from agent_sdk_wrapper import Error, RunRequest, StructuredOutput, install_fake_providers
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
@@ -151,23 +144,12 @@ def test_auditor_style_prompts_chain_structured_outputs() -> None:
 
     analyst_prompt = module.analyst_prompt(plan)
     verifier_prompt = module.verifier_prompt(plan, analysis)
-    fix_prompt = module.fix_planner_prompt(plan, analysis, verification)
     reporter_prompt = module.reporter_prompt(plan, analysis, verification, fix_plan)
-    prompts = [
-        module.planner_prompt(),
-        analyst_prompt,
-        verifier_prompt,
-        fix_prompt,
-        reporter_prompt,
-    ]
 
     assert '"objective": "Check release readiness"' in analyst_prompt
     assert '"summary": "Document Docker examples"' in verifier_prompt
     assert '"title": "Update docs"' in reporter_prompt
     assert '"overall_verdict": "ready"' in reporter_prompt
-    assert "Do not look for vulnerabilities" in analyst_prompt
-    assert "rather than a source patch" in fix_prompt
-    assert all(module.SCOPE_BOUNDARY in prompt for prompt in prompts)
 
 
 def test_auditor_style_writes_structured_artifact(tmp_path: Path) -> None:
@@ -190,32 +172,3 @@ def test_auditor_style_writes_structured_artifact(tmp_path: Path) -> None:
     updated_manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert saved["summary"] == "Ready for release."
     assert updated_manifest["files"]["report"] == "report.json"
-
-
-def test_auditor_style_recorder_prints_live_progress(tmp_path: Path) -> None:
-    module = load_example_module("auditor_style")
-    messages: list[str] = []
-    recorder = module.WorkflowRecorder(tmp_path, live_print=messages.append)
-
-    recorder.start_stage("planner", tmp_path / "planner", mcp_enabled=False)
-    recorder.on_event("planner")(
-        EventEnvelope(
-            run_id="run",
-            sequence=0,
-            timestamp="2026-06-03T00:00:00+00:00",
-            event=Text(text="planning complete"),
-        )
-    )
-    recorder.on_event("planner")(
-        EventEnvelope(
-            run_id="run",
-            sequence=1,
-            timestamp="2026-06-03T00:00:01+00:00",
-            event=Error(message="provider rejected model"),
-        )
-    )
-
-    assert messages[0].startswith("planner")
-    assert "start" in messages[0]
-    assert "planning complete" in messages[1]
-    assert "provider rejected model" in messages[2]

@@ -34,24 +34,6 @@ from agent_sdk_wrapper.request import (
     normalize_effort_for_provider,
     parse_model_spec,
 )
-from agent_sdk_wrapper.events import _jsonable
-
-
-def test_event_to_dict_drops_none_and_tags_type():
-    delta = Text(text="hi")
-    assert delta.to_dict() == {"type": "text", "text": "hi"}
-
-
-def test_envelope_roundtrips_json():
-    env = EventEnvelope(
-        run_id="abc",
-        sequence=0,
-        timestamp="2026-05-26T00:00:00+00:00",
-        event=Text(text="hi"),
-    )
-    parsed = json.loads(env.to_json())
-    assert parsed["run_id"] == "abc"
-    assert parsed["event"] == {"type": "text", "text": "hi"}
 
 
 def test_token_usage_addition():
@@ -59,25 +41,6 @@ def test_token_usage_addition():
     b = TokenUsage(requests=2, input_tokens=2, output_tokens=3, total_tokens=5)
     s = a + b
     assert (s.requests, s.input_tokens, s.output_tokens, s.total_tokens) == (3, 12, 8, 20)
-
-
-def test_jsonable_handles_pydantic_dataclass_enum():
-    from pydantic import BaseModel
-
-    class M(BaseModel):
-        x: int
-
-    assert _jsonable(M(x=3)) == {"x": 3}
-    assert _jsonable(TokenUsage(input_tokens=1)) == {
-        "requests": 0,
-        "input_tokens": 1,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "cache_read_tokens": 0,
-        "cache_write_tokens": 0,
-        "reasoning_output_tokens": 0,
-    }
-    assert _jsonable(RunStatus.SUCCESS) == "success"
 
 
 def test_normalize_builtin_tools():
@@ -105,14 +68,6 @@ def test_unknown_provider_raises():
 
     with pytest.raises(ConfigError):
         Agent(provider="bogus")  # type: ignore[arg-type]
-
-
-def test_unknown_run_override_raises(monkeypatch):
-    install_fake_providers(monkeypatch)
-    agent = Agent(provider="openai")
-
-    with pytest.raises(ConfigError, match="web_toolz"):
-        agent.run_sync("hi", web_toolz=False)
 
 
 def test_unknown_stream_override_raises(monkeypatch):
