@@ -1042,6 +1042,23 @@ def test_cwd_must_be_an_existing_directory(monkeypatch, tmp_path, cwd):
         Agent(provider="openai").stream("hi", cwd=tmp_path / cwd)
 
 
+@pytest.mark.parametrize("option", ["allowed_tools", "disallowed_tools", "setting_sources"])
+def test_a_bare_string_is_not_a_list_of_strings(monkeypatch, option):
+    install_fake_providers(monkeypatch)
+
+    with pytest.raises(ConfigError, match=f"{option} must be a list of strings"):
+        Agent(provider="anthropic", **{option: "Bash"})
+    with pytest.raises(ConfigError, match=f"{option} must be a list of strings"):
+        Agent(provider="anthropic").stream("hi", **{option: "Bash"})
+
+
+def test_a_setting_the_adapter_cannot_read_is_a_config_error():
+    server = McpStdioServer(name="s", command="c", tool_approval_modes="approve")  # type: ignore[arg-type]
+
+    with pytest.raises(ConfigError, match="invalid settings"):
+        Agent(provider="codex", mcp_servers=[server]).stream("hi")
+
+
 def test_uncreatable_artifacts_dir_raises_config_error_before_any_event(monkeypatch, tmp_path):
     install_fake_providers(monkeypatch)
     (tmp_path / "file").write_text("")

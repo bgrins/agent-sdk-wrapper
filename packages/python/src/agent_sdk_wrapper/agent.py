@@ -168,12 +168,12 @@ class Agent:
         self.include_events_in_result = include_events_in_result
         self.builtin_tools = normalize_builtin_tools(builtin_tools)
         self.web_tools = web_tools
-        self.allowed_tools = list(allowed_tools or [])
-        self.disallowed_tools = list(disallowed_tools or [])
+        self.allowed_tools = _string_list("allowed_tools", allowed_tools)
+        self.disallowed_tools = _string_list("disallowed_tools", disallowed_tools)
         self.session_id = session_id
         self.continue_session = continue_session
         self.permission_mode = permission_mode
-        self.setting_sources = setting_sources
+        self.setting_sources = _setting_sources(setting_sources)
         self.cli_login = normalize_cli_login(cli_login)
         self.extra_options = dict(extra_options or {})
         self.trace_file = trace_file
@@ -187,7 +187,7 @@ class Agent:
         """Validate settings, then runtime availability and credentials."""
 
         req = self._build_request("", {})
-        self._provider.validate_request(req)
+        self._validate(req)
         self._provider.ensure_available()
         problem = self._provider.check_credentials(req)
         if problem:
@@ -229,7 +229,7 @@ class Agent:
     def _prepare(self, prompt: str, overrides: dict[str, Any]) -> _Run:
         _check_overrides(overrides)
         req = self._build_request(prompt, overrides)
-        self._provider.validate_request(req)
+        self._validate(req)
         trace_path = overrides.get("trace_file", self.trace_file)
         _check_output_paths(req.artifacts_dir, trace_path)
         return _Run(
@@ -238,6 +238,13 @@ class Agent:
             trace_path=trace_path,
             on_event=overrides.get("on_event", self.on_event),
         )
+
+    def _validate(self, req: RunRequest) -> None:
+        try:
+            self._provider.validate_request(req)
+        except (TypeError, ValueError, AttributeError) as exc:
+            # The adapter's checks tripped over a setting of the wrong type.
+            raise ConfigError(f"invalid settings: {type(exc).__name__}: {exc}") from exc
 
     def _build_request(self, prompt: str, overrides: dict[str, Any]) -> RunRequest:
         def pick(name: str, default: Any) -> Any:
@@ -289,12 +296,14 @@ class Agent:
                 pick("builtin_tools", self.builtin_tools)
             ),
             web_tools=pick("web_tools", self.web_tools),
-            allowed_tools=list(pick("allowed_tools", self.allowed_tools)),
-            disallowed_tools=list(pick("disallowed_tools", self.disallowed_tools)),
+            allowed_tools=_string_list("allowed_tools", pick("allowed_tools", self.allowed_tools)),
+            disallowed_tools=_string_list(
+                "disallowed_tools", pick("disallowed_tools", self.disallowed_tools)
+            ),
             session_id=pick("session_id", self.session_id),
             continue_session=bool(pick("continue_session", self.continue_session)),
             permission_mode=pick("permission_mode", self.permission_mode),
-            setting_sources=pick("setting_sources", self.setting_sources),
+            setting_sources=_setting_sources(pick("setting_sources", self.setting_sources)),
             cli_login=normalize_cli_login(pick("cli_login", self.cli_login)),
             extra_options=dict(pick("extra_options", self.extra_options)),
         )
@@ -581,6 +590,24 @@ def _check_mcp_server_names(servers: list[McpServer]) -> None:
         if server.name in seen:
             raise ConfigError(f"duplicate MCP server name {server.name!r}")
         seen.add(server.name)
+
+
+def _string_list(name: str, value: Any) -> list[str]:
+    """Copy a list of strings; ``list()`` would split a bare string into characters."""
+
+    if value is None:
+        return []
+    if (
+        isinstance(value, str)
+        or not isinstance(value, Sequence)
+        or not all(isinstance(item, str) for item in value)
+    ):
+        raise ConfigError(f"{name} must be a list of strings, got {value!r}")
+    return list(value)
+
+
+def _setting_sources(value: Any) -> list[str] | None:
+    return None if value is None else _string_list("setting_sources", value)
 
 
 def _as_str(value: Any) -> str | None:
