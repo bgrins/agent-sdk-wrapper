@@ -447,7 +447,7 @@ test("explicit Codex env does not inherit the host API key", async () => {
   );
   assert.equal(clients.length, 0);
 });
-test("Codex cliLogin require keeps API keys out of the child", async () => {
+test("Codex cliLogin require keeps API keys and access tokens out of the child", async () => {
   assert.throws(
     () =>
       harness([], {
@@ -460,7 +460,14 @@ test("Codex cliLogin require keeps API keys out of the child", async () => {
     cliLogin: "require",
     providerOptions: {
       provider: "openai",
-      client: { env: { OPENAI_API_KEY: "k", CODEX_API_KEY: "k", HOME: "/h" } },
+      client: {
+        env: {
+          OPENAI_API_KEY: "k",
+          CODEX_API_KEY: "k",
+          CODEX_ACCESS_TOKEN: "token",
+          HOME: "/h",
+        },
+      },
     },
   });
   await agent.run("login");

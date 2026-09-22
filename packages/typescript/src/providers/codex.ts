@@ -105,9 +105,10 @@ export class CodexAdapter implements ProviderAdapter {
     const inherited = native?.env ?? process.env;
     // deny: pass the key only as the SDK's CODEX_API_KEY, which `codex exec` uses
     // without reading or writing stored logins; require: keep API keys out of the child.
+    // An access token would replace the stored login under either policy.
     const removed =
       req.cliLogin === "require"
-        ? apiKeyEnv
+        ? [loginTokenEnv, ...apiKeyEnv]
         : [loginTokenEnv, "OPENAI_API_KEY"];
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(inherited))
