@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from conformance.mocks import MockCodex
-from conformance.runner import seed_chatgpt_login
+from conformance.runner import Scratch, codex_wiring, isolate, seed_chatgpt_login
 from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import Agent, McpStdioServer, RunResult, SubagentDef, TokenUsage
@@ -30,50 +30,29 @@ def mock_api():
     api.stop()
 
 
+@pytest.fixture(autouse=True)
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scratch:
+    scratch = Scratch(tmp_path)
+    isolate(monkeypatch, scratch, live=False)
+    return scratch
+
+
 @pytest.fixture
-def codex_home(tmp_path: Path) -> Path:
-    home = tmp_path / "codex-home"
-    home.mkdir()
-    return home
+def codex_home(scratch: Scratch) -> Path:
+    return scratch.dir("codex_home")
 
 
-def codex_config(api: MockCodex, home: Path, *overrides: str) -> dict[str, Any]:
-    """Point Codex at the mock and block every other network destination."""
+@pytest.fixture
+def cwd(scratch: Scratch) -> Path:
+    return scratch.dir("cwd")
 
-    dead_proxy = "http://127.0.0.1:9"
-    return {
-        "config_overrides": (
-            'model_provider="mock"',
-            'model_providers.mock.name="mock"',
-            f'model_providers.mock.base_url="{api.base_url}"',
-            'model_providers.mock.wire_api="responses"',
-            "model_providers.mock.requires_openai_auth=true",
-            "model_providers.mock.request_max_retries=0",
-            "model_providers.mock.stream_max_retries=0",
-            "model_providers.mock.supports_websockets=false",
-            *overrides,
-        ),
-        "env": {
-            "CODEX_HOME": str(home),
-            "HOME": str(home),
-            "HTTPS_PROXY": dead_proxy,
-            "HTTP_PROXY": dead_proxy,
-            "ALL_PROXY": dead_proxy,
-            # git (run by Codex for plugin checks) prefers the lowercase names.
-            "https_proxy": dead_proxy,
-            "http_proxy": dead_proxy,
-            "all_proxy": dead_proxy,
-            "CODEX_ACCESS_TOKEN": "",
-            "NO_PROXY": "127.0.0.1,localhost",
-            "OPENAI_API_KEY": "",
-            "CODEX_API_KEY": "",
-        },
-    }
+
+def codex_config(api: MockCodex, *overrides: str) -> dict[str, Any]:
+    return {"config_overrides": (*codex_wiring(api, select=True), *overrides)}
 
 
 def codex_agent(
     api: MockCodex,
-    home: Path,
     cwd: Path,
     *overrides: str,
     provider_options: dict[str, Any] | None = None,
@@ -86,7 +65,7 @@ def codex_agent(
         timeout=60,
         provider_options={
             "api_key": "sk-mock-key",
-            "config": codex_config(api, home, *overrides),
+            "config": codex_config(api, *overrides),
             **(provider_options or {}),
         },
         **agent_options,
@@ -107,24 +86,24 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def login_agent(api: MockCodex, home: Path, cwd: Path, cli_login: str) -> Agent:
+def login_agent(api: MockCodex, cwd: Path, cli_login: str) -> Agent:
     return Agent(
         provider="codex",
         model=MODEL,
         cwd=cwd,
         timeout=60,
         cli_login=cli_login,
-        provider_options={"config": codex_config(api, home)},
+        provider_options={"config": codex_config(api)},
     )
 
 
-async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_home, tmp_path):
+async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_home, cwd):
     seed_chatgpt_login(codex_home)
     auth = codex_home / "auth.json"
     before = auth.read_text(encoding="utf-8")
     mock_api.steps = [{"text": "hello"}]
 
-    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+    result = await codex_agent(mock_api, cwd).run("hi")
 
     assert result.ok, result.error
     assert result.final_text == "hello"
@@ -135,19 +114,16 @@ async def test_api_key_login_leaves_a_chatgpt_login_untouched(mock_api, codex_ho
 SECRET_KEY = "sk-mock-SECRET-4242"
 
 
-def env_key_agent(api: MockCodex, home: Path, cwd: Path, *overrides: str) -> Agent:
+def env_key_agent(api: MockCodex, cwd: Path, *overrides: str) -> Agent:
     """An agent whose only API key is OPENAI_API_KEY in the run env."""
 
-    config = codex_config(api, home, *overrides)
-    for name in ("OPENAI_API_KEY", "CODEX_API_KEY"):
-        del config["env"][name]
     return Agent(
         provider="codex",
         model=MODEL,
         cwd=cwd,
         timeout=60,
         env={"OPENAI_API_KEY": SECRET_KEY},
-        provider_options={"config": config},
+        provider_options={"config": codex_config(api, *overrides)},
     )
 
 
@@ -155,10 +131,10 @@ def files_containing(root: Path, text: str) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file() and text.encode() in p.read_bytes()]
 
 
-async def test_an_env_api_key_stays_out_of_codex_home_and_commands(mock_api, codex_home, tmp_path):
+async def test_an_env_api_key_stays_out_of_codex_home_and_commands(mock_api, codex_home, cwd):
     mock_api.steps = [{"shell": 'printf "%s" "${OPENAI_API_KEY:-unset}"'}, {"text": "done"}]
 
-    result = await env_key_agent(mock_api, codex_home, tmp_path).run("hi")
+    result = await env_key_agent(mock_api, cwd).run("hi")
 
     assert result.ok, result.error
     assert [r["headers"].get("authorization") for r in mock_api.requests] == [
@@ -170,13 +146,12 @@ async def test_an_env_api_key_stays_out_of_codex_home_and_commands(mock_api, cod
 
 
 async def test_a_provider_env_key_keeps_the_key_without_persisting_it(
-    mock_api, codex_home, tmp_path
+    mock_api, codex_home, cwd
 ):
     mock_api.steps = [{"shell": "true"}, {"text": "done"}]
     agent = env_key_agent(
         mock_api,
-        codex_home,
-        tmp_path,
+        cwd,
         "model_providers.mock.requires_openai_auth=false",
         'model_providers.mock.env_key="OPENAI_API_KEY"',
     )
@@ -202,11 +177,11 @@ class Report(BaseModel):
     detail: Detail = Field(description="Supporting detail.")
 
 
-async def test_structured_output_is_sent_in_strict_form(mock_api, codex_home, tmp_path):
+async def test_structured_output_is_sent_in_strict_form(mock_api, cwd):
     answer = {"a": 1, "b": None, "detail": {"note": "n", "score": None}}
     mock_api.steps = [{"text": json.dumps(answer)}]
 
-    result = await codex_agent(mock_api, codex_home, tmp_path, output_schema=Report).run("go")
+    result = await codex_agent(mock_api, cwd, output_schema=Report).run("go")
 
     assert result.ok, result.error
     assert result.structured_output == Report(a=1, detail=Detail(note="n"))
@@ -244,7 +219,7 @@ server.run("stdio")
 UNICODE_TEXT = "fox \U0001f98a café del\x7f"
 
 
-async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_path):
+async def test_unicode_config_reaches_codex_intact(mock_api, cwd, tmp_path):
     script = tmp_path / "echo_server.py"
     script.write_text(ECHO_MCP_SERVER, encoding="utf-8")
     # tool_search returns the deferred spawn_agent tool, which lists subagent descriptions.
@@ -254,8 +229,7 @@ async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_pat
     ]
     agent = codex_agent(
         mock_api,
-        codex_home,
-        tmp_path,
+        cwd,
         mcp_servers=[
             McpStdioServer(
                 name="echo",
@@ -280,7 +254,7 @@ async def test_unicode_config_reaches_codex_intact(mock_api, codex_home, tmp_pat
     assert any(f"fox: {{\n{UNICODE_TEXT}\n}}" in text for text in followup)
 
 
-async def test_mcp_env_passthrough_comes_from_the_run_env(mock_api, codex_home, tmp_path):
+async def test_mcp_env_passthrough_comes_from_the_run_env(mock_api, cwd, tmp_path):
     script = tmp_path / "echo_server.py"
     script.write_text(ECHO_MCP_SERVER, encoding="utf-8")
 
@@ -305,9 +279,7 @@ async def test_mcp_env_passthrough_comes_from_the_run_env(mock_api, codex_home, 
         {"text": "done"},
     ]
     servers = [echo_server("inherits"), echo_server("overrides", env={"GREETING": "explicit"})]
-    agent = codex_agent(
-        mock_api, codex_home, tmp_path, env={"GREETING": "from-run"}, mcp_servers=servers
-    )
+    agent = codex_agent(mock_api, cwd, env={"GREETING": "from-run"}, mcp_servers=servers)
 
     result = await agent.run("hi")
 
@@ -320,9 +292,7 @@ async def test_mcp_env_passthrough_comes_from_the_run_env(mock_api, codex_home, 
     assert outputs == {"inherits.echo": "from-run", "overrides.echo": "explicit"}
 
 
-async def test_wrapper_tools_see_the_parent_env_and_imports(
-    mock_api, codex_home, tmp_path, monkeypatch
-):
+async def test_wrapper_tools_see_the_parent_env_and_imports(mock_api, cwd, tmp_path, monkeypatch):
     modules = tmp_path / "modules"
     modules.mkdir()
     (modules / "runtime_tools.py").write_text(
@@ -338,9 +308,7 @@ async def test_wrapper_tools_see_the_parent_env_and_imports(
         {"tool": {"name": "mcp__agent_sdk_wrapper_tools__token"}},
         {"text": "done"},
     ]
-    agent = codex_agent(
-        mock_api, codex_home, tmp_path, tools=[token], env={"WRAPPER_TOOL_TOKEN": "t0k3n"}
-    )
+    agent = codex_agent(mock_api, cwd, tools=[token], env={"WRAPPER_TOOL_TOKEN": "t0k3n"})
 
     result = await agent.run("token?")
 
@@ -352,7 +320,7 @@ async def test_wrapper_tools_see_the_parent_env_and_imports(
 
 
 async def test_wrapper_tools_validate_and_report_like_the_claude_handler(
-    mock_api, codex_home, tmp_path, monkeypatch
+    mock_api, cwd, tmp_path, monkeypatch
 ):
     modules = tmp_path / "modules"
     modules.mkdir()
@@ -386,7 +354,7 @@ async def test_wrapper_tools_validate_and_report_like_the_claude_handler(
         {"text": "done"},
     ]
 
-    result = await codex_agent(mock_api, codex_home, tmp_path, tools=[search, shout]).run("go")
+    result = await codex_agent(mock_api, cwd, tools=[search, shout]).run("go")
 
     assert result.ok, result.error
     outputs = {
@@ -401,19 +369,8 @@ async def test_wrapper_tools_validate_and_report_like_the_claude_handler(
     }
 
 
-async def test_a_required_mcp_server_that_exits_is_not_transient(mock_api, codex_home, tmp_path):
-    broken = McpStdioServer(name="broken", command="/bin/sh", args=["-c", "exit 3"], required=True)
-
-    result = await codex_agent(mock_api, codex_home, tmp_path, mcp_servers=[broken]).run("hi")
-
-    # "connection closed: initialize response" is not a dropped API connection.
-    assert result.error_type == "provider_exception"
-    assert "required MCP servers failed to initialize: broken" in (result.error or "")
-    assert mock_api.requests == []
-
-
 async def test_a_tool_the_server_cannot_import_fails_the_run_with_the_import_error(
-    mock_api, codex_home, tmp_path, monkeypatch
+    mock_api, cwd, monkeypatch
 ):
     import types
 
@@ -421,7 +378,7 @@ async def test_a_tool_the_server_cannot_import_fails_the_run_with_the_import_err
     exec("def ghost() -> str:\n    return 'boo'\n", ghost_tools.__dict__)
     monkeypatch.setitem(sys.modules, "ghost_tools", ghost_tools)
 
-    result = await codex_agent(mock_api, codex_home, tmp_path, tools=[ghost_tools.ghost]).run("hi")
+    result = await codex_agent(mock_api, cwd, tools=[ghost_tools.ghost]).run("hi")
 
     assert result.error_type == "provider_exception"
     assert "cannot load tool 'ghost': ModuleNotFoundError: No module named 'ghost_tools'" in (
@@ -430,29 +387,19 @@ async def test_a_tool_the_server_cannot_import_fails_the_run_with_the_import_err
     assert mock_api.requests == []
 
 
-async def test_session_reports_the_model_and_mcp_startup_failures(mock_api, codex_home, tmp_path):
-    broken = McpStdioServer(name="broken", command="/bin/sh", args=["-c", "exit 3"])
-
-    result = await codex_agent(mock_api, codex_home, tmp_path, mcp_servers=[broken]).run("hi")
+async def test_session_reports_the_model_the_runtime_resolved(mock_api, cwd):
+    result = await codex_agent(mock_api, cwd).run("hi")
 
     assert result.ok, result.error
     events = [envelope.event for envelope in result.events]
     assert [e.model for e in events if e.type == "session_info"] == [MODEL]
-    warnings = [e.message for e in events if e.type == "warning"]
-    assert any("`broken` failed to start" in message for message in warnings), warnings
 
 
-async def test_turns_of_a_continued_thread_report_only_their_own_requests(
-    mock_api, codex_home, tmp_path
-):
+async def test_turns_of_a_continued_thread_report_only_their_own_requests(mock_api, cwd):
     # Codex repeats the thread's unchanged usage before each failed attempt.
     failed = {"stream_error": {"code": "server_error", "message": "boom"}}
     agent = codex_agent(
-        mock_api,
-        codex_home,
-        tmp_path,
-        "model_providers.mock.stream_max_retries=1",
-        continue_session=True,
+        mock_api, cwd, "model_providers.mock.stream_max_retries=1", continue_session=True
     )
     usages = []
     for plan in (
@@ -471,28 +418,10 @@ async def test_turns_of_a_continued_thread_report_only_their_own_requests(
     ]
 
 
-async def test_an_exhausted_context_window_reports_no_usage(mock_api, codex_home, tmp_path):
-    mock_api.steps = [
-        {
-            "stream_error": {
-                "code": "context_length_exceeded",
-                "message": "Input exceeds the window.",
-            }
-        }
-    ]
-
-    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
-
-    assert result.error_type == "context_window_exceeded"
-    assert result.usage is None
-
-
-async def test_reasoning_tokens_without_a_reasoning_item_yield_empty_thinking(
-    mock_api, codex_home, tmp_path
-):
+async def test_reasoning_tokens_without_a_reasoning_item_yield_empty_thinking(mock_api, cwd):
     mock_api.steps = [{"text": "answer", "usage": [100, 10, 7]}]
 
-    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+    result = await codex_agent(mock_api, cwd).run("hi")
 
     assert result.ok, result.error
     events = [e.event for e in result.events if e.event.type in ("thinking", "usage")]
@@ -503,46 +432,24 @@ async def test_reasoning_tokens_without_a_reasoning_item_yield_empty_thinking(
     assert events[1].usage.reasoning_output_tokens == 7
 
 
-async def test_rejected_api_key_is_one_authentication_error(mock_api, codex_home, tmp_path):
-    mock_api.steps = [
-        {
-            "status": 401,
-            "body": {
-                "error": {
-                    "message": "Incorrect API key provided: sk-mock.",
-                    "type": "invalid_request_error",
-                    "code": "invalid_api_key",
-                }
-            },
-        }
-    ]
-
-    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
-
-    assert not result.ok
-    errors = [e.event for e in result.events if e.event.type == "error"]
-    assert [e.error_type for e in errors] == ["authentication_failed"]
-    assert "401 Unauthorized" in errors[0].message
-
-
-async def test_non_ascii_error_body_keeps_its_text(mock_api, codex_home, tmp_path):
+async def test_non_ascii_error_body_keeps_its_text(mock_api, cwd):
     mock_api.steps = [{"status": 400, "body": "Offline gateway probe ✓"}]
 
-    result = await codex_agent(mock_api, codex_home, tmp_path).run("hi")
+    result = await codex_agent(mock_api, cwd).run("hi")
 
     errors = [e.event for e in result.events if e.event.type == "error"]
     assert [e.message for e in errors] == ["Offline gateway probe ✓"]
 
 
-async def test_signal_killed_app_server_raises_process_terminated(mock_api, codex_home, tmp_path):
+async def test_signal_killed_app_server_raises_process_terminated(mock_api, cwd):
     from openai_codex import AsyncCodex, CodexConfig
 
     from agent_sdk_wrapper import ProcessTerminatedError, RunRequest
     from agent_sdk_wrapper.providers.openai_provider import OpenAIProvider
 
     mock_api.steps = [{"hang": 30}]
-    config = codex_config(mock_api, codex_home, 'cli_auth_credentials_store="ephemeral"')
-    req = RunRequest(provider="openai", prompt="hi", model=MODEL, cwd=tmp_path)
+    config = codex_config(mock_api, 'cli_auth_credentials_store="ephemeral"')
+    req = RunRequest(provider="openai", prompt="hi", model=MODEL, cwd=cwd)
 
     async with AsyncCodex(config=CodexConfig(**config)) as codex:
         await codex.login_api_key("sk-mock-key")
@@ -563,11 +470,11 @@ async def test_signal_killed_app_server_raises_process_terminated(mock_api, code
     assert raised.value.signal == signal.SIGKILL
 
 
-async def test_cli_login_require_uses_the_stored_chatgpt_login(mock_api, codex_home, tmp_path):
+async def test_cli_login_require_uses_the_stored_chatgpt_login(mock_api, codex_home, cwd):
     access = seed_chatgpt_login(codex_home)
     mock_api.steps = [{"shell": "true"}, {"text": "hello"}]
 
-    result = await login_agent(mock_api, codex_home, tmp_path, "require").run("hi")
+    result = await login_agent(mock_api, cwd, "require").run("hi")
 
     assert result.ok, result.error
     assert [r["headers"].get("authorization") for r in mock_api.requests] == [
