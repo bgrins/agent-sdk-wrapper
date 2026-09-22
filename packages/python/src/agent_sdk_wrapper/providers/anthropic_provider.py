@@ -106,6 +106,7 @@ _PROVIDER_FLAG_ENV = (
     "CLAUDE_CODE_USE_GATEWAY",
 )
 _SYNTHETIC_MODEL = "<synthetic>"
+_FALLBACK_SUBTYPES = frozenset({"model_fallback", "model_refusal_fallback"})
 _SUBAGENT_TASK_TYPES = frozenset({"local_agent", "remote_agent"})
 # Native keys first-class options compute; extra_options may set one only when
 # its option is unused. The wrapper always computes env. A native tools list
@@ -395,15 +396,12 @@ class AnthropicProvider(ProviderAdapter):
 
         stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
         options = self._build_options(req, stderr_tail)
-        seen_session = False
+        session = _Session()
         seen_text = False
         seen_thinking = False
         # After a retraction only the result's usage is still meaningful.
         retracted = False
-        session_model: str | None = None
         seen_uuids: set[str] = set()
-        # Uuids of subagent frames, which the portable output omits.
-        omitted_uuids: set[str] = set()
         pending = _PendingText()
         # The latest error-bearing assistant message: (AssistantMessage.error, its text).
         assistant_error: tuple[str | None, str] | None = None
@@ -428,19 +426,33 @@ class AnthropicProvider(ProviderAdapter):
                         provider_log.write(message)
                         if retracted and not isinstance(message, ResultMessage):
                             continue
-                        if not pending.continues(message):
+                        fallback = _is_fallback(message)
+                        if fallback and _retracts_output(message):
+                            yield Error(
+                                message="Claude retracted earlier messages after a refusal; "
+                                "the v1 event contract cannot retract emitted output",
+                                error_type="provider_protocol_error",
+                            )
+                            retracted = True
+                            pending.flush()
+                            continue
+                        # Text before a fallback came from the original model.
+                        if fallback or not pending.continues(message):
                             text = pending.flush()
                             if text is not None:
                                 seen_text = True
                                 yield text
+                        if fallback:
+                            yield _fallback_warning(message, include_raw=req.include_raw)
+                        info = session.update(message)
+                        if info is not None:
+                            yield info
                         if isinstance(message, AssistantMessage):
                             if message.uuid is not None:
                                 if message.uuid in seen_uuids:
                                     continue
                                 seen_uuids.add(message.uuid)
                             if message.parent_tool_use_id:
-                                if message.uuid:
-                                    omitted_uuids.add(message.uuid)
                                 yield WarningEvent(
                                     message="Subagent message omitted from portable output; "
                                     "inspect on_provider_event"
@@ -462,8 +474,6 @@ class AnthropicProvider(ProviderAdapter):
                                 yield event
                         elif isinstance(message, UserMessage):
                             content = message.content
-                            if message.parent_tool_use_id and message.uuid:
-                                omitted_uuids.add(message.uuid)
                             if message.parent_tool_use_id or not isinstance(content, list):
                                 continue
                             for block in content:
@@ -499,39 +509,12 @@ class AnthropicProvider(ProviderAdapter):
                             ):
                                 subagent_tasks[message.task_id] = message.status
                         elif isinstance(message, SystemMessage):
-                            data = message.data
-                            if message.subtype == "model_refusal_fallback" and (
-                                _retracts_emitted_output(data, omitted_uuids)
-                            ):
-                                yield Error(
-                                    message="Claude retracted earlier messages after a refusal; "
-                                    "the v1 event contract cannot retract emitted output",
-                                    error_type="provider_protocol_error",
-                                )
-                                retracted = True
-                                pending.flush()
-                                continue
                             if message.subtype == "api_retry":
                                 yield _api_retry_warning(message, include_raw=req.include_raw)
                             compacted = _compaction_event(message)
                             if compacted is not None:
                                 yield compacted
-                            model = data.get("model") or None
-                            if message.subtype in ("model_fallback", "model_refusal_fallback"):
-                                yield _fallback_warning(message, include_raw=req.include_raw)
-                                # A local fallback served only a subagent or side request.
-                                if data.get("scope") != "local":
-                                    model = data.get("fallback_model") or None
-                            if data.get("session_id") and (
-                                not seen_session or (model and model != session_model)
-                            ):
-                                seen_session = True
-                                session_model = model or session_model
-                                yield SessionInfo(id=data["session_id"], model=session_model)
                         elif isinstance(message, ResultMessage):
-                            if not seen_session and message.session_id:
-                                seen_session = True
-                                yield SessionInfo(id=message.session_id)
                             # Tasks whose notification never arrived end with the run.
                             for task_id, status in subagent_tasks.items():
                                 if status is not None:
@@ -652,25 +635,55 @@ def _message_text(message: AssistantMessage) -> str:
     return "".join(block.text for block in message.content if isinstance(block, TextBlock))
 
 
-def _retracts_emitted_output(data: dict[str, Any], omitted_uuids: set[str]) -> bool:
-    """Whether a refusal fallback retracts messages the portable output may contain.
+def _is_fallback(message: Any) -> bool:
+    return isinstance(message, SystemMessage) and message.subtype in _FALLBACK_SUBTYPES
 
-    A ``local`` scope, or a notice from a subagent, retracts only subagent or side
-    requests, and so does a list of uuids that all belong to omitted subagent frames.
-    """
 
-    retracted = data.get("retracted_message_uuids") or []
-    if not retracted or data.get("scope") == "local" or data.get("parent_tool_use_id"):
-        return False
-    return not set(retracted) <= omitted_uuids
+def _retracts_output(message: SystemMessage) -> bool:
+    """A ``local`` scope retracts only subagent or side-request output, which is omitted."""
+
+    return (
+        message.subtype == "model_refusal_fallback"
+        and message.data.get("scope") != "local"
+        and bool(message.data.get("retracted_message_uuids"))
+    )
 
 
 def _fallback_warning(message: SystemMessage, *, include_raw: bool) -> WarningEvent:
     data = message.data
     text = data.get("content") or (
-        f"Claude switched from {data.get('original_model')} to {data.get('fallback_model')}"
+        f"Claude fell back from {data.get('original_model')} to {data.get('fallback_model')}"
     )
     return WarningEvent(message=text, raw=_raw(message) if include_raw else None)
+
+
+@dataclasses.dataclass
+class _Session:
+    """The session and serving model reported so far."""
+
+    id: str | None = None
+    model: str | None = None
+
+    def update(self, message: Any) -> SessionInfo | None:
+        """Report the session of a main-agent frame when its id or model changes."""
+
+        if isinstance(message, SystemMessage):
+            data = message.data
+            if data.get("parent_tool_use_id"):
+                return None
+            session_id, model = data.get("session_id"), data.get("model")
+            # A local fallback served only a subagent or side request.
+            if _is_fallback(message) and data.get("scope") != "local":
+                model = data.get("fallback_model")
+        elif getattr(message, "parent_tool_use_id", None):
+            return None
+        else:
+            session_id, model = getattr(message, "session_id", None), None
+        model = model or self.model
+        if not session_id or (session_id, model) == (self.id, self.model):
+            return None
+        self.id, self.model = session_id, model
+        return SessionInfo(id=session_id, model=model)
 
 
 @dataclasses.dataclass

@@ -279,10 +279,9 @@ def test_anthropic_stream_maps_rate_limit_events(monkeypatch, tmp_path):
 
     events = asyncio.run(collect())
 
-    assert len(events) == 1
-    assert isinstance(events[0], WarningEvent)
-    assert "allowed_warning" in events[0].message
-    assert "five_hour" in events[0].message
+    [warning] = [event for event in events if isinstance(event, WarningEvent)]
+    assert "allowed_warning" in warning.message
+    assert "five_hour" in warning.message
     path = tmp_path / "provider-events.jsonl"
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert len(lines) == 2
@@ -347,7 +346,8 @@ def test_anthropic_partial_stream_events_are_a_protocol_error(monkeypatch):
         ],
     )
 
-    assert [type(event) for event in events] == [Text, Error]
+    assert [event.text for event in events if isinstance(event, Text)] == ["done"]
+    assert isinstance(events[-1], Error)
     assert events[-1].error_type == "provider_protocol_error"
 
 
@@ -1013,25 +1013,6 @@ def test_anthropic_subagents_without_a_notification_end_at_the_result(monkeypatc
     ]
 
 
-def test_anthropic_refusal_retraction_is_a_protocol_error(monkeypatch):
-    from claude_agent_sdk import SystemMessage, TextBlock
-
-    from agent_sdk_wrapper.events import Error
-
-    events, _ = _stream(
-        monkeypatch,
-        [
-            _assistant(TextBlock(text="partial")),
-            SystemMessage(
-                subtype="model_refusal_fallback", data={"retracted_message_uuids": ["m1"]}
-            ),
-            _assistant(TextBlock(text="fallback answer")),
-        ],
-    )
-    assert isinstance(events[-1], Error)
-    assert events[-1].error_type == "provider_protocol_error"
-
-
 def test_anthropic_process_errors_carry_the_stderr_tail(monkeypatch):
     import claude_agent_sdk
     from claude_agent_sdk import ProcessError
@@ -1137,99 +1118,130 @@ def test_anthropic_structured_run_without_structured_output_fails(monkeypatch):
     assert events[-1].error_type == "structured_output_failed"
 
 
-def test_anthropic_model_fallback_warns_and_reports_the_serving_model(monkeypatch):
-    from claude_agent_sdk import SystemMessage, TextBlock
-
-    from agent_sdk_wrapper.events import SessionInfo, Text
-
-    fallback = {
-        "type": "system",
-        "subtype": "model_fallback",
-        "trigger": "overloaded",
-        "original_model": "claude-haiku-4-5",
-        "fallback_model": "claude-sonnet-4-5",
-        "content": "Switched to Sonnet 4.5 due to high demand for Haiku 4.5",
-        "session_id": "s1",
-    }
-    events, _ = _stream(
-        monkeypatch,
-        [
-            SystemMessage(subtype="init", data={"session_id": "s1", "model": "claude-haiku-4-5"}),
-            SystemMessage(subtype="model_fallback", data=fallback),
-            _assistant(TextBlock(text="from fallback"), model="claude-sonnet-4-5"),
-        ],
-    )
-
-    assert events[:4] == [
-        SessionInfo(id="s1", model="claude-haiku-4-5"),
-        WarningEvent(message="Switched to Sonnet 4.5 due to high demand for Haiku 4.5"),
-        SessionInfo(id="s1", model="claude-sonnet-4-5"),
-        Text(text="from fallback"),
-    ]
-
-
-def _refusal_fallback(uuids, **fields):
+def _fallback(subtype, **fields):
     from claude_agent_sdk import SystemMessage
 
     data = {
         "type": "system",
-        "subtype": "model_refusal_fallback",
-        "original_model": "claude-opus-5",
+        "subtype": subtype,
+        "original_model": "claude-haiku-4-5",
         "fallback_model": "claude-sonnet-4-5",
-        "content": "Switched to Sonnet 4.5",
-        "retracted_message_uuids": uuids,
         "session_id": "s1",
         **fields,
     }
-    return SystemMessage(subtype="model_refusal_fallback", data=data)
+    return SystemMessage(subtype=subtype, data=data)
 
 
 @pytest.mark.parametrize(
-    "notice",
+    ("notice", "warning"),
     [
-        _refusal_fallback(["sub-1"], scope="local"),
-        # Older CLIs omit the scope; the uuids still name only subagent frames.
-        _refusal_fallback(["sub-1", "sub-2"]),
+        (
+            _fallback("model_fallback", trigger="overloaded", content="Switched to Sonnet 4.5"),
+            "Switched to Sonnet 4.5",
+        ),
+        (
+            _fallback("model_fallback"),
+            "Claude fell back from claude-haiku-4-5 to claude-sonnet-4-5",
+        ),
+        # A refusal fallback that retracts nothing is an ordinary fallback.
+        (
+            _fallback("model_refusal_fallback", retracted_message_uuids=[]),
+            "Claude fell back from claude-haiku-4-5 to claude-sonnet-4-5",
+        ),
     ],
 )
-def test_anthropic_retractions_of_subagent_output_keep_the_answer(monkeypatch, notice):
-    from claude_agent_sdk import TextBlock, ToolResultBlock, UserMessage
+def test_anthropic_model_fallback_reports_text_then_warning_then_serving_model(
+    monkeypatch, notice, warning
+):
+    from claude_agent_sdk import SystemMessage, TextBlock
+
+    from agent_sdk_wrapper.events import SessionInfo, Text
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            SystemMessage(subtype="init", data={"session_id": "s1", "model": "claude-haiku-4-5"}),
+            _assistant(TextBlock(text="first"), message_id="m1"),
+            notice,
+            _assistant(TextBlock(text="second"), message_id="m2", model="claude-sonnet-4-5"),
+        ],
+    )
+
+    assert events[:5] == [
+        SessionInfo(id="s1", model="claude-haiku-4-5"),
+        Text(text="first"),
+        WarningEvent(message=warning),
+        SessionInfo(id="s1", model="claude-sonnet-4-5"),
+        Text(text="second"),
+    ]
+
+
+def test_anthropic_local_fallback_keeps_the_session_model(monkeypatch):
+    from claude_agent_sdk import SystemMessage
+
+    from agent_sdk_wrapper.events import SessionInfo
+
+    events, _ = _stream(
+        monkeypatch,
+        [
+            SystemMessage(subtype="init", data={"session_id": "s1", "model": "claude-haiku-4-5"}),
+            _fallback("model_fallback", scope="local"),
+        ],
+    )
+
+    assert [event for event in events if isinstance(event, SessionInfo)] == [
+        SessionInfo(id="s1", model="claude-haiku-4-5")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fields", "fails"),
+    [
+        # The wrapper never saw these uuids, so only the scope keeps the answer.
+        ({"scope": "local", "retracted_message_uuids": ["unseen-1"]}, False),
+        ({"scope": "session", "retracted_message_uuids": ["unseen-1"]}, True),
+        ({"retracted_message_uuids": ["main-1"]}, True),
+        ({"scope": "session", "retracted_message_uuids": []}, False),
+    ],
+)
+def test_anthropic_refusal_retractions_fail_unless_local(monkeypatch, fields, fails):
+    from claude_agent_sdk import TextBlock
 
     from agent_sdk_wrapper.events import Error, Text
 
     events, _ = _stream(
         monkeypatch,
         [
-            _assistant(TextBlock(text="partial"), parent_tool_use_id="agent-1", uuid="sub-1"),
-            UserMessage(
-                content=[ToolResultBlock(tool_use_id="t", content="x")],
-                parent_tool_use_id="agent-1",
-                uuid="sub-2",
-            ),
-            notice,
-            _assistant(TextBlock(text="main answer"), message_id="m1", uuid="main-1"),
+            _assistant(TextBlock(text="partial"), message_id="m1", uuid="main-1"),
+            _fallback("model_refusal_fallback", **fields),
+            _assistant(TextBlock(text="answer"), message_id="m2", uuid="main-2"),
         ],
     )
 
-    assert not any(isinstance(event, Error) for event in events)
-    assert [event.text for event in events if isinstance(event, Text)] == ["main answer"]
+    errors = [event.error_type for event in events if isinstance(event, Error)]
+    texts = [event.text for event in events if isinstance(event, Text)]
+    assert errors == (["provider_protocol_error"] if fails else [])
+    assert texts == ([] if fails else ["partial", "answer"])
 
 
-def test_anthropic_retraction_touching_main_output_still_fails(monkeypatch):
-    from claude_agent_sdk import TextBlock
+def test_anthropic_reports_a_changed_session_id(monkeypatch):
+    from claude_agent_sdk import SystemMessage, TextBlock
 
-    from agent_sdk_wrapper.events import Error
+    from agent_sdk_wrapper.events import SessionInfo
 
     events, _ = _stream(
         monkeypatch,
         [
-            _assistant(TextBlock(text="sub"), parent_tool_use_id="agent-1", uuid="sub-1"),
-            _assistant(TextBlock(text="partial"), message_id="m1", uuid="main-1"),
-            _refusal_fallback(["sub-1", "main-1"], scope="session"),
+            SystemMessage(subtype="init", data={"session_id": "s1", "model": "claude-x"}),
+            _assistant(TextBlock(text="ok"), message_id="m1", session_id="s2"),
+            _result(session_id="s2"),
         ],
     )
 
-    assert [e.error_type for e in events if isinstance(e, Error)] == ["provider_protocol_error"]
+    assert [event for event in events if isinstance(event, SessionInfo)] == [
+        SessionInfo(id="s1", model="claude-x"),
+        SessionInfo(id="s2", model="claude-x"),
+    ]
 
 
 def test_anthropic_joins_text_frames_of_one_message(monkeypatch):
