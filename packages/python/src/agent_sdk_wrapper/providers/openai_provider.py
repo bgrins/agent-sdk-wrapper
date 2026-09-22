@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import builtins
-import contextlib
 import dataclasses
 import dis
 import functools
@@ -21,7 +20,7 @@ import sys
 import tempfile
 import textwrap
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
@@ -75,7 +74,8 @@ _API_KEY_ENV = "OPENAI_API_KEY"
 _API_KEY_ENVS = (_API_KEY_ENV, "CODEX_API_KEY")
 _CREDENTIAL_OVERRIDE_KEYS = frozenset({"cli_auth_credentials_store", "forced_login_method"})
 _WEB_SEARCH_OVERRIDE_KEYS = frozenset({"web_search", "tools.web_search"})
-# A table set at either parent key replaces the wrapper's entries for the API keys.
+# Keys that would replace the blank API keys the wrapper sets for commands: the
+# entries themselves, or a table at either parent key.
 _COMMAND_KEY_POLICY_KEYS = frozenset(
     {
         "shell_environment_policy",
@@ -1874,9 +1874,9 @@ def _let_exit(process: Any) -> None:
 
     if process is None or process.poll() is not None:
         return
-    with contextlib.suppress(OSError, ValueError):
+    with suppress(OSError, ValueError):
         process.stdin.close()
-    with contextlib.suppress(subprocess.TimeoutExpired):
+    with suppress(subprocess.TimeoutExpired):
         process.wait(_SHUTDOWN_GRACE_S)
 
 
