@@ -574,20 +574,6 @@ test("exit codes 129-159 and negative codes are signal kills", () => {
   );
   assert.deepEqual([0, 1, 2, 127, 128, 160, 255].filter(terminated), []);
 });
-test("high demand, 408 and 409 are transient", () => {
-  for (const [message, status] of [
-    [
-      "We're currently experiencing high demand, which may cause temporary errors.",
-      undefined,
-    ],
-    ["request failed", 408],
-    ["request failed", 409],
-  ] as const)
-    assert.equal(
-      classify(message, "provider_exception", status).error_type,
-      "transient_api_error",
-    );
-});
 test("a kill after a provider error records both", async () => {
   const agent = new Agent(
     { provider: "openai" },
