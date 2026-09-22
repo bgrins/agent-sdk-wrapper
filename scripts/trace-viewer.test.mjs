@@ -767,7 +767,7 @@ test("mounted job traces update directly without reading agent-created directori
   }
 });
 
-test("the run list marks traces too large to serve", async (t) => {
+test("the run list marks traces too large to serve and isolates parent paths", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "run-size-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const job = join(root, "fake", "job-1");
@@ -789,14 +789,26 @@ test("the run list marks traces too large to serve", async (t) => {
   );
   context.fetch = fetch;
   await vm.runInContext("discoverResults()", context);
+  const buttons = vm
+    .runInContext("runsEl", context)
+    .children.map(({ children: [button] }) => button);
   const meta = Object.fromEntries(
-    vm.runInContext("runsEl", context).children.map(({ children: [button] }) => [
+    buttons.map((button) => [
       button.title,
       button.find((node) => node.classes.has("run-meta")).textContent,
     ]),
   );
   assert.match(meta["fake/job-1/large.trace.jsonl"], /^too large to serve · /);
   assert.doesNotMatch(meta["fake/job-1/small.trace.jsonl"], /too large/);
+  // The parent path's direction is rtl for trimming; isolation keeps
+  // "fake/job-1/" from rendering as "/fake/job-1".
+  for (const button of buttons) {
+    const parent = button.find((node) => node.classes.has("run-parent"));
+    assert.deepEqual(
+      parent.children.map((node) => [node.tagName, node.textContent]),
+      [["bdi", "fake/job-1/"]],
+    );
+  }
 });
 
 test("an untrusted manifest cannot fetch outside its run directory", async () => {

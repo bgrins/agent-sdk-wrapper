@@ -1486,7 +1486,10 @@
         if (segments.length) {
           const parent = document.createElement("span");
           parent.className = "run-parent";
-          parent.textContent = `${segments.join("/")}/`;
+          // The right-to-left parent trims the path's start; <bdi> keeps it in order.
+          const path = document.createElement("bdi");
+          path.textContent = `${segments.join("/")}/`;
+          parent.append(path);
           title.append(parent);
         }
         const leafEl = document.createElement("span");
