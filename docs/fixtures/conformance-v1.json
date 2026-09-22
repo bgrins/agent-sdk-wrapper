@@ -377,7 +377,7 @@
       "id": "anthropic.structured_tool_handoff",
       "provider": "anthropic",
       "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
-      "options": { "model": "claude-haiku-4-5", "tools": ["add"], "output_schema": "Weather" },
+      "options": { "model": "claude-haiku-4-5", "tools": ["add"], "output_schema": "Weather", "builtin_tools": "none" },
       "prompt": "Call add with a=19 and b=2, then report the weather for Paris with temp_c set to the sum.",
       "mock": [
         { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 19, "b": 2 } } },
@@ -388,7 +388,13 @@
         "structured_output": { "city": "Paris", "temp_c": 21 },
         "tool_calls": ["mcp__agent_sdk_wrapper_tools__add", "StructuredOutput"],
         "events": { "includes": ["structured_output"] },
-        "requests": { "match": [{ "request": 0, "path": "tools", "contains": "\"name\":\"StructuredOutput\"" }] }
+        "requests": {
+          "match": [
+            { "request": 0, "path": "tools", "contains": "\"name\":\"StructuredOutput\"" },
+            { "request": 0, "path": "tools", "contains": "\"name\":\"mcp__agent_sdk_wrapper_tools__add\"" },
+            { "request": 0, "path": "tools", "excludes": "\"name\":\"Bash\"" }
+          ]
+        }
       },
       "live": {
         "expect": {
