@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLIJSONDecodeError,
     CLINotFoundError,
+    McpSdkServerConfig,
     ProcessError,
     RateLimitEvent,
     ResultMessage,
@@ -69,7 +70,14 @@ from ..events import (
 from ..mcp import McpHttpServer, McpServer, McpStdioServer, stdio_server_env
 from ..request import RunRequest
 from ..structured import json_schema_of_type, validate_output
-from ..tools import json_schema_for, to_anthropic_tools, validate_tool_names
+from ..tools import (
+    ANTHROPIC_TOOL_SERVER,
+    _make_anthropic_handler,
+    json_schema_for,
+    tool_description,
+    tool_name,
+    validate_tool_names,
+)
 from .base import ProviderAdapter
 
 _DEFAULT_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
@@ -311,10 +319,9 @@ class AnthropicProvider(ProviderAdapter):
             server for server in req.mcp_servers if server.enabled is not False
         ]
         mcp_servers: dict[str, Any] = {}
-        server, tool_names = to_anthropic_tools(req.tools)
-        if server is not None:
-            mcp_servers["agent_sdk_wrapper_tools"] = server
-            allowed.extend(tool_names)
+        if req.tools:
+            mcp_servers[ANTHROPIC_TOOL_SERVER] = _tool_server(req.tools)
+            allowed.extend(f"mcp__{ANTHROPIC_TOOL_SERVER}__{tool_name(fn)}" for fn in req.tools)
         mcp_servers.update(_anthropic_mcp_servers(active_mcp_servers))
         allowed.extend(_anthropic_tool_names(active_mcp_servers, enabled=True))
         disallowed.extend(_anthropic_tool_names(active_mcp_servers, enabled=False))
@@ -882,6 +889,20 @@ def _stringify(content: Any) -> str:
 
 def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _tool_server(callables: list[Callable[..., Any]]) -> McpSdkServerConfig:
+    """An in-process MCP server for callable tools."""
+
+    sdk_tools = [
+        claude_agent_sdk.tool(tool_name(fn), tool_description(fn), json_schema_for(fn))(
+            _make_anthropic_handler(fn)
+        )
+        for fn in callables
+    ]
+    return claude_agent_sdk.create_sdk_mcp_server(
+        name=ANTHROPIC_TOOL_SERVER, version="1.0.0", tools=sdk_tools
+    )
 
 
 def _anthropic_mcp_servers(servers: list[McpServer]) -> dict[str, Any]:
