@@ -426,6 +426,58 @@
       "message": "rate limit",
       "status": 400,
       "error_type": "invalid_request"
+    },
+    {
+      "message": "HTTP ٥٠٠ upstream",
+      "error_type": null
+    },
+    {
+      "message": "status: ٤٠١",
+      "error_type": null
+    },
+    {
+      "message": "Übilling failed",
+      "error_type": "billing_error"
+    },
+    {
+      "message": "model foo\r not found",
+      "error_type": null
+    },
+    {
+      "message": "model foo  not found",
+      "error_type": null
+    },
+    {
+      "message": "model: gpt-x not found",
+      "error_type": null
+    },
+    {
+      "message": "model x not found",
+      "error_type": "model_not_found"
+    },
+    {
+      "message": "status:﻿503",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "status: 503",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "status　503",
+      "error_type": "transient_api_error"
+    },
+    {
+      "message": "status\u001c503",
+      "error_type": null
+    },
+    {
+      "message": "İnvalid api key",
+      "error_type": null
+    },
+    {
+      "message": "overloadedſ",
+      "error_type": "transient_api_error"
     }
   ]
 }
