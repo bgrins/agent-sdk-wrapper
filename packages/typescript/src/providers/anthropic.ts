@@ -323,6 +323,11 @@ export class AnthropicAdapter implements ProviderAdapter {
           continue;
         }
         const fallback = modelFallback(message);
+        // The warning precedes the session_info that reports the fallback model.
+        if (fallback) {
+          yield* flush();
+          yield { type: "warning", message: fallback.message, ...raw };
+        }
         // Status frames can arrive between the frames of one message.
         if (
           pending &&
@@ -487,14 +492,6 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (info.resetsAt !== undefined)
             details.push(`resets_at=${info.resetsAt}`);
           yield { type: "warning", message: details.join(", "), ...raw };
-        } else if (fallback) {
-          const from = fallback.from ? ` from ${fallback.from}` : "";
-          const why = fallback.trigger ? ` (${fallback.trigger})` : "";
-          yield {
-            type: "warning",
-            message: `Claude fell back${from} to ${fallback.to}${why}`,
-            ...raw,
-          };
         } else if (message.type === "stream_event")
           throw new ProviderProtocolError(
             "Unexpected partial Claude frames with includePartialMessages disabled",
@@ -514,24 +511,34 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 }
 type Raw = { raw?: Record<string, unknown> };
-/** The CLI's `system/model_fallback` frame, which the SDK types omit. */
+/**
+ * A session model switch: `system/model_fallback` (which the SDK types omit), or a
+ * `model_refusal_fallback` that retracted nothing. Local-scope fallbacks served only
+ * omitted subagent or side requests.
+ */
 function modelFallback(
   message: SDKMessage,
-): { to: string; from?: string; trigger?: string } | undefined {
+): { to: string; message: string } | undefined {
   const data = object(message);
   if (
     data?.type !== "system" ||
-    data.subtype !== "model_fallback" ||
+    (data.subtype !== "model_fallback" &&
+      data.subtype !== "model_refusal_fallback") ||
+    data.scope === "local" ||
     typeof data.fallback_model !== "string" ||
     !data.fallback_model
   )
     return undefined;
-  const text = (value: unknown) =>
-    typeof value === "string" && value ? value : undefined;
+  const from =
+    typeof data.original_model === "string" && data.original_model
+      ? ` from ${data.original_model}`
+      : "";
   return {
     to: data.fallback_model,
-    from: text(data.original_model),
-    trigger: text(data.trigger),
+    message:
+      typeof data.content === "string" && data.content
+        ? data.content
+        : `Claude fell back${from} to ${data.fallback_model}`,
   };
 }
 const cancelled = (): ErrorEvent => ({

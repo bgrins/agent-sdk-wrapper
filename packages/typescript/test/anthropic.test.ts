@@ -805,46 +805,66 @@ test("Claude session_info reports the runtime model from init", async () => {
   );
   assert.equal(run.model, "claude-resolved");
 });
-test("Claude model fallback warns and reports the fallback model", async () => {
-  // Captured from the Claude CLI; the SDK types omit this frame.
-  const fallback = {
-    type: "system",
-    subtype: "model_fallback",
-    uuid: randomUUID(),
-    trigger: "overloaded",
-    original_model: "claude-haiku-4-5",
-    fallback_model: "claude-sonnet-4-5",
-    content: "Switched to Sonnet 4.5 due to high demand for Haiku 4.5",
-    session_id: "claude-session",
-  } as unknown as SDKMessage;
-  const run = await harness([
-    init("claude-haiku-4-5"),
-    fallback,
-    assistant([textBlock("from fallback")], {}, { model: "claude-sonnet-4-5" }),
-    result({ result: "from fallback" }),
-  ]).agent.run("fallback");
-  assert.deepEqual(
-    run.events
-      .map((env) => env.event)
-      .filter(
-        (event) => event.type === "session_info" || event.type === "warning",
-      ),
+test("Claude model fallback flushes text, warns, then reports the fallback model", async () => {
+  const notice = (fields: Record<string, unknown>) =>
+    ({
+      type: "system",
+      uuid: randomUUID(),
+      original_model: "claude-haiku-4-5",
+      fallback_model: "claude-sonnet-4-5",
+      session_id: "claude-session",
+      ...fields,
+    }) as unknown as SDKMessage;
+  const content = "Switched to Sonnet 4.5 due to high demand for Haiku 4.5";
+  const refusal = { subtype: "model_refusal_fallback", trigger: "refusal" };
+  const cases: [Record<string, unknown>, string | undefined][] = [
+    // Captured from the Claude CLI; the SDK types omit this frame.
+    [{ subtype: "model_fallback", trigger: "overloaded", content }, content],
     [
-      { type: "session_info", id: "claude-session", model: "claude-haiku-4-5" },
-      {
-        type: "session_info",
-        id: "claude-session",
-        model: "claude-sonnet-4-5",
-      },
-      {
-        type: "warning",
-        message:
-          "Claude fell back from claude-haiku-4-5 to claude-sonnet-4-5 (overloaded)",
-      },
+      { subtype: "model_fallback", content: "" },
+      "Claude fell back from claude-haiku-4-5 to claude-sonnet-4-5",
     ],
-  );
-  assert.equal(run.model, "claude-sonnet-4-5");
-  assert.equal(run.final_text, "from fallback");
+    // A refusal fallback that retracts nothing is a plain model switch.
+    [{ ...refusal, content }, content],
+    [{ ...refusal, content, retracted_message_uuids: [] }, content],
+    // A local fallback served only a subagent or side request.
+    [{ ...refusal, content, scope: "local" }, undefined],
+  ];
+  for (const [fields, warning] of cases) {
+    const run = await harness([
+      init("claude-haiku-4-5"),
+      assistant([textBlock("before")], {}, { id: "m1" }),
+      notice(fields),
+      assistant([textBlock("after")], {}, { id: "m2" }),
+      result({ result: "after" }),
+    ]).agent.run("fallback");
+    const session = (model: string) => ({
+      type: "session_info",
+      id: "claude-session",
+      model,
+    });
+    assert.deepEqual(
+      run.events
+        .map((env) => env.event)
+        .filter((event) =>
+          ["session_info", "warning", "text"].includes(event.type),
+        ),
+      [
+        session("claude-haiku-4-5"),
+        { type: "text", text: "before" },
+        ...(warning
+          ? [
+              { type: "warning", message: warning },
+              session("claude-sonnet-4-5"),
+            ]
+          : []),
+        { type: "text", text: "after" },
+      ],
+      JSON.stringify(fields),
+    );
+    assert.equal(run.model, warning ? "claude-sonnet-4-5" : "claude-haiku-4-5");
+    assert.equal(run.status, "success");
+  }
 });
 test("Claude rate limit events become warnings", async () => {
   const run = await harness([
