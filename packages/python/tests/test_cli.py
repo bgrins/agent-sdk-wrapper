@@ -442,13 +442,31 @@ def test_stream_rejects_json_output(monkeypatch, capsys):
     assert "--stream cannot be combined with --output json" in captured.err
 
 
+_MCP = '[[mcp_servers]]\nname = "s"\ncommand = "c"\n'
+
+
 @pytest.mark.parametrize(
     ("line", "message"),
     [
-        ('timeout = "30"', "timeout must be a positive number of seconds"),
-        ('max_turns = "3"', "max_turns must be a positive integer"),
-        ("model = 5", "model must be a string"),
-        ("output = 1", "config field output must be one of"),
+        ('timeout = "30"', "timeout: Input should be a valid number"),
+        ('max_turns = "3"', "max_turns: Input should be a valid integer"),
+        ("model = 5", "model: Input should be a valid string"),
+        ("cwd = 5", "cwd must be str | Path | None"),
+        ("output = 1", "output: Input should be 'jsonl', 'text' or 'json'"),
+        ('output = ["json"]', "output: Input should be 'jsonl', 'text' or 'json'"),
+        ('web_tools = "false"', "web_tools: Input should be a valid boolean"),
+        ('include_raw = "false"', "include_raw: Input should be a valid boolean"),
+        ('disallowed_tools = "Bash"', "disallowed_tools: 'str' instances are not allowed"),
+        ("env = { KEY = 1 }", "env.KEY: Input should be a valid string"),
+        ('[mcp_servers.s]\ncommand = "c"', "mcp_servers: Input should be a valid list"),
+        (f'{_MCP}disabled_tools = "x"', "mcp_servers[0].disabled_tools: Input should be a valid"),
+        (f'{_MCP}enabled = "false"', "mcp_servers[0].enabled: Input should be a valid boolean"),
+        (f'{_MCP}args = "--flag"', "mcp_servers[0].args: Input should be a valid list"),
+        (f'{_MCP}tool_approval_modes = "approve"', "tool_approval_modes: Input should be a valid"),
+        (
+            '[subagents.r]\ndescription = "d"\nprompt = "p"\ntools = "Read"',
+            "subagents.r.tools: Input should be a valid list",
+        ),
     ],
 )
 def test_run_rejects_mistyped_config_values(monkeypatch, tmp_path, capsys, line, message):

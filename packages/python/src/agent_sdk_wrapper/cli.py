@@ -7,10 +7,13 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_type_hints
+
+from pydantic import TypeAdapter, ValidationError
 
 from . import (
     Agent,
@@ -184,8 +187,6 @@ def _read_prompt(args: argparse.Namespace, config: dict[str, Any]) -> str:
     if "prompt" in config and "prompt_file" in config:
         raise ConfigError("config may contain only one of prompt or prompt_file")
     if "prompt" in config:
-        if not isinstance(config["prompt"], str):
-            raise ConfigError("config field prompt must be a string")
         return config["prompt"]
     if "prompt_file" in config:
         return _read_prompt_file(config["prompt_file"])
@@ -216,10 +217,6 @@ async def _run(args: argparse.Namespace) -> int:
     prompt = _read_prompt(args, config)
     stream = args.stream or config.get("stream", False)
     output = args.output or config.get("output") or ("text" if stream else "jsonl")
-    if not isinstance(stream, bool):
-        raise ConfigError("config field stream must be a boolean")
-    if output not in _OUTPUTS:
-        raise ConfigError("config field output must be one of: jsonl, text, json")
     if stream and output != "text":
         raise ConfigError(f"--stream cannot be combined with --output {output}")
     if args.no_builtin_tools and args.builtin_tool:
@@ -244,11 +241,11 @@ async def _run(args: argparse.Namespace) -> int:
         "trace_file": args.trace_file,
         "artifacts_dir": args.artifacts_dir,
     }
-    agent_kwargs = {key: value for key, value in config.items() if key not in _CLI_KEYS}
+    agent_kwargs = {key: value for key, value in config.items() if key not in _CLI_HINTS}
     agent_kwargs.update({key: value for key, value in flags.items() if value is not None})
     try:
         agent_kwargs["env"] = {
-            **agent_kwargs.get("env", {}),
+            **(agent_kwargs.get("env") or {}),
             **_parse_env_assignments(args.env or []),
         }
         for key, flag, values in (
@@ -256,7 +253,7 @@ async def _run(args: argparse.Namespace) -> int:
             ("extra_options", "--extra-option", args.extra_option),
         ):
             agent_kwargs[key] = _deep_merge(
-                agent_kwargs.get(key, {}), _parse_json_assignments(values or [], flag=flag)
+                agent_kwargs.get(key) or {}, _parse_json_assignments(values or [], flag=flag)
             )
         agent = Agent(**agent_kwargs)
     except (TypeError, ValueError, AttributeError) as exc:
@@ -315,8 +312,12 @@ def _stream_event_failed(event: object) -> bool:
     return isinstance(event, RunFinished) and event.status != RunStatus.SUCCESS
 
 
-_OUTPUTS = {"jsonl", "text", "json"}
-_CLI_KEYS = frozenset({"prompt", "prompt_file", "output", "stream"})
+_CLI_HINTS: dict[str, Any] = {
+    "prompt": str,
+    "prompt_file": str,
+    "output": Literal["jsonl", "text", "json"],
+    "stream": bool,
+}
 # A config file sets these Agent keywords. Tools, schemas and callbacks need Python
 # objects, and one prompt per process leaves nothing to continue.
 _AGENT_KEYS = frozenset(inspect.signature(Agent).parameters) - {
@@ -325,6 +326,13 @@ _AGENT_KEYS = frozenset(inspect.signature(Agent).parameters) - {
     "on_event",
     "on_provider_event",
     "continue_session",
+}
+_CONFIG_HINTS: dict[str, Any] = {
+    **{key: hint for key, hint in get_type_hints(Agent.__init__).items() if key in _AGENT_KEYS},
+    **_CLI_HINTS,
+    # Entries are checked against their dataclass's fields.
+    "mcp_servers": list[dict[str, Any]] | None,
+    "subagents": dict[str, dict[str, Any]] | None,
 }
 _PATH_KEYS = ("cwd", "trace_file", "artifacts_dir", "prompt_file")
 
@@ -343,44 +351,70 @@ def _load_cli_config(path: Path | None) -> dict[str, Any]:
         raise ConfigError(f"could not parse config file {path}: {exc}") from exc
     if not isinstance(config, dict):
         raise ConfigError("config file must contain an object/table")
-    unknown = sorted(set(config) - _CLI_KEYS - _AGENT_KEYS)
+    unknown = sorted(set(config) - set(_CONFIG_HINTS))
     if unknown:
         raise ConfigError(f"unknown config field(s): {', '.join(unknown)}")
+    _check_types(config, _CONFIG_HINTS)
 
     # Relative paths are relative to the config file.
     base = path.resolve().parent
     for key in _PATH_KEYS:
-        if key in config:
-            config[key] = _config_path(config[key], base, key)
+        if config.get(key) is not None:
+            config[key] = base / config[key]
     try:
-        if "mcp_servers" in config:
+        if config.get("mcp_servers") is not None:
             config["mcp_servers"] = [
-                _mcp_server(dict(raw), base) for raw in config["mcp_servers"]
+                _mcp_server(dict(raw), base, f"mcp_servers[{index}].")
+                for index, raw in enumerate(config["mcp_servers"])
             ]
-        if "subagents" in config:
+        if config.get("subagents") is not None:
             config["subagents"] = {
-                name: SubagentDef(**spec) for name, spec in config["subagents"].items()
+                name: _dataclass(SubagentDef, spec, f"subagents.{name}.")
+                for name, spec in config["subagents"].items()
             }
     except (TypeError, ValueError, AttributeError) as exc:
         raise ConfigError(f"invalid config: {exc}") from exc
     return config
 
 
-def _config_path(value: Any, base: Path, field: str) -> Path:
-    if not isinstance(value, str):
-        raise ConfigError(f"config field {field} must be a string path")
-    return base / value
-
-
-def _mcp_server(raw: dict[str, Any], base: Path) -> McpServer:
+def _mcp_server(raw: dict[str, Any], base: Path, where: str) -> McpServer:
     server_type = raw.pop("type", "http" if "url" in raw else "stdio")
-    if "cwd" in raw:
-        raw["cwd"] = _config_path(raw["cwd"], base, "mcp_servers.cwd")
-    if server_type == "stdio":
-        return McpStdioServer(**raw)
-    if server_type == "http":
-        return McpHttpServer(**raw)
-    raise ConfigError("mcp_servers type must be 'stdio' or 'http'")
+    if server_type not in ("stdio", "http"):
+        raise ConfigError("mcp_servers type must be 'stdio' or 'http'")
+    cls = McpStdioServer if server_type == "stdio" else McpHttpServer
+    server = _dataclass(cls, raw, where)
+    if isinstance(server, McpStdioServer) and server.cwd is not None:
+        server.cwd = base / server.cwd
+    return server
+
+
+def _dataclass[T](cls: type[T], raw: dict[str, Any], where: str) -> T:
+    hints = get_type_hints(cls)
+    _check_types({key: value for key, value in raw.items() if key in hints}, hints, where)
+    return cls(**raw)
+
+
+def _check_types(values: dict[str, Any], hints: dict[str, Any], where: str = "") -> None:
+    """Reject values that don't match their hint exactly; Agent would read "false" as true."""
+
+    for key, value in values.items():
+        try:
+            TypeAdapter(hints[key]).validate_python(value, strict=True)
+        except ValidationError as exc:
+            errors = exc.errors()
+            if len(errors) > 1:  # one per member of a union
+                raise ConfigError(
+                    f"config field {where}{key} must be {_type_name(hints[key])}"
+                ) from None
+            loc = "".join(f"[{part}]" if isinstance(part, int) else f".{part}"
+                          for part in errors[0]["loc"])
+            raise ConfigError(f"config field {where}{key}{loc}: {errors[0]['msg']}") from None
+
+
+def _type_name(hint: Any) -> str:
+    if isinstance(hint, type):
+        return hint.__name__
+    return re.sub(r"\b[a-z_][\w.]*\.(?=[A-Z])", "", str(hint))
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
