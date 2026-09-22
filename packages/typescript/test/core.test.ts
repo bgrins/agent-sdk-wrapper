@@ -55,8 +55,15 @@ test("provider aliases, inference, model prefixes and conflicting selections", (
     provider: "openai",
     model: "gpt-test",
   });
+  // Blank values mean omitted, as with an empty environment variable.
+  assert.deepEqual(resolveProvider(" ", "claude-test"), {
+    provider: "anthropic",
+    model: "claude-test",
+  });
+  assert.deepEqual(resolveProvider("codex", " "), { provider: "openai" });
   for (const [provider, model] of [
     [undefined, undefined],
+    ["", ""],
     ["bad", undefined],
     [undefined, "unknown"],
     ["anthropic", "codex:gpt-test"],

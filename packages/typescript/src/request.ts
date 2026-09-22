@@ -97,9 +97,11 @@ export function resolveProvider(
 ): { provider: Provider; model?: string } {
   if (provider !== undefined && typeof provider !== "string")
     throw new ConfigError("provider must be a string");
-  if (model !== undefined && (typeof model !== "string" || !model.trim()))
-    throw new ConfigError("model must be a non-empty string");
-  let name = model?.trim();
+  if (model !== undefined && typeof model !== "string")
+    throw new ConfigError("model must be a string");
+  // Blank values mean omitted, as with an empty environment variable.
+  if (!provider?.trim()) provider = undefined;
+  let name = model?.trim() || undefined;
   // Bedrock IDs, ARNs and fine-tune names contain colons; only a provider name is a prefix.
   const colon = name?.indexOf(":") ?? -1;
   const prefix =
@@ -197,7 +199,8 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
     );
   return {
     ...input,
-    ...resolved,
+    provider: resolved.provider,
+    model: resolved.model,
     continueSession: input.continueSession ?? false,
     includeRaw: input.includeRaw ?? false,
     cliLogin: input.cliLogin ?? "deny",
