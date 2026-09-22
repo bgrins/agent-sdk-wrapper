@@ -441,13 +441,15 @@ class AnthropicProvider(ProviderAdapter):
                             retracted = True
                             pending.flush()
                             continue
+                        # A local fallback served only an omitted subagent or side request.
+                        switch = fallback and message.data.get("scope") != "local"
                         # Text before a fallback came from the original model.
-                        if fallback or not pending.continues(message):
+                        if switch or not pending.continues(message):
                             text = pending.flush()
                             if text is not None:
                                 seen_text = True
                                 yield text
-                        if fallback:
+                        if switch:
                             yield _fallback_warning(message, include_raw=req.include_raw)
                         info = session.update(message)
                         if info is not None:
@@ -653,9 +655,8 @@ def _retracts_output(message: SystemMessage) -> bool:
 
 def _fallback_warning(message: SystemMessage, *, include_raw: bool) -> WarningEvent:
     data = message.data
-    text = data.get("content") or (
-        f"Claude fell back from {data.get('original_model')} to {data.get('fallback_model')}"
-    )
+    source = f" from {data['original_model']}" if data.get("original_model") else ""
+    text = data.get("content") or f"Claude fell back{source} to {data.get('fallback_model')}"
     return WarningEvent(message=text, raw=_raw(message) if include_raw else None)
 
 

@@ -1162,7 +1162,7 @@ def test_anthropic_model_fallback_reports_text_then_warning_then_serving_model(
     ]
 
 
-def test_anthropic_local_fallback_keeps_the_session_model(monkeypatch):
+def test_anthropic_local_fallback_is_ignored(monkeypatch):
     from claude_agent_sdk import SystemMessage
 
     from agent_sdk_wrapper.events import SessionInfo
@@ -1178,6 +1178,7 @@ def test_anthropic_local_fallback_keeps_the_session_model(monkeypatch):
     assert [event for event in events if isinstance(event, SessionInfo)] == [
         SessionInfo(id="s1", model="claude-haiku-4-5")
     ]
+    assert not [event for event in events if isinstance(event, WarningEvent)]
 
 
 @pytest.mark.parametrize(
