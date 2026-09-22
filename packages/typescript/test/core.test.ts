@@ -269,6 +269,20 @@ test("constructor session ID is available before the first run", async () => {
   assert.equal(agent.sessionId, "saved");
   assert.equal((await agent.run("resume")).session_id, "saved");
 });
+test("continueSession follows the latest session after a constructor session ID", async () => {
+  const resumed: (string | undefined)[] = [];
+  const agent = new Agent(
+    { provider: "codex", sessionId: "A", continueSession: true },
+    {
+      openai: fake(async function* (req) {
+        resumed.push(req.sessionId);
+        yield { type: "session_info", id: `S${resumed.length}` };
+      }),
+    },
+  );
+  for (let run = 0; run < 3; run++) await agent.run("next");
+  assert.deepEqual(resumed, ["A", "S1", "S2"]);
+});
 test("a thrown ProviderError ends the run with its type", async () => {
   const agent = new Agent(
     { provider: "codex" },

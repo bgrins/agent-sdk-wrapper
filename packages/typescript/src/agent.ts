@@ -67,8 +67,9 @@ export class Agent {
   }
   private request(input: RunRequest): [ResolvedRequest, ProviderAdapter] {
     const req = resolveRequest({ ...this.defaults, ...input });
-    if (!req.sessionId && req.continueSession)
-      req.sessionId = this.sessions.get(req.provider);
+    // A per-call sessionId wins; a constructor one gives way to the latest reported session.
+    if (req.continueSession && input.sessionId === undefined)
+      req.sessionId = this.sessions.get(req.provider) ?? req.sessionId;
     const adapter = this.adapters[req.provider] ?? buildProvider(req.provider);
     this.adapters[req.provider] = adapter;
     if (adapter.name !== req.provider)
