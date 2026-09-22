@@ -65,18 +65,10 @@ def summarize(env: EventEnvelope) -> str:
 
 
 class TraceWriter:
-    """Writes every event to a JSONL file and the stdlib logger.
+    """Writes every event to a JSONL file and the stdlib logger. Call :meth:`close` when done."""
 
-    Use as a context manager or call :meth:`close` when done.
-    """
-
-    def __init__(
-        self,
-        trace_file: str | Path | None = None,
-        *,
-        logger: logging.Logger | None = None,
-    ) -> None:
-        self._logger = logger or get_logger()
+    def __init__(self, trace_file: str | Path | None = None) -> None:
+        self._logger = get_logger()
         self._fh: TextIO | None = None
         self._path = Path(trace_file) if trace_file else None
         if self._path is not None:
@@ -95,9 +87,3 @@ class TraceWriter:
         if self._fh is not None:
             self._fh.close()
             self._fh = None
-
-    def __enter__(self) -> TraceWriter:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()

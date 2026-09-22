@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import math
 import os
 import time
@@ -56,36 +57,6 @@ from .request import (
     resolve_provider,
 )
 from .tools import ANTHROPIC_TOOL_SERVER, CODEX_TOOL_SERVER
-
-_ALLOWED_OVERRIDES = frozenset({
-    "allowed_tools",
-    "cli_login",
-    "artifacts_dir",
-    "builtin_tools",
-    "continue_session",
-    "cwd",
-    "disallowed_tools",
-    "effort",
-    "env",
-    "extra_options",
-    "include_events_in_result",
-    "include_raw",
-    "max_turns",
-    "mcp_servers",
-    "model",
-    "on_event",
-    "on_provider_event",
-    "output_schema",
-    "permission_mode",
-    "session_id",
-    "setting_sources",
-    "subagents",
-    "system_prompt",
-    "timeout",
-    "tools",
-    "trace_file",
-    "web_tools",
-})
 
 _ENDED_REASONS = {
     "max_turns": RunEndedReason.MAX_TURNS,
@@ -477,6 +448,13 @@ class Agent:
                         error_type=error_type,
                         extra_files=collect_side_files(artifacts_dir),
                     )
+
+
+# The provider and its adapter options are fixed per Agent.
+_ALLOWED_OVERRIDES = frozenset(inspect.signature(Agent).parameters) - {
+    "provider",
+    "provider_options",
+}
 
 
 class _SeqGen:
