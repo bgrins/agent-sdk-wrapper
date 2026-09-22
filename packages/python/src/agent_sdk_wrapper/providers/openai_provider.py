@@ -84,18 +84,6 @@ _COMMAND_KEY_POLICY_KEYS = frozenset(
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
-# Notifications that show the model responded, unless their item is the turn's input.
-_MODEL_OUTPUT_METHODS = frozenset(
-    {
-        "item/started",
-        "item/completed",
-        "item/agentMessage/delta",
-        "item/reasoning/textDelta",
-        "item/reasoning/summaryTextDelta",
-        "turn/plan/updated",
-    }
-)
-_INPUT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt"})
 _WRAPPER_TOOL_TIMEOUT_SEC = 600
 
 
@@ -434,8 +422,7 @@ async def _stream_turn(
     text_delta_parts: dict[str | None, list[str]] = {}
     thinking_delta_parts: dict[str | None, list[str]] = {}
     texts: list[str] = []
-    usage = _TurnUsage()
-    model_output = False
+    usage = _TurnUsage(resumed=bool(req.session_id))
     reasoned = False
     started_calls: set[str] = set()
     latest_plan: list[Any] | None = None
@@ -449,10 +436,7 @@ async def _stream_turn(
                 yield warning
         method = getattr(event, "method", "")
         payload = getattr(event, "payload", None)
-        if method in _MODEL_OUTPUT_METHODS:
-            item = getattr(payload, "item", None)
-            item_type = getattr(getattr(item, "root", item), "type", None)
-            model_output = model_output or item_type not in _INPUT_ITEM_TYPES
+        usage.observe(method)
         if method == "item/agentMessage/delta":
             delta = getattr(payload, "delta", "") or ""
             if delta:
@@ -529,7 +513,7 @@ async def _stream_turn(
             continue
 
         if method == "thread/tokenUsage/updated":
-            usage.add(payload.token_usage, after_output=model_output)
+            usage.add(payload.token_usage)
             continue
 
         if method == "model/rerouted":
@@ -727,28 +711,47 @@ class _TurnUsage:
 
     An update that changes ``total`` reports one request, whose usage is ``last``,
     so resumed history is excluded without state kept across runs. Codex repeats the
-    unchanged usage when a request fails and reports an exhausted context window
-    with an empty ``last``; neither is a request. With no earlier total to compare,
-    a repeat can open a resumed turn, so the first update counts only after the
-    model produced output.
+    unchanged usage before the ``error`` notification of a failed request, and reports
+    an exhausted context window with an empty ``last``; neither is a request. A resumed
+    thread's first update has no earlier total to compare, so it waits for the next
+    notification: an error shows it was a repeat.
     """
 
+    resumed: bool
     usage: dict[str, int] = dataclasses.field(default_factory=dict)
     requests: int = 0
     total: dict[str, int] | None = None
+    first: dict[str, int] | None = None
     raw: dict[str, Any] | None = None
 
-    def add(self, token_usage: Any, *, after_output: bool) -> None:
+    def add(self, token_usage: Any) -> None:
         total = _usage_breakdown(token_usage.total)
         last = _usage_breakdown(token_usage.last)
         if not last["total_tokens"]:
             return
-        if total != self.total and (self.total is not None or after_output):
-            for key, value in last.items():
-                self.usage[key] = self.usage.get(key, 0) + value
-            self.requests += 1
+        self._settle(counts=True)
+        if self.total is None and self.resumed:
+            self.first = last
+        elif total != self.total:
+            self._count(last)
         self.total = total
         self.raw = _raw(token_usage)
+
+    def observe(self, method: str) -> None:
+        """Settle a waiting first update by the method of a notification after it."""
+
+        if method != "thread/tokenUsage/updated":
+            self._settle(counts=method != "error")
+
+    def _settle(self, *, counts: bool) -> None:
+        if self.first is not None and counts:
+            self._count(self.first)
+        self.first = None
+
+    def _count(self, last: dict[str, int]) -> None:
+        for key, value in last.items():
+            self.usage[key] = self.usage.get(key, 0) + value
+        self.requests += 1
 
     def event(self, include_raw: bool) -> Usage | None:
         if not self.requests:

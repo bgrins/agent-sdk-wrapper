@@ -1525,6 +1525,106 @@ async def test_codex_usage_ignores_repeated_totals_and_a_full_context_window():
     assert usage == TokenUsage(input_tokens=200, output_tokens=20, total_tokens=220, requests=1)
 
 
+_SERVER_ERROR = {"message": "stream disconnected before completion", "codexErrorInfo": "other"}
+
+
+def _message(text: str) -> SimpleNamespace:
+    item = SimpleNamespace(root=SimpleNamespace(type="agentMessage", text=text))
+    return SimpleNamespace(method="item/completed", payload=SimpleNamespace(item=item))
+
+
+def _retry_error(will_retry: bool = True) -> Any:
+    payload = {"error": _SERVER_ERROR, "threadId": "t", "turnId": "u", "willRetry": will_retry}
+    return notification("error", payload)
+
+
+# Sequences seen from Codex 0.154 against the mock; a resumed thread's earlier total is 100/10.
+@pytest.mark.parametrize(
+    ("session_id", "events", "expected"),
+    [
+        pytest.param(
+            None,
+            [
+                token_usage(usage_breakdown(200, 20)),
+                _message("done"),
+                token_usage(usage_breakdown(300, 30), usage_breakdown(500, 50)),
+                turn_completed(),
+            ],
+            (2, 500, 50),
+            id="first request without an item",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(200, 20), usage_breakdown(300, 30)),
+                _message("done"),
+                token_usage(usage_breakdown(300, 30), usage_breakdown(600, 60)),
+                turn_completed(),
+            ],
+            (2, 500, 50),
+            id="resumed, first request without an item",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(100, 10)),
+                _retry_error(),
+                _message("done"),
+                token_usage(usage_breakdown(600, 60), usage_breakdown(700, 70)),
+                turn_completed(),
+            ],
+            (1, 600, 60),
+            id="resumed, first attempt failed",
+        ),
+        pytest.param(
+            "t",
+            [
+                _message("partial"),
+                token_usage(usage_breakdown(100, 10)),
+                _retry_error(will_retry=False),
+                failed_turn(_SERVER_ERROR),
+            ],
+            None,
+            id="resumed, failed after text",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(100, 10)),
+                token_usage(usage_breakdown(0, 0)),
+                _retry_error(will_retry=False),
+                failed_turn(_SERVER_ERROR),
+            ],
+            None,
+            id="resumed, context window exhausted",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(700, 70), usage_breakdown(800, 80)),
+                token_usage(usage_breakdown(700, 70), usage_breakdown(800, 80)),
+                _retry_error(will_retry=False),
+                failed_turn(_SERVER_ERROR),
+            ],
+            (1, 700, 70),
+            id="resumed, second request failed",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_usage_counts_each_completed_request(session_id, events, expected):
+    req = RunRequest(provider="openai", prompt="ignored", session_id=session_id)
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    usage = [event.usage for event in out if isinstance(event, Usage)]
+    if expected is None:
+        assert usage == []
+    else:
+        [total] = usage
+        assert (total.requests, total.input_tokens, total.output_tokens) == expected
+
+
 @pytest.mark.asyncio
 async def test_codex_failed_turn_yields_one_classified_error():
     req = RunRequest(provider="openai", prompt="ignored")

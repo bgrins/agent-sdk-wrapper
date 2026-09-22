@@ -485,21 +485,24 @@ async def test_turns_of_a_continued_thread_report_only_their_own_requests(mock_a
     agent = codex_agent(
         mock_api, cwd, "model_providers.mock.stream_max_retries=1", continue_session=True
     )
+    # A tool search's request streams no item before its usage.
+    searched = [{"tool_search": "anything", "usage": (200, 20)}, {"text": "ok", "usage": (100, 10)}]
     usages = []
     for plan in (
-        [{"text": "one", "usage": (100, 10)}],
+        searched,
         [failed, {"text": "two", "usage": (300, 30)}],
+        searched,
+        [{"text": "partial", **failed}],
         [failed],
     ):
         mock_api.set_steps(plan)
         mock_api.requests.clear()
         usages.append((await agent.run("hi")).usage)
 
-    assert usages == [
-        TokenUsage(input_tokens=100, output_tokens=10, total_tokens=110, requests=1),
-        TokenUsage(input_tokens=300, output_tokens=30, total_tokens=330, requests=1),
-        None,
-    ]
+    def usage(requests: int) -> TokenUsage:
+        return TokenUsage(input_tokens=300, output_tokens=30, total_tokens=330, requests=requests)
+
+    assert usages == [usage(2), usage(1), usage(2), None, None]
 
 
 async def test_reasoning_tokens_without_a_reasoning_item_yield_empty_thinking(mock_api, cwd):
