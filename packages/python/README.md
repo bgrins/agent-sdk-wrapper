@@ -80,6 +80,7 @@ error's type, from the [shared vocabulary](../typescript/PARITY.md#error-types).
 | Subagents | Native definitions; background tasks disabled | Native multi-agent config; per-subagent tools/turn limits rejected |
 | `max_turns` | Native turn limit | Unsupported; Codex has no turn limit |
 | Built-in tool filtering | Native controls | Unsupported; `web_tools` sets the `web_search` mode |
+| `allowed_tools`, `disallowed_tools` | Native permission rules | Unsupported; pass only the callable tools you want and filter MCP tools with `enabled_tools`/`disabled_tools` |
 
 Tool names must be unique and match `[A-Za-z0-9_-]{1,64}`. Both providers validate
 arguments with the same schema, pass a `**kwargs` tool the arguments it doesn't name and

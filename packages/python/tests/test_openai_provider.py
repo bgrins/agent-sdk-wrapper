@@ -863,114 +863,10 @@ def test_codex_accepts_sdk_native_options():
     assert turn_options["approval_mode"] is ApprovalMode.deny_all
 
 
-def test_codex_filters_require_wrapper_managed_tools():
-    req = RunRequest(provider="openai", prompt="ignored", allowed_tools=["Read"])
-
-    with pytest.raises(ConfigError, match="without callable tools or MCP servers"):
-        _validate_supported(req)
-
-
 def test_codex_rejects_max_turns():
     req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
 
     with pytest.raises(ConfigError, match="max_turns. Codex has no turn limit"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_native_builtins_even_with_mcp_server():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["command"],
-        mcp_servers=[McpStdioServer(name="repo", command="repo-mcp")],
-    )
-
-    with pytest.raises(ConfigError, match="Codex native tool filters: command"):
-        _validate_supported(req)
-
-
-def test_codex_filters_allow_qualified_tool_named_like_native_builtin():
-    def command(value: str) -> str:
-        return value
-
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        tools=[command],
-        allowed_tools=["agent_sdk_wrapper_tools.command", "repo.command"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["command"],
-            )
-        ],
-    )
-
-    _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_wrapper_server():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["missing.search"],
-        mcp_servers=[McpStdioServer(name="repo", command="repo-mcp")],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: missing.search"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_callable_tool_when_mcp_also_present():
-    def add(a: int, b: int) -> int:
-        return a + b
-
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        tools=[add],
-        allowed_tools=["agent_sdk_wrapper_tools.subtract"],
-        mcp_servers=[McpStdioServer(name="repo", command="repo-mcp")],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: agent_sdk_wrapper_tools.subtract"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_external_mcp_tool_when_known():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["repo.write_file"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["read_file", "grep_files"],
-            )
-        ],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: repo.write_file"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_unqualified_tool_when_all_tools_known():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["write_file"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["read_file", "grep_files"],
-            )
-        ],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: write_file"):
         _validate_supported(req)
 
 
@@ -1218,57 +1114,6 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         )
         assert 'mcp_servers.remote.bearer_token_env_var="REMOTE_BEARER"' in overrides
         assert 'mcp_servers.remote.disabled_tools=["expensive"]' in overrides
-
-
-def test_runtime_config_applies_codex_tool_filters(tmp_path):
-    def add(a: int, b: int) -> int:
-        """Add two integers."""
-        return a + b
-
-    def multiply(a: int, b: int) -> int:
-        """Multiply two integers."""
-        return a * b
-
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        tools=[add, multiply],
-        allowed_tools=["agent_sdk_wrapper_tools.add"],
-        disallowed_tools=["mcp__agent_sdk_wrapper_tools__multiply"],
-        cwd=tmp_path,
-    )
-
-    with _runtime_config(req) as config_overrides:
-        overrides = set(config_overrides)
-        assert 'mcp_servers.agent_sdk_wrapper_tools.enabled_tools=["add"]' in overrides
-        assert 'mcp_servers.agent_sdk_wrapper_tools.disabled_tools=["multiply"]' in overrides
-
-
-def test_runtime_config_targets_one_external_mcp_server_among_many():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["repo.read_file"],
-        disallowed_tools=["bugs.search_bugs"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["read_file", "grep_files"],
-            ),
-            McpStdioServer(
-                name="bugs",
-                command="bugs-mcp",
-                enabled_tools=["search_bugs"],
-            ),
-        ],
-    )
-
-    with _runtime_config(req) as config_overrides:
-        overrides = set(config_overrides)
-        assert 'mcp_servers.repo.enabled_tools=["read_file"]' in overrides
-        assert 'mcp_servers.bugs.enabled_tools=[]' in overrides
-        assert 'mcp_servers.bugs.disabled_tools=["search_bugs"]' in overrides
 
 
 class OptionalAnswer(BaseModel):

@@ -56,9 +56,9 @@ def test_auditor_style_run_stage_applies_stage_settings(monkeypatch, tmp_path: P
     assert verifier_req.system_prompt == module.STAGE_SYSTEM_PROMPTS["verifier"]
     assert verifier_req.max_turns == module.MAX_TURNS_BY_STAGE["verifier"]
     assert verifier_req.output_schema is module.WorkflowPlan
-    assert verifier_req.allowed_tools == module.ALLOWED_MCP_TOOLS
+    assert [server.enabled_tools for server in verifier_req.mcp_servers] == [module.MCP_TOOLS]
     assert planner_req.system_prompt == module.STAGE_SYSTEM_PROMPTS["planner"]
-    assert (planner_req.allowed_tools, planner_req.mcp_servers) == ([], [])
+    assert planner_req.mcp_servers == []
     assert recorder.stage_statuses == {"verifier": "success", "planner": "success"}
 
 

@@ -61,14 +61,6 @@ from ..tools import (
 )
 from .base import ProviderAdapter
 
-_CODEX_NATIVE_TOOL_FILTER_NAMES = {
-    "agent",
-    "command",
-    "file_change",
-    "image_generation",
-    "view_image",
-    "web_search",
-}
 _ACCESS_TOKEN_ENV = "CODEX_ACCESS_TOKEN"
 _API_KEY_ENV = "OPENAI_API_KEY"
 _API_KEY_ENVS = (_API_KEY_ENV, "CODEX_API_KEY")
@@ -679,9 +671,7 @@ def _validate_supported(req: RunRequest) -> None:
         _tool_entry(fn)
     if req.output_schema is not None:
         _codex_output_schema(req.output_schema)
-    _mcp_config_overrides(
-        req.mcp_servers, allowed_tools=req.allowed_tools, disallowed_tools=req.disallowed_tools
-    )
+    _mcp_config_overrides(req.mcp_servers)
     for name, subagent in req.subagents.items():
         _validate_config_key_part(name)
         _toml_literal([subagent.description, subagent.prompt, subagent.model or ""])
@@ -697,22 +687,11 @@ def _validate_supported(req: RunRequest) -> None:
         unsupported.append("permission_mode")
     if req.setting_sources is not None:
         unsupported.append("setting_sources")
-    if (req.allowed_tools or req.disallowed_tools) and not (req.tools or req.mcp_servers):
-        unsupported.append("allowed_tools/disallowed_tools without callable tools or MCP servers")
     if req.allowed_tools or req.disallowed_tools:
-        unsupported_filters = _unsupported_tool_filters(req)
-        if unsupported_filters.non_wrapper:
-            unsupported.append(
-                "Codex tool filters for non-wrapper tools: "
-                + ", ".join(sorted(unsupported_filters.non_wrapper))
-            )
-        if unsupported_filters.native:
-            unsupported.append(
-                "Codex native tool filters: "
-                + ", ".join(sorted(unsupported_filters.native))
-                + ". Codex built-in tools are not controlled by agent-sdk-wrapper "
-                "allowed_tools/disallowed_tools"
-            )
+        unsupported.append(
+            "allowed_tools/disallowed_tools. Pass only the callable tools you want, and "
+            "filter MCP server tools with enabled_tools/disabled_tools"
+        )
     unsupported_subagents = _unsupported_subagent_controls(req.subagents)
     if unsupported_subagents:
         unsupported.extend(unsupported_subagents)
@@ -816,56 +795,6 @@ def _buffer_sort_key(item: tuple[str | None, list[str]]) -> str:
     return "" if key is None else key
 
 
-@dataclasses.dataclass(frozen=True)
-class _UnsupportedToolFilters:
-    non_wrapper: tuple[str, ...] = ()
-    native: tuple[str, ...] = ()
-
-
-def _unsupported_tool_filters(req: RunRequest) -> _UnsupportedToolFilters:
-    if not (req.tools or req.mcp_servers):
-        return _UnsupportedToolFilters()
-
-    filters = (*req.allowed_tools, *req.disallowed_tools)
-    managed_servers = {server.name for server in req.mcp_servers}
-    callable_tools = {tool_name(fn) for fn in req.tools}
-    known_tools_by_server = {
-        server.name: set(server.enabled_tools or ())
-        for server in req.mcp_servers
-        if server.enabled_tools is not None
-    }
-    external_tools_fully_known = all(
-        server.enabled_tools is not None for server in req.mcp_servers
-    )
-    if req.tools:
-        managed_servers.add(CODEX_TOOL_SERVER)
-        known_tools_by_server[CODEX_TOOL_SERVER] = callable_tools
-    known_unqualified_tools = {
-        name for tools in known_tools_by_server.values() for name in tools
-    }
-
-    non_wrapper: list[str] = []
-    native: list[str] = []
-    for spec in filters:
-        server, tool = _split_tool_filter(spec)
-        if server is not None and server not in managed_servers:
-            non_wrapper.append(spec)
-            continue
-        if server is not None and tool not in known_tools_by_server.get(server, {tool}):
-            non_wrapper.append(spec)
-            continue
-        if server is None and tool in _CODEX_NATIVE_TOOL_FILTER_NAMES:
-            native.append(spec)
-            continue
-        if (
-            server is None
-            and external_tools_fully_known
-            and tool not in known_unqualified_tools
-        ):
-            non_wrapper.append(spec)
-    return _UnsupportedToolFilters(tuple(set(non_wrapper)), tuple(set(native)))
-
-
 def _unsupported_subagent_controls(subagents: dict[str, Any]) -> list[str]:
     unsupported: list[str] = []
     for name, subagent in subagents.items():
@@ -964,37 +893,16 @@ def _runtime_config(req: RunRequest):
         root = Path(tmp)
         overrides: list[str] = list(web_tools_override)
         if req.tools:
-            overrides.extend(
-                _tool_config_overrides(
-                    req.tools,
-                    root,
-                    req.cwd,
-                    req.env,
-                    allowed_tools=req.allowed_tools,
-                    disallowed_tools=req.disallowed_tools,
-                )
-            )
+            overrides.extend(_tool_config_overrides(req.tools, root, req.cwd, req.env))
         if req.mcp_servers:
-            overrides.extend(
-                _mcp_config_overrides(
-                    req.mcp_servers,
-                    allowed_tools=req.allowed_tools,
-                    disallowed_tools=req.disallowed_tools,
-                )
-            )
+            overrides.extend(_mcp_config_overrides(req.mcp_servers))
         if req.subagents:
             overrides.extend(_subagent_config_overrides(req.subagents, root))
         yield tuple(overrides)
 
 
 def _tool_config_overrides(
-    callables: list[Any],
-    root: Path,
-    cwd: str | Path | None,
-    env: dict[str, str],
-    *,
-    allowed_tools: list[str],
-    disallowed_tools: list[str],
+    callables: list[Any], root: Path, cwd: str | Path | None, env: dict[str, str]
 ) -> list[str]:
     tool_dir = root / "tools"
     tool_dir.mkdir()
@@ -1039,27 +947,6 @@ def _tool_config_overrides(
     if cwd is not None:
         overrides.append(
             _config_override("mcp_servers", CODEX_TOOL_SERVER, "cwd", value=_as_str(cwd))
-        )
-    tool_names = [entry["name"] for entry in manifest["tools"]]
-    enabled_tools = _server_enabled_tools(CODEX_TOOL_SERVER, None, allowed_tools, tool_names)
-    disabled_tools = _server_disabled_tools(CODEX_TOOL_SERVER, [], disallowed_tools, tool_names)
-    if enabled_tools is not None:
-        overrides.append(
-            _config_override(
-                "mcp_servers",
-                CODEX_TOOL_SERVER,
-                "enabled_tools",
-                value=enabled_tools,
-            )
-        )
-    if disabled_tools:
-        overrides.append(
-            _config_override(
-                "mcp_servers",
-                CODEX_TOOL_SERVER,
-                "disabled_tools",
-                value=disabled_tools,
-            )
         )
     return overrides
 
@@ -1285,12 +1172,7 @@ def _tool_server_script() -> str:
     ).lstrip()
 
 
-def _mcp_config_overrides(
-    servers: list[McpServer],
-    *,
-    allowed_tools: list[str],
-    disallowed_tools: list[str],
-) -> list[str]:
+def _mcp_config_overrides(servers: list[McpServer]) -> list[str]:
     overrides: list[str] = []
     for server in servers:
         _validate_config_key_part(server.name)
@@ -1346,7 +1228,7 @@ def _mcp_config_overrides(
                     )
                 )
 
-        for key, value in _common_mcp_config(server, allowed_tools, disallowed_tools).items():
+        for key, value in _common_mcp_config(server).items():
             overrides.append(_config_override("mcp_servers", server.name, key, value=value))
         for tool, mode in server.tool_approval_modes.items():
             overrides.append(
@@ -1362,20 +1244,12 @@ def _mcp_config_overrides(
     return overrides
 
 
-def _common_mcp_config(
-    server: McpServer, allowed_tools: list[str], disallowed_tools: list[str]
-) -> dict[str, Any]:
+def _common_mcp_config(server: McpServer) -> dict[str, Any]:
     config: dict[str, Any] = {}
-    enabled_tools = _server_enabled_tools(
-        server.name, server.enabled_tools, allowed_tools, server.enabled_tools
-    )
-    disabled_tools = _server_disabled_tools(
-        server.name, server.disabled_tools, disallowed_tools, None
-    )
-    if enabled_tools is not None:
-        config["enabled_tools"] = enabled_tools
-    if disabled_tools:
-        config["disabled_tools"] = disabled_tools
+    if server.enabled_tools is not None:
+        config["enabled_tools"] = list(server.enabled_tools)
+    if server.disabled_tools:
+        config["disabled_tools"] = list(server.disabled_tools)
     # Configured servers are trusted, as on Claude, where their tools are pre-approved.
     config["default_tools_approval_mode"] = server.default_tools_approval_mode or "approve"
     for key in (
@@ -1388,59 +1262,6 @@ def _common_mcp_config(
         if value is not None:
             config[key] = value
     return config
-
-
-def _server_enabled_tools(
-    server_name: str,
-    server_enabled_tools: list[str] | None,
-    allowed_tools: list[str],
-    known_tools: list[str] | None,
-) -> list[str] | None:
-    if not allowed_tools:
-        return list(server_enabled_tools) if server_enabled_tools is not None else None
-    applicable = _tool_filter_names(server_name, allowed_tools)
-    if known_tools is not None:
-        applicable = [name for name in applicable if name in known_tools]
-    if server_enabled_tools is None:
-        return applicable
-    allowed = set(applicable)
-    return [name for name in server_enabled_tools if name in allowed]
-
-
-def _server_disabled_tools(
-    server_name: str,
-    server_disabled_tools: list[str],
-    disallowed_tools: list[str],
-    known_tools: list[str] | None,
-) -> list[str]:
-    out = list(server_disabled_tools)
-    for name in _tool_filter_names(server_name, disallowed_tools):
-        if known_tools is not None and name not in known_tools:
-            continue
-        if name not in out:
-            out.append(name)
-    return out
-
-
-def _tool_filter_names(server_name: str, specs: list[str]) -> list[str]:
-    out: list[str] = []
-    for spec in specs:
-        server, tool = _split_tool_filter(spec)
-        if server is None or server == server_name:
-            out.append(tool)
-    return out
-
-
-def _split_tool_filter(spec: str) -> tuple[str | None, str]:
-    if spec.startswith("mcp__"):
-        parts = spec.split("__", 2)
-        if len(parts) == 3 and parts[1] and parts[2]:
-            return parts[1], parts[2]
-    if "." in spec:
-        server, tool = spec.split(".", 1)
-        if server and tool:
-            return server, tool
-    return None, spec
 
 
 def _subagent_config_overrides(subagents: dict[str, Any], root: Path) -> list[str]:

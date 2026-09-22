@@ -127,7 +127,7 @@ def _parser() -> argparse.ArgumentParser:
         "--disallowed-tool",
         action="append",
         default=None,
-        help="Disallow a builtin, callable, or MCP tool where supported. Repeatable.",
+        help="Disallow a tool (anthropic). Repeatable.",
     )
     run.add_argument(
         "--session-id",

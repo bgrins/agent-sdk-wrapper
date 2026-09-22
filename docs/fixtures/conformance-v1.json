@@ -1061,48 +1061,34 @@
     {
       "id": "codex.allowed_tools",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no callable tools or Codex tool filters" },
+      "languages": { "typescript": "unsupported: TypeScript has no top-level tool filters; Claude takes them as options.allowedTools and options.disallowedTools" },
       "options": { "model": "gpt-5.4", "tools": ["add", "shout"], "allowed_tools": ["add"] },
-      "prompt": "Shout, then add.",
-      "mock": [
-        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "hi" } } },
-        { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 1, "b": 2 } } },
-        { "text": "done" }
-      ],
-      "expect": {
-        "status": "success",
-        "tool_calls": ["agent_sdk_wrapper_tools.add"],
-        "requests": { "match": [{ "request": 1, "path": "input.-1.output", "contains": "unsupported call" }] }
-      }
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
     },
     {
       "id": "codex.disallowed_tools",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no callable tools or Codex tool filters" },
+      "languages": { "typescript": "unsupported: TypeScript has no top-level tool filters; Claude takes them as options.allowedTools and options.disallowedTools" },
       "options": { "model": "gpt-5.4", "tools": ["add", "shout"], "disallowed_tools": ["shout"] },
-      "prompt": "Shout.",
-      "mock": [{ "tool": { "name": "mcp__agent_sdk_wrapper_tools__shout", "input": { "text": "hi" } } }, { "text": "done" }],
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.mcp_disabled_tools",
+      "provider": "codex",
+      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement MCP servers yet" } },
+      "options": {
+        "model": "gpt-5.4",
+        "mcp_servers": [{ "name": "brief_tools", "fixture": "simple_mcp_server", "disabled_tools": ["read_brief"], "required": true }]
+      },
+      "prompt": "Use read_brief.",
+      "mock": [{ "tool": { "name": "mcp__brief_tools__read_brief", "input": {} } }, { "text": "done" }],
       "expect": {
         "status": "success",
         "tool_calls": [],
         "requests": { "match": [{ "request": 1, "path": "input.-1.output", "contains": "unsupported call" }] }
       }
-    },
-    {
-      "id": "codex.allowed_tools_without_tools",
-      "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no Codex tool filters" },
-      "options": { "model": "gpt-5.4", "allowed_tools": ["add"] },
-      "prompt": "Say ok.",
-      "expect": { "config_error": true }
-    },
-    {
-      "id": "codex.allowed_tools_native",
-      "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no Codex tool filters" },
-      "options": { "model": "gpt-5.4", "tools": ["add"], "disallowed_tools": ["web_search"] },
-      "prompt": "Say ok.",
-      "expect": { "config_error": true }
     },
     {
       "id": "codex.web_tools_off",
@@ -1147,7 +1133,7 @@
     {
       "id": "codex.mcp_servers",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript has no MCP servers or Codex tool filters" },
+      "languages": { "typescript": "unsupported: TypeScript has no MCP servers" },
       "options": {
         "model": "gpt-5.4",
         "mcp_servers": [
@@ -1159,7 +1145,6 @@
             "required": true
           }
         ],
-        "allowed_tools": ["mcp__brief_tools__read_brief"],
         "system_prompt": "Use the read_brief MCP tool when asked to inspect a brief; find it with tool search if it is not listed. Never use the shell."
       },
       "prompt": "Use read_brief, then reply with LIVE_MCP_OK.",
