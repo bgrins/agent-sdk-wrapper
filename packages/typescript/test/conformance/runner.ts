@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   Agent,
   type AgentDefaults,
@@ -18,13 +19,14 @@ import {
   RuntimeUnavailableError,
 } from "../../src/index.js";
 import { type Recorded, type Step, startMock } from "./mock.js";
+import { schemaErrors } from "./schema.js";
 
 // Runs docs/fixtures/conformance-v1.json against the real runtimes; the format
-// is in docs/fixtures/CONFORMANCE.md.
+// is in docs/fixtures/CONFORMANCE.md and conformance-v1.schema.json.
 type Options = Record<string, unknown>;
 type CaseProvider = "anthropic" | "codex";
 type Mode = "offline" | "live";
-interface Match {
+export interface Match {
   request?: number;
   path?: string;
   header?: string;
@@ -50,6 +52,7 @@ interface Expect {
   raw?: string[];
   artifacts?: string[];
   raises?: string;
+  files_unchanged?: string[];
   setup_error?: string;
   config_error?: boolean;
 }
@@ -64,6 +67,7 @@ interface Setup {
   codex_login?: "chatgpt" | "api_key";
   codex_provider?: "builtin";
 }
+type Override = string | { options?: Options; expect?: Expect; reason: string };
 interface Case {
   id: string;
   provider: CaseProvider;
@@ -72,13 +76,9 @@ interface Case {
   prompt: string;
   setup?: Setup;
   mock?: Step[];
-  expect?: Expect;
+  expect: Expect;
   runs?: LaterRun[];
-  languages?: {
-    typescript?:
-      | string
-      | { options?: Options; expect?: Expect; reason: string };
-  };
+  languages?: { python?: Override; typescript?: Override };
   live?: {
     prompt?: string;
     options?: Options;
@@ -102,21 +102,20 @@ export interface Plan {
   turns: Turn[];
 }
 
-const spec: {
+const fixtures = new URL("../../../../../docs/fixtures/", import.meta.url);
+const readFixture = (name: string) =>
+  JSON.parse(readFileSync(new URL(name, fixtures), "utf8"));
+export const spec: {
   cases: Case[];
-  coverage_exemptions: { typescript?: Record<string, string> };
-} = JSON.parse(
-  readFileSync(
-    new URL(
-      "../../../../../docs/fixtures/conformance-v1.json",
-      import.meta.url,
-    ),
-    "utf8",
-  ),
-);
+  coverage_exemptions: { typescript: Record<string, string> };
+} = readFixture("conformance-v1.json");
+export const schema = readFixture("conformance-v1.schema.json");
 export const cases = spec.cases;
 /** `<provider>:<option>` to the reason no case exercises it. */
-export const exemptions = spec.coverage_exemptions.typescript ?? {};
+export const exemptions = spec.coverage_exemptions.typescript;
+/** Schema violations of a spec, as `<path>: <problem>`. */
+export const specErrors = (value: unknown = spec) =>
+  schemaErrors(value, schema);
 
 const liveModels: Record<CaseProvider, [env: string, model: string]> = {
   anthropic: ["AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL", "claude-haiku-4-5"],
@@ -152,7 +151,7 @@ const mergeOptions = (base: Options, extra: Options): Options => ({
 export function resolveCase(c: Case, mode: Mode): Plan | string {
   const override = c.languages?.typescript;
   if (typeof override === "string") return override;
-  const expect = override?.expect ?? c.expect ?? {};
+  const expect = override?.expect ?? c.expect;
   const live = mode === "live" ? c.live : undefined;
   if (mode === "live" && !live) return "no live section";
   if (live && expect.config_error)
@@ -197,13 +196,13 @@ export function resolveCase(c: Case, mode: Mode): Plan | string {
 // Python option names mapped onto the TypeScript request. Each mapper returns
 // the fields it sets: `request` for RunRequest, `anthropic` for Claude's
 // native options, `client`/`thread` for Codex's. Options TypeScript reserves
-// map to the reserved name, which it rejects; a missing entry fails the case.
+// map to the reserved name, which it rejects. An option TypeScript lacks has no
+// entry, so a case using it fails until it gets a languages.typescript override.
 type Layer = "request" | "anthropic" | "client" | "thread";
 type Fragment = Partial<Record<Layer, Options>>;
 interface Context {
   provider: CaseProvider;
   root: string;
-  options: Options;
   natives: unknown[];
 }
 // biome-ignore lint/suspicious/noExplicitAny: option values come from JSON.
@@ -229,8 +228,6 @@ const client = (key: keyof CodexNativeOptions) => (value: unknown) => ({
 const thread = (key: keyof CodexThreadOptions) => (value: unknown) => ({
   thread: { [key]: value },
 });
-const webTools = ["WebSearch", "WebFetch"];
-
 const pythonOptions: Record<string, Entry> = {
   provider: request("provider"),
   model: request("model"),
@@ -243,7 +240,8 @@ const pythonOptions: Record<string, Entry> = {
   trace_file: (path: string, ctx) => request("traceFile")(join(ctx.root, path)),
   on_provider_event: (_, ctx) =>
     request("onProviderEvent")((event: unknown) => ctx.natives.push(event)),
-  // The runner always collects through collectRun's callback.
+  // TypeScript has no event callback: the runner reads the stream, whose
+  // order collectRun enforces (core.test.ts), so expect.on_event is not checked.
   on_event: () => ({}),
   timeout: (seconds: number) =>
     request("signal")(AbortSignal.timeout(seconds * 1000)),
@@ -270,12 +268,6 @@ const pythonOptions: Record<string, Entry> = {
     codex: request("builtinTools"),
   },
   web_tools: {
-    anthropic: (enabled: boolean, ctx) =>
-      !enabled
-        ? claude("disallowedTools")(webTools)
-        : Array.isArray(ctx.options.builtin_tools)
-          ? claude("tools")(webTools)
-          : {},
     codex: (enabled: boolean) =>
       thread("webSearchMode")(enabled ? "live" : "disabled"),
   },
@@ -305,14 +297,6 @@ const pythonOptions: Record<string, Entry> = {
   },
   "provider_options.api_key": { codex: client("apiKey") },
   "provider_options.sandbox": { codex: thread("sandboxMode") },
-  "provider_options.approval_mode": {
-    codex: (mode: string) => {
-      if (mode !== "deny_all")
-        throw new Unmapped(`provider_options.approval_mode=${mode}`);
-      return thread("approvalPolicy")("never");
-    },
-  },
-  "provider_options.config.env": { codex: client("env") },
   // The TypeScript SDK sets this config key from networkAccessEnabled.
   "provider_options.config.config_overrides": {
     codex: (entries: string[]) => {
@@ -389,7 +373,7 @@ export function exercised(plan: Plan): string[] {
   try {
     for (const turn of plan.turns)
       for (const options of [turn.agent ?? {}, turn.overrides]) {
-        const ctx = { provider: plan.provider, root: "", options, natives: [] };
+        const ctx = { provider: plan.provider, root: "", natives: [] };
         const fragment = mapOptions(options, ctx);
         for (const [layer, fields] of Object.entries(fragment) as [
           Layer,
@@ -504,6 +488,16 @@ interface Outcome {
   requests: Recorded[];
   traceFile?: string;
 }
+/** A case's setup paths and the contents files_unchanged compares against. */
+interface Files {
+  path(name: string): string;
+  snapshot: Map<string, string | null>;
+}
+const readOrNull = (path: string) =>
+  readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
 
 /** Run every turn of a plan and check its expectations. */
 export async function runCase(plan: Plan, mode: Mode): Promise<void> {
@@ -512,13 +506,24 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
   const mock =
     mode === "offline" ? await startMock(provider, plan.mock) : undefined;
   try {
-    const dirs = {
+    const first = plan.turns[0]?.agent ?? {};
+    const roots: Record<string, string> = {
+      cwd: typeof first.cwd === "string" ? first.cwd : "work",
       home: "home",
       codex_home: "codex_home",
       claude_config: "claude_config",
+      anthropic_config: "anthropic_config",
     };
-    for (const dir of [...Object.values(dirs), "anthropic_config", "work"])
-      await mkdir(join(root, dir));
+    for (const dir of [...Object.values(roots), "work"])
+      await mkdir(join(root, dir), { recursive: true });
+    const files: Files = {
+      path(name) {
+        const [base = "", ...rest] = name.split("/");
+        const dir = roots[base] ?? assert.fail(`unknown setup root ${base}`);
+        return join(root, dir, ...rest);
+      },
+      snapshot: new Map(),
+    };
     const env = isolatedEnv(root, mode);
     const key = mode === "live" ? process.env[keyEnv[provider]] : undefined;
     if (provider === "anthropic") {
@@ -535,18 +540,8 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
           codexProvider(mock.url, plan.setup.codex_provider !== "builtin"),
         );
     }
-    const first = plan.turns[0]?.agent ?? {};
-    const cwd = typeof first.cwd === "string" ? first.cwd : "work";
-    for (const [target, content] of Object.entries(plan.setup.files ?? {})) {
-      const [base = "", ...rest] = target.split("/");
-      const path = join(
-        root,
-        base === "cwd"
-          ? cwd
-          : (dirs[base as keyof typeof dirs] ??
-              assert.fail(`unknown setup root ${base}`)),
-        ...rest,
-      );
+    for (const [name, content] of Object.entries(plan.setup.files ?? {})) {
+      const path = files.path(name);
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, content);
     }
@@ -555,6 +550,9 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
         join(root, "codex_home", "auth.json"),
         codexLogin(plan.setup.codex_login),
       );
+    for (const turn of plan.turns)
+      for (const name of turn.expect.files_unchanged ?? [])
+        files.snapshot.set(name, await readOrNull(files.path(name)));
     const infra = (): Fragment => ({
       request: { cwd: join(root, "work") },
       ...(provider === "anthropic"
@@ -584,38 +582,34 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
       } as AgentDefaults;
     };
     const natives: unknown[] = [];
+    const ctx: Context = { provider, root, natives };
     let agent: Agent | undefined;
     let base: Fragment = {};
-    let session: string | null | undefined;
+    let session: string | null = null;
     for (const [index, turn] of plan.turns.entries()) {
-      const ctx = (options: Options) => ({ provider, root, options, natives });
       const outcome: Outcome = { envelopes: [], natives: [], requests: [] };
       const seen = {
         requests: mock?.requests.length ?? 0,
         natives: natives.length,
       };
-      const prompt = withSession(turn.prompt, session ?? "") as string;
       try {
         let fragment = base;
         if (turn.agent) {
           const options = withSession(turn.agent, session ?? "") as Options;
-          base = fragment = merge(infra(), mapOptions(options, ctx(options)));
+          base = fragment = merge(infra(), mapOptions(options, ctx));
           if (typeof fragment.request?.cwd === "string")
             await mkdir(fragment.request.cwd, { recursive: true });
           agent = new Agent(defaults(fragment));
         }
         const overrides = withSession(turn.overrides, session ?? "") as Options;
         if (Object.keys(overrides).length)
-          fragment = merge(
-            copy(base),
-            mapOptions(overrides, ctx({ ...turn.agent, ...overrides })),
-          );
+          fragment = merge(copy(base), mapOptions(overrides, ctx));
         outcome.traceFile = fragment.request?.traceFile as string | undefined;
         assert.ok(agent, "the first run builds the Agent");
         const input =
           fragment === base
-            ? prompt
-            : ({ ...defaults(fragment), prompt } as RunRequest);
+            ? turn.prompt
+            : ({ ...defaults(fragment), prompt: turn.prompt } as RunRequest);
         outcome.result = await collectRun(agent.stream(input), (envelope) => {
           outcome.envelopes.push(envelope);
         });
@@ -627,13 +621,13 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
       outcome.requests = mock?.requests.slice(seen.requests) ?? [];
       outcome.natives = natives.slice(seen.natives);
       try {
-        await check(turn.expect, outcome, mode, session);
+        await check(turn.expect, outcome, mode, session, files);
       } catch (error) {
         if (error instanceof Error)
           error.message = `run ${index}: ${error.message}`;
         throw error;
       }
-      session = outcome.result?.session_id;
+      if (outcome.result) session = outcome.result.session_id;
     }
   } finally {
     await mock?.close();
@@ -642,13 +636,18 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
   }
 }
 
+/** The value at a dot-separated path; integer segments index arrays, negative ones from the end. */
 function at(value: unknown, path: string): unknown {
   let current = value;
   for (const part of path.split(".")) {
     if (Array.isArray(current)) {
-      const index = Number(part);
+      const index = /^-?\d+$/.test(part) ? Number(part) : Number.NaN;
       current = current[index < 0 ? current.length + index : index];
-    } else if (typeof current === "object" && current !== null)
+    } else if (
+      typeof current === "object" &&
+      current !== null &&
+      Object.hasOwn(current, part)
+    )
       current = (current as Options)[part];
     else return undefined;
   }
@@ -656,13 +655,38 @@ function at(value: unknown, path: string): unknown {
 }
 
 function matches(value: unknown, match: Match): boolean {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
   if (match.absent) return value === undefined;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
   if (match.excludes !== undefined)
     return value === undefined || !text.includes(match.excludes);
   if (value === undefined) return false;
   if (match.contains !== undefined) return text.includes(match.contains);
-  return JSON.stringify(value) === JSON.stringify(match.equals);
+  return isDeepStrictEqual(value, match.equals);
+}
+
+/** Assert one `requests.match` entry against a run's model requests. */
+export function checkMatch(
+  match: Match,
+  requests: Pick<Recorded, "headers" | "body">[],
+): void {
+  const value = ({ headers, body }: (typeof requests)[number]) =>
+    match.header !== undefined
+      ? headers[match.header]
+      : at(body, match.path ?? "");
+  let ok: boolean;
+  if (match.request !== undefined) {
+    const index =
+      match.request < 0 ? requests.length + match.request : match.request;
+    const chosen = requests[index];
+    assert.ok(chosen, `request ${match.request} of ${requests.length}`);
+    ok = matches(value(chosen), match);
+  } else if (match.absent || match.excludes !== undefined)
+    ok = requests.every((request) => matches(value(request), match));
+  else ok = requests.some((request) => matches(value(request), match));
+  assert.ok(
+    ok,
+    `request match ${JSON.stringify(match)} failed; saw ${JSON.stringify(requests.map(value)).slice(0, 2000)}`,
+  );
 }
 
 const errorType = (thrown: unknown) =>
@@ -671,14 +695,36 @@ const errorType = (thrown: unknown) =>
     : thrown instanceof RuntimeUnavailableError
       ? "runtime_unavailable"
       : String(thrown);
-const shape = (envelopes: EventEnvelope[]) =>
+type Shape = [sequence: number, type: string][];
+const shape = (envelopes: EventEnvelope[]): Shape =>
   envelopes.map(({ sequence, event }) => [sequence, event.type]);
+
+/** Envelopes a run wrote: sequences from 0 without gaps, run_started to run_finished, as the result keeps them. */
+function checkEnvelopes(seen: Shape, kept: Shape): void {
+  assert.deepEqual(
+    seen.map(([sequence]) => sequence),
+    seen.map((_, index) => index),
+  );
+  assert.equal(seen[0]?.[1], "run_started");
+  assert.equal(seen.at(-1)?.[1], "run_finished");
+  assert.deepEqual(seen, kept);
+}
+
+async function checkFiles(expect: Expect, files: Files): Promise<void> {
+  for (const name of expect.files_unchanged ?? [])
+    assert.equal(
+      await readOrNull(files.path(name)),
+      files.snapshot.get(name),
+      `${name} changed`,
+    );
+}
 
 async function check(
   expect: Expect,
   outcome: Outcome,
   mode: Mode,
-  previousSession: string | null | undefined,
+  previousSession: string | null,
+  files: Files,
 ): Promise<void> {
   const { result, thrown, requests } = outcome;
   if (expect.config_error) {
@@ -691,16 +737,30 @@ async function check(
       [],
       "ConfigError must precede every event",
     );
+    assert.equal(
+      requests.length,
+      0,
+      "ConfigError must precede every model request",
+    );
     return;
   }
   if (expect.setup_error !== undefined) {
+    // The schema allows only files_unchanged beside setup_error, since TypeScript
+    // throws setup failures where Python returns failed results.
     assert.equal(requests.length, 0, "setup errors precede model requests");
-    // TypeScript throws setup failures; Python returns failed results.
-    if (thrown) return assert.equal(errorType(thrown), expect.setup_error);
-    assert.equal(result?.error_type, expect.setup_error, result?.error ?? "");
+    if (thrown) assert.equal(errorType(thrown), expect.setup_error);
+    else
+      assert.deepEqual(
+        [result?.status, result?.error_type],
+        ["failure", expect.setup_error],
+        result?.error ?? "",
+      );
+    return checkFiles(expect, files);
   }
   if (thrown) throw thrown;
   assert.ok(result);
+  assert.ok(!expect.raises, "TypeScript has no raise_on_error");
+  assert.ok(!expect.artifacts, "TypeScript has no artifacts bundle");
   const events = result.events.map(({ event }) => event);
   const types: string[] = events.map((event) => event.type);
   const summary = `${result.status} ${result.error_type} ${result.error}\nevents: ${types.join(", ")}`;
@@ -747,9 +807,12 @@ async function check(
   }
   if ("structured_output" in expect)
     assert.deepEqual(result.structured_output, expect.structured_output);
-  if (expect.same_session) assert.equal(result.session_id, previousSession);
-  if (expect.on_event)
-    assert.deepEqual(shape(outcome.envelopes), shape(result.events));
+  if (expect.same_session !== undefined)
+    assert.equal(
+      result.session_id === previousSession,
+      expect.same_session,
+      `session ${result.session_id}, previous ${previousSession}`,
+    );
   if (expect.trace_file) {
     assert.ok(
       outcome.traceFile,
@@ -758,7 +821,7 @@ async function check(
     const lines = (await readFile(outcome.traceFile, "utf8"))
       .trim()
       .split("\n");
-    assert.deepEqual(
+    checkEnvelopes(
       shape(lines.map((line) => JSON.parse(line))),
       shape(result.events),
     );
@@ -772,6 +835,7 @@ async function check(
       `${type} with raw\n${summary}`,
     );
   }
+  await checkFiles(expect, files);
   if (mode === "live") return;
   if (expect.requests?.count !== undefined)
     assert.equal(
@@ -779,105 +843,5 @@ async function check(
       expect.requests.count,
       `model requests\n${summary}`,
     );
-  for (const match of expect.requests?.match ?? []) {
-    const pool =
-      match.request === undefined
-        ? requests
-        : requests.slice(match.request).slice(0, 1);
-    const values = pool.map(({ headers, body }) =>
-      match.header !== undefined
-        ? headers[match.header]
-        : at(body, match.path ?? ""),
-    );
-    const every =
-      match.request === undefined &&
-      (match.absent || match.excludes !== undefined);
-    const ok =
-      values.length > 0 &&
-      (every
-        ? values.every((value) => matches(value, match))
-        : values.some((value) => matches(value, match)));
-    assert.ok(
-      ok,
-      `request match ${JSON.stringify(match)} failed; saw ${JSON.stringify(values).slice(0, 2000)}`,
-    );
-  }
-}
-
-// Fields this runner implements; anything else fails the case instead of passing unchecked.
-const fields = {
-  case: [
-    "id",
-    "provider",
-    "options",
-    "run_options",
-    "prompt",
-    "setup",
-    "mock",
-    "expect",
-    "runs",
-    "languages",
-    "live",
-  ],
-  setup: ["files", "codex_login", "codex_provider"],
-  step: [
-    "text",
-    "thinking",
-    "tool",
-    "shell",
-    "tool_search",
-    "usage",
-    "stop_reason",
-    "status",
-    "headers",
-    "body",
-    "stream_error",
-    "truncate",
-    "hang",
-  ],
-  run: ["prompt", "options", "agent", "expect"],
-  live: ["prompt", "options", "expect", "runs"],
-  override: ["options", "expect", "reason"],
-  expect: [
-    "status",
-    "error_type",
-    "final_text",
-    "final_text_contains",
-    "events",
-    "tool_calls",
-    "tool_results",
-    "structured_output",
-    "requests",
-    "same_session",
-    "on_event",
-    "trace_file",
-    "on_provider_event",
-    "raw",
-    "setup_error",
-    "config_error",
-  ],
-};
-/** Fields of a case TypeScript runs that its runner does not implement. */
-export function unknownFields(c: Case): string[] {
-  const unknown = (kind: keyof typeof fields, value: object | undefined) =>
-    Object.keys(value ?? {})
-      .filter((key) => !fields[kind].includes(key))
-      .map((key) => `${kind}.${key}`);
-  const override = c.languages?.typescript;
-  if (typeof override === "string")
-    return override.startsWith("unsupported: ") ? [] : ["override reason"];
-  const expects = [override?.expect ?? c.expect, c.live?.expect];
-  return [
-    ...unknown("override", override),
-    ...(override && !override.reason ? ["override.reason"] : []),
-    ...unknown("case", c),
-    ...unknown("setup", c.setup),
-    ...unknown("live", c.live),
-    ...(c.mock ?? []).flatMap((step) => unknown("step", step)),
-    ...[...(c.runs ?? []), ...(c.live?.runs ?? [])].flatMap((run) => {
-      expects.push(run.expect);
-      return unknown("run", run);
-    }),
-    ...expects.flatMap((expect) => unknown("expect", expect)),
-  ];
+  for (const match of expect.requests?.match ?? []) checkMatch(match, requests);
 }

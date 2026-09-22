@@ -8,6 +8,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from .mocks import MockApi, MockClaude, MockCodex
 
 ROOT = next(p for p in Path(__file__).resolve().parents if (p / "docs" / "schemas").is_dir())
 SPEC = json.loads((ROOT / "docs/fixtures/conformance-v1.json").read_text(encoding="utf-8"))
+SCHEMA = json.loads((ROOT / "docs/fixtures/conformance-v1.schema.json").read_text(encoding="utf-8"))
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 LIVE_MODELS = {
     "anthropic": ("AGENT_SDK_WRAPPER_ANTHROPIC_MODEL", "claude-haiku-4-5"),
@@ -115,13 +117,19 @@ class Scratch:
     def dir(self, name: str) -> Path:
         return self.root / (self.cwd if name == "cwd" else name)
 
+    def file(self, name: str) -> Path:
+        """A setup path, ``<root>/<path>``."""
+
+        root, _, rel = name.partition("/")
+        return self.dir(root) / rel
+
 
 def isolate(monkeypatch: pytest.MonkeyPatch, scratch: Scratch, *, live: bool) -> None:
     """Keep the host's credentials, config and network out of the runtimes."""
 
     keep = {name: os.environ[name] for name in LIVE_KEYS.values() if live and name in os.environ}
     for name in list(os.environ):
-        if name.startswith(("ANTHROPIC_", "OPENAI_", "CODEX_", "CLAUDE_CODE_")) or name in (
+        if name.startswith(("ANTHROPIC_", "OPENAI_", "CODEX_", "CLAUDE_CODE_", "XDG_")) or name in (
             "CLAUDECODE",
             "MODEL",
         ):
@@ -181,8 +189,7 @@ def seed_chatgpt_login(home: Path) -> str:
 
 def prepare(setup: dict[str, Any], scratch: Scratch) -> None:
     for name, content in setup.get("files", {}).items():
-        root, _, rel = name.partition("/")
-        path = scratch.dir(root) / rel
+        path = scratch.file(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     login = setup.get("codex_login")
@@ -214,6 +221,8 @@ class Context:
     scratch: Scratch
     api: MockApi | None
     setup: dict[str, Any]
+    # The contents of each files_unchanged path before the first run; None when missing.
+    snapshot: dict[str, str | None] = field(default_factory=dict)
     session_id: str | None = None
     events: list[Any] = field(default_factory=list)
     provider_events: list[Any] = field(default_factory=list)
@@ -296,10 +305,17 @@ async def run_case(
     isolate(monkeypatch, scratch, live=live)
     setup = case.get("setup", {})
     prepare(setup, scratch)
+    expects = [case["expect"], *(run.get("expect", {}) for run in case.get("runs", []))]
+    unchanged = {name for expect in expects for name in expect.get("files_unchanged", [])}
+    snapshot = {name: _read(scratch.file(name)) for name in unchanged}
     async with _mock(provider, case.get("mock", [{"text": "ok"}]), monkeypatch, live) as api:
-        ctx = Context(provider, scratch, api, setup)
+        ctx = Context(provider, scratch, api, setup, snapshot)
         async with ctx.clients:
             await _runs(case, ctx, live)
+
+
+def _read(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
 @contextlib.asynccontextmanager
@@ -344,7 +360,9 @@ async def _runs(case: dict[str, Any], ctx: Context, live: bool) -> None:
         outcome = Outcome()
         try:
             if new_agent:
-                agent = Agent(**await ctx.native(agent_options))
+                # Every run records its envelopes, so config_error can check there are none.
+                native = await ctx.native(agent_options)
+                agent = Agent(**{"on_event": ctx.events.append, **native})
             assert agent is not None
             overrides = await ctx.native(run_options)
             if live and "artifacts_dir" not in agent_options | run_options:
@@ -382,8 +400,9 @@ def check(
     """Assert a run's expectations; ``options`` are the run's JSON options."""
 
     if expect.get("config_error"):
-        assert outcome.config_error is not None, "expected ConfigError"
-        assert requests == []
+        assert outcome.config_error is not None, f"expected ConfigError, got {outcome.result}"
+        assert ctx.events == [], "ConfigError must precede every event"
+        assert requests == [], "ConfigError must precede every model request"
         return
     if outcome.config_error is not None:
         raise outcome.config_error
@@ -392,14 +411,16 @@ def check(
     assert outcome.result is not None
     _check_result(expect, outcome.result, ctx)
     _check_outputs(expect, outcome.result, ctx, options)
+    for name in expect.get("files_unchanged", []):
+        assert _read(ctx.scratch.file(name)) == ctx.snapshot[name], f"{name} changed"
     if "setup_error" in expect:
-        assert requests == []
+        assert requests == [], "setup errors precede model requests"
     if not live:
         wanted = expect.get("requests", {})
         if "count" in wanted:
             assert len(requests) == wanted["count"], [r["body"] for r in requests]
         for match in wanted.get("match", []):
-            _check_match(match, requests)
+            check_match(match, requests)
 
 
 def _check_result(expect: dict[str, Any], result: RunResult, ctx: Context) -> None:
@@ -437,7 +458,7 @@ def _check_result(expect: dict[str, Any], result: RunResult, ctx: Context) -> No
     if "structured_output" in expect:
         value = result.structured_output
         value = value.model_dump() if isinstance(value, BaseModel) else value
-        assert value == expect["structured_output"], detail
+        assert json_equal(value, expect["structured_output"]), (value, detail)
     if "same_session" in expect:
         assert (result.session_id == ctx.session_id) == expect["same_session"], result.session_id
     for name in expect.get("raw", []):
@@ -475,11 +496,13 @@ _MISSING = object()
 
 
 def _resolve(value: Any, path: str) -> Any:
-    for part in path.split(".") if path else []:
+    for part in path.split("."):
         if isinstance(value, list):
+            if not re.fullmatch(r"-?\d+", part):
+                return _MISSING
             try:
                 value = value[int(part)]
-            except (ValueError, IndexError):
+            except IndexError:
                 return _MISSING
         elif isinstance(value, dict) and part in value:
             value = value[part]
@@ -494,7 +517,20 @@ def _text(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-def _matches(match: dict[str, Any], request: dict[str, Any]) -> bool:
+def json_equal(a: Any, b: Any) -> bool:
+    """JSON value equality: object key order is irrelevant and booleans are not numbers."""
+
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(json_equal(a[key], b[key]) for key in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(map(json_equal, a, b))
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    numbers = (int, float)
+    return (type(a) is type(b) or (type(a) in numbers and type(b) in numbers)) and a == b
+
+
+def matches(match: dict[str, Any], request: dict[str, Any]) -> bool:
     if "header" in match:
         value = request["headers"].get(match["header"], _MISSING)
     else:
@@ -506,17 +542,17 @@ def _matches(match: dict[str, Any], request: dict[str, Any]) -> bool:
     if value is _MISSING:
         return False
     if "equals" in match:
-        return value == match["equals"]
+        return json_equal(value, match["equals"])
     return match["contains"] in _text(value)
 
 
-def _check_match(match: dict[str, Any], requests: list[dict[str, Any]]) -> None:
+def check_match(match: dict[str, Any], requests: list[dict[str, Any]]) -> None:
     if "request" in match:
         index = match["request"]
         assert -len(requests) <= index < len(requests), (match, len(requests))
-        assert _matches(match, requests[index]), (match, requests[index])
+        assert matches(match, requests[index]), (match, requests[index])
         return
     if match.get("absent") or "excludes" in match:
-        assert all(_matches(match, request) for request in requests), match
+        assert all(matches(match, request) for request in requests), match
     else:
-        assert any(_matches(match, request) for request in requests), (match, requests)
+        assert any(matches(match, request) for request in requests), (match, requests)

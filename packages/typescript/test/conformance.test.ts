@@ -7,14 +7,18 @@ import type {
   CodexThreadOptions,
   RunRequest,
 } from "../src/index.js";
+import { exhausted, repeats, startMock } from "./conformance/mock.js";
 import {
   cases,
+  checkMatch,
   exemptions,
   exercised,
+  type Match,
   type Plan,
   resolveCase,
   runCase,
-  unknownFields,
+  spec,
+  specErrors,
 } from "./conformance/runner.js";
 
 describe("conformance cases, offline", {
@@ -31,11 +35,93 @@ describe("conformance cases, offline", {
   }
 });
 
-test("conformance cases use only fields the TypeScript runner implements", () => {
-  assert.deepEqual(
-    cases.flatMap((c) => unknownFields(c).map((field) => `${c.id}: ${field}`)),
-    [],
-  );
+test("the conformance spec matches its schema", () => {
+  assert.deepEqual(specErrors(), []);
+  const ids = cases.map(({ id }) => id);
+  assert.equal(new Set(ids).size, ids.length, "duplicate case ids");
+});
+
+test("the schema rejects unknown expectations in skipped cases", () => {
+  for (const typo of [
+    { final_txt: "ok" },
+    { request: { count: 1 } },
+    { requests: { match: [{ path: "model", equal: "x" }] } },
+    { setup_error: "authentication_failed", status: "failure" },
+  ]) {
+    const probe = structuredClone(spec);
+    const [c] = probe.cases;
+    assert.ok(c);
+    c.languages = {
+      python: "unsupported: probe",
+      typescript: "unsupported: probe",
+    };
+    c.expect = { ...c.expect, ...typo };
+    assert.notDeepEqual(specErrors(probe), [], JSON.stringify(typo));
+  }
+});
+
+test("requests.match semantics", () => {
+  const request = {
+    headers: { "x-api-key": "sk" },
+    body: {
+      model: "m",
+      stream: true,
+      thinking: { type: "enabled", budget_tokens: 2 },
+    },
+  };
+  const table: [Match, (typeof request)[], boolean][] = [
+    [
+      { path: "thinking", equals: { budget_tokens: 2, type: "enabled" } },
+      [request],
+      true,
+    ],
+    [{ path: "stream", equals: 1 }, [request], false],
+    [{ request: -1, path: "model", equals: "m" }, [request], true],
+    [{ request: -2, path: "model", equals: "m" }, [request], false],
+    [{ request: 1, path: "model", excludes: "x" }, [request], false],
+    [{ path: "model", excludes: "m" }, [], true],
+    [{ header: "x-api-key", absent: true }, [], true],
+    [{ path: "model", contains: "m" }, [], false],
+  ];
+  for (const [match, requests, passes] of table)
+    if (passes) checkMatch(match, requests);
+    else
+      assert.throws(() => checkMatch(match, requests), JSON.stringify(match));
+});
+
+const post = (url: string) =>
+  fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "m", stream: true }),
+  });
+
+test("the mock fails once the last step has repeated", async () => {
+  const mock = await startMock("codex", [{ text: "a" }, { text: "b" }]);
+  try {
+    const statuses = [];
+    for (let n = 0; n <= 2 + repeats; n++) {
+      const response = await post(`${mock.url}/responses`);
+      await response.text();
+      statuses.push(response.status);
+    }
+    assert.deepEqual(statuses, [...Array(2 + repeats).fill(200), 400]);
+    const response = await post(`${mock.url}/responses`);
+    assert.match(await response.text(), new RegExp(exhausted));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the mock's truncate drops a chunked stream", async () => {
+  const mock = await startMock("anthropic", [{ truncate: true }]);
+  try {
+    const response = await post(`${mock.url}/v1/messages`);
+    assert.equal(response.headers.get("transfer-encoding"), "chunked");
+    await assert.rejects(response.text());
+  } finally {
+    await mock.close();
+  }
 });
 
 // Every TypeScript option; the types keep these lists exhaustive. Native

@@ -13,7 +13,8 @@
       "codex:client.baseUrl": "Selects the built-in provider, whose websocket transport and retries the mock cannot turn off; cases select a custom provider in CODEX_HOME/config.toml",
       "codex:client.codexPathOverride": "Runtime location; codex-exec.test.ts drives a fake runtime through it",
       "codex:thread.skipGitRepoCheck": "The runner sets it for every case because scratch directories are not repositories",
-      "codex:thread.additionalDirectories": "No Python counterpart; it only adds writable sandbox roots"
+      "codex:thread.additionalDirectories": "No Python counterpart; it only adds writable sandbox roots",
+      "codex:thread.approvalPolicy": "codex exec 0.154 runs with approval policy never: on-request and on-failure leave its instructions at never, and untrusted fails at startup"
     }
   },
   "cases": [
@@ -166,6 +167,12 @@
     {
       "id": "anthropic.web_tools_off",
       "provider": "anthropic",
+      "languages": {
+        "typescript": {
+          "options": { "model": "claude-haiku-4-5", "disallowed_tools": ["WebSearch", "WebFetch"] },
+          "reason": "TypeScript has no web_tools; callers disallow the web tools natively"
+        }
+      },
       "options": { "model": "claude-haiku-4-5", "web_tools": false },
       "prompt": "Search the web for today's top news headline. If you cannot search the web, reply exactly NO_WEB.",
       "mock": [{ "text": "NO_WEB" }],
@@ -184,6 +191,7 @@
     {
       "id": "anthropic.web_tools_on",
       "provider": "anthropic",
+      "languages": { "typescript": "unsupported: TypeScript has no web_tools; anthropic.builtin_tools covers native tools lists" },
       "options": { "model": "claude-haiku-4-5", "web_tools": true, "builtin_tools": ["Read"] },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
@@ -1262,6 +1270,18 @@
     {
       "id": "codex.session",
       "provider": "codex",
+      "languages": {
+        "typescript": {
+          "options": {
+            "model": "gpt-5.4",
+            "continue_session": true,
+            "on_event": true,
+            "web_tools": false,
+            "provider_options": { "sandbox": "read-only" }
+          },
+          "reason": "codex exec runs with approval policy never whatever approvalPolicy says"
+        }
+      },
       "options": {
         "model": "gpt-5.4",
         "continue_session": true,
@@ -1537,6 +1557,16 @@
     {
       "id": "codex.sandbox_and_approval_mode",
       "provider": "codex",
+      "languages": {
+        "typescript": {
+          "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "read-only" } },
+          "expect": {
+            "status": "success",
+            "requests": { "match": [{ "path": "input", "contains": "`sandbox_mode` is `read-only`" }] }
+          },
+          "reason": "codex exec runs with approval policy never whatever approvalPolicy says"
+        }
+      },
       "options": { "model": "gpt-5.4", "provider_options": { "sandbox": "read-only", "approval_mode": "deny_all" } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
