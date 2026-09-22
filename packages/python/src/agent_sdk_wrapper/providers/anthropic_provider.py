@@ -251,6 +251,9 @@ class AnthropicProvider(ProviderAdapter):
         unknown = sorted(set(req.extra_options) - _native_option_names())
         if unknown:
             raise ConfigError(f"extra_options {unknown} are not Claude Agent SDK options")
+        # ensure_available checks only the provider option.
+        if "cli_path" in req.extra_options:
+            raise ConfigError("set cli_path with provider_options, not extra_options")
         active_mcp_servers = [
             server for server in req.mcp_servers if server.enabled is not False
         ]

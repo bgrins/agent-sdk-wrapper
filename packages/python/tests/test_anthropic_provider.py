@@ -802,6 +802,7 @@ def test_anthropic_options_leave_buffer_headroom_unless_overridden():
             "mcp_servers",
         ),
         ({"extra_options": {"env": {}}}, "env"),
+        ({"extra_options": {"cli_path": "/opt/claude"}}, "cli_path"),
         ({"web_tools": True, "builtin_tools": "none"}, "web_tools"),
         ({"web_tools": True, "disallowed_tools": ["WebFetch"]}, "WebFetch"),
         # A native tools list would drop the tools these options need.
