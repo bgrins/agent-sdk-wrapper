@@ -88,7 +88,10 @@ const transient =
  * Quota, context and billing text outrank the status, since those arrive as 400 or
  * 429. Otherwise the status decides, then the text.
  */
-function errorType(message: string, status?: number): string | undefined {
+export function errorType(
+  message: string,
+  status?: number,
+): string | undefined {
   const code =
     status ??
     statusPatterns

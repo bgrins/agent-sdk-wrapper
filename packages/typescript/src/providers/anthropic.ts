@@ -18,9 +18,9 @@ import { type ErrorEvent, emptyUsage, type ProviderEvent } from "../events.js";
 import type { ResolvedRequest } from "../request.js";
 import type { ProviderAdapter, ProviderContext } from "./base.js";
 import {
-  classify,
   enumOption,
   envOption,
+  errorType,
   executable,
   nativeError,
   object,
@@ -259,7 +259,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     let seenThinking = false;
     let interrupted = false;
     let retracted = false;
-    let assistantError: SDKAssistantMessageError | undefined;
+    let assistantError: AssistantError | undefined;
     let session: string | undefined;
     let sessionModel: string | undefined;
     // Claude sends one frame per content block; join a message's contiguous text.
@@ -378,11 +378,11 @@ export class AnthropicAdapter implements ProviderAdapter {
           }
           // The CLI reports API failures as synthetic assistant text.
           if (message.error || message.message.model === "<synthetic>") {
-            assistantError = message.error;
             yield* flush();
             const text = message.message.content
               .map((block) => (block.type === "text" ? block.text : ""))
               .join("");
+            assistantError = { code: message.error, text };
             if (text) yield { type: "warning", message: text, ...raw };
             continue;
           }
@@ -559,6 +559,19 @@ const assistantErrorTypes: Partial<Record<SDKAssistantMessageError, string>> = {
   model_not_found: "model_not_found",
   max_output_tokens: "execution_error",
 };
+const reasonErrors = new Map([
+  ["budget_exhausted", "max_budget"],
+  ["structured_output_retry_exhausted", "structured_output_failed"],
+  // The CLI groups these as context limits.
+  ["prompt_too_long", "context_window_exceeded"],
+  ["blocking_limit", "context_window_exceeded"],
+  ["rapid_refill_breaker", "context_window_exceeded"],
+]);
+const subtypeErrors = new Map([
+  ["error_max_budget_usd", "max_budget"],
+  ["error_max_structured_output_retries", "structured_output_failed"],
+  ["error_during_execution", "execution_error"],
+]);
 // Other terminal reasons (hook stops, deferred tools) end successful runs.
 const failureReasons = new Set([
   "api_error",
@@ -568,74 +581,74 @@ const failureReasons = new Set([
   "tool_deferred_unavailable",
   "turn_setup_failed",
 ]);
-/** Prefer subtype, terminal_reason and the assistant error over HTTP status and text. */
+/** The latest error-bearing (synthetic) assistant message. */
+type AssistantError = { code?: SDKAssistantMessageError; text: string };
+/** Same order as Python: cancellation, turn limit, refusal, terminal reason, subtype. */
 function resultError(
   message: SDKResultMessage,
-  assistantError: SDKAssistantMessageError | undefined,
+  assistantError: AssistantError | undefined,
 ): ErrorEvent | undefined {
   const reason = message.terminal_reason;
-  const text =
+  const nativeStatus = (message as { api_error_status?: unknown })
+    .api_error_status;
+  const status = typeof nativeStatus === "number" ? nativeStatus : undefined;
+  // The most specific failure text.
+  const detail =
+    assistantError?.text ||
     (message.subtype === "success"
       ? message.result
-      : message.errors.join("\n")) ||
-    (message.subtype === "success" ? "run reported an error" : message.subtype);
-  const error = (error_type: string): ErrorEvent => ({
+      : message.errors.join("; ")) ||
+    (status === undefined ? "" : `API error ${status}`);
+  const error = (error_type: string, fallback: string): ErrorEvent => ({
     type: "error",
-    message: text,
+    message: detail || fallback,
     error_type,
   });
-  // Same order as Python: cancellation, turn limit, refusal, terminal reason, subtype.
   if (reason === "aborted_streaming" || reason === "aborted_tools")
-    return cancelled();
+    return error("cancelled", reason);
   if (message.subtype === "error_max_turns" || reason === "max_turns")
-    return error("max_turns");
-  if (message.stop_reason === "refusal") return error("refused");
-  if (reason === "budget_exhausted") return error("max_budget");
-  if (reason === "structured_output_retry_exhausted")
-    return error("structured_output_failed");
-  // The CLI groups these as context limits.
-  if (
-    reason === "prompt_too_long" ||
-    reason === "blocking_limit" ||
-    reason === "rapid_refill_breaker"
-  )
-    return error("context_window_exceeded");
-  if (message.subtype === "error_max_budget_usd") return error("max_budget");
-  if (message.subtype === "error_max_structured_output_retries")
-    return error("structured_output_failed");
-  if (message.subtype === "error_during_execution")
-    return error("execution_error");
+    return error("max_turns", "reached the configured max turns");
+  if (message.stop_reason === "refusal")
+    return error("refused", "the model refused the request");
+  const byReason = reason && reasonErrors.get(reason);
+  if (byReason) return error(byReason, reason);
+  const bySubtype = subtypeErrors.get(message.subtype);
+  if (bySubtype) return error(bySubtype, message.subtype);
   if (
     !message.is_error &&
     message.subtype === "success" &&
     !(reason && failureReasons.has(reason))
   )
     return;
-  const status =
-    message.subtype === "success"
-      ? (message.api_error_status ?? undefined)
-      : undefined;
-  const structured = assistantError && assistantErrorTypes[assistantError];
-  if (structured)
-    return error(
-      structured === "authentication_failed" && status === 403
-        ? "permission_denied"
-        : structured,
-    );
-  const classified = classify(text, "execution_error", status);
+  return error(
+    failureType(detail, status, assistantError?.code, reason),
+    "run reported an error",
+  );
+}
+/** Prefer the assistant error over HTTP status and text. */
+function failureType(
+  detail: string,
+  status: number | undefined,
+  code: SDKAssistantMessageError | undefined,
+  reason: string | undefined | null,
+): string {
+  if (code === "authentication_failed" && status === 403)
+    return "permission_denied";
+  const structured = code && assistantErrorTypes[code];
+  if (structured) return structured;
+  const classified = errorType(detail, status);
   // An invalid_request assistant error yields only to a more specific type.
   if (
-    assistantError === "invalid_request" &&
-    (classified.error_type === "execution_error" ||
-      classified.error_type.startsWith("api_error_"))
+    code === "invalid_request" &&
+    (!classified || classified.startsWith("api_error_"))
   )
-    return error("invalid_request");
-  // An API error without an HTTP status or a recognizable message is a dropped connection.
+    return "invalid_request";
+  if (classified) return classified;
+  // Without an HTTP status, an API-stage failure means no response arrived.
   return status === undefined &&
-    classified.error_type === "execution_error" &&
     (!reason || reason === "api_error" || reason === "completed")
-    ? error("transient_api_error")
-    : classified;
+    ? "transient_api_error"
+    : "execution_error";
 }
 function toolOutput(content: unknown): string {
   if (typeof content === "string") return content;

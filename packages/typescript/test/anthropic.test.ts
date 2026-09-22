@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type {
   SDKAssistantMessage,
   SDKMessage,
+  SDKResultError,
   SDKResultSuccess,
   Options,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -351,7 +352,7 @@ for (const reason of ["aborted_streaming", "aborted_tools"] as const)
     assert.ok(run.usage);
     assert.deepEqual(run.events.at(-2)?.event, {
       type: "error",
-      message: "Run cancelled",
+      message: "interrupted",
       error_type: "cancelled",
     });
     assert.equal(closed(), 1);
@@ -1164,7 +1165,7 @@ test("Claude classifies context limits, API errors and empty failures like Pytho
       terminal_reason: "prompt_too_long",
       result: "",
     }),
-    [["context_window_exceeded", "run reported an error"]],
+    [["context_window_exceeded", "prompt_too_long"]],
   );
   assert.deepEqual(
     await typeOf({ is_error: false, terminal_reason: "api_error", result: "" }),
@@ -1174,4 +1175,62 @@ test("Claude classifies context limits, API errors and empty failures like Pytho
     result({ modelUsage: undefined as never }),
   ]).agent.run("x");
   assert.equal(run.status, "success");
+});
+test("Claude failure text matches Python", async () => {
+  const { result: _text, api_error_status: _status, ...base } = result();
+  const failed = (overrides: Partial<SDKResultError>): SDKResultError => ({
+    ...base,
+    subtype: "error_during_execution",
+    is_error: true,
+    errors: [],
+    ...overrides,
+  });
+  const cases: [SDKMessage[], string, string][] = [
+    [
+      [failed({ subtype: "error_max_turns", terminal_reason: "max_turns" })],
+      "max_turns",
+      "reached the configured max turns",
+    ],
+    [
+      [failed({ errors: ["first problem", "second problem"] })],
+      "execution_error",
+      "first problem; second problem",
+    ],
+    [
+      [result({ stop_reason: "refusal", result: "" })],
+      "refused",
+      "the model refused the request",
+    ],
+    [
+      [result({ terminal_reason: "budget_exhausted", result: "" })],
+      "max_budget",
+      "budget_exhausted",
+    ],
+    // The synthetic assistant text outranks the result's generic text and status.
+    [
+      [
+        assistant(
+          [textBlock("API Error: Your credit balance is too low")],
+          { error: "unknown" },
+          { model: "<synthetic>", stop_reason: "stop_sequence" },
+        ),
+        result({
+          is_error: true,
+          result: "Request failed",
+          api_error_status: 400,
+          terminal_reason: "api_error",
+        }),
+      ],
+      "billing_error",
+      "API Error: Your credit balance is too low",
+    ],
+  ];
+  for (const [messages, errorType, message] of cases)
+    assert.deepEqual(
+      errorsOf(await harness(messages).agent.run("x")).map((event) => [
+        event.error_type,
+        event.message,
+      ]),
+      [[errorType, message]],
+    );
 });
