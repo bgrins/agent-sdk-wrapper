@@ -175,6 +175,48 @@ test("Codex cliLogin deny keeps logins and stored credentials out of the child",
   assert.equal(clients[0]?.apiKey, "k");
   assert.deepEqual(clients[0]?.env, { HOME: "/h" });
 });
+test("Codex client.config merges over the defaults but cannot unhide API keys", async () => {
+  const { agent, clients } = harness([completed], {
+    providerOptions: {
+      provider: "openai",
+      client: {
+        config: {
+          features: { shell_tool: false, shell_snapshot: true },
+          shell_environment_policy: { inherit: "core" },
+        },
+      },
+    },
+  });
+  await agent.run("config");
+  assert.deepEqual(clients[0]?.config, {
+    model_reasoning_summary: "auto",
+    features: { shell_snapshot: true, shell_tool: false },
+    shell_environment_policy: { inherit: "core" },
+  });
+  // Sent after config, so it survives a caller table that replaces the policy.
+  assert.deepEqual(clients[0]?.configOverrides, [
+    'shell_environment_policy.set.CODEX_API_KEY=""',
+  ]);
+  // The SDK sends an empty table as `key={}`, which replaces it.
+  for (const config of [
+    { shell_environment_policy: { set: {} } },
+    { "shell_environment_policy.set": { OPENAI_API_KEY: "k" } },
+    { cli_auth_credentials_store: "file" },
+    { model: null },
+  ])
+    assert.throws(
+      () =>
+        new Agent({
+          provider: "openai",
+          providerOptions: {
+            provider: "openai",
+            client: { config: config as never },
+          },
+        }),
+      ConfigError,
+      JSON.stringify(config),
+    );
+});
 test("Codex completion-only file/MCP/search items get paired calls and results", async () => {
   const { agent } = harness([
     {
@@ -363,7 +405,6 @@ test("closing a Codex stream closes its iterator without aborting the native sig
 });
 test("Codex rejects native config that could bypass wrapper guarantees", () => {
   for (const native of [
-    { client: { config: { mcp_servers: {} } } },
     { thread: { model: "override" } },
     { thread: { outputSchema: {} } },
     { thread: { sandboxMode: "bad" } },

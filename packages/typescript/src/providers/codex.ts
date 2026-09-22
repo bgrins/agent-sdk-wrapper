@@ -39,6 +39,14 @@ interface NativeCodex {
 }
 const loginTokenEnv = "CODEX_ACCESS_TOKEN";
 const apiKeyEnv = ["CODEX_API_KEY", "OPENAI_API_KEY"];
+const credentialKeys = ["cli_auth_credentials_store", "forced_login_method"];
+// Setting any of these would replace the blank API keys model commands get.
+const commandKeyPaths = [
+  "shell_environment_policy",
+  "shell_environment_policy.set",
+  ...apiKeyEnv.map((name) => `shell_environment_policy.set.${name}`),
+];
+type CodexConfig = NonNullable<CodexOptions["config"]>;
 type CodexFactory = (options: CodexOptions) => NativeCodex;
 export class CodexAdapter implements ProviderAdapter {
   readonly name = "openai";
@@ -51,9 +59,21 @@ export class CodexAdapter implements ProviderAdapter {
     options(native, ["provider", "client", "thread"], "providerOptions");
     options(
       native?.client,
-      ["apiKey", "baseUrl", "env", "codexPathOverride"],
+      ["apiKey", "baseUrl", "env", "codexPathOverride", "config"],
       "openai.client",
     );
+    for (const path of configPaths(native?.client?.config, "")) {
+      if (
+        credentialKeys.some((key) => path === key || path.startsWith(`${key}.`))
+      )
+        throw new ConfigError(
+          `openai.client.config ${path} conflicts with cliLogin, which controls how Codex stores and selects credentials`,
+        );
+      if (commandKeyPaths.includes(path))
+        throw new ConfigError(
+          `openai.client.config ${path} would undo the shell_environment_policy.set entries that hide ${apiKeyEnv.join(", ")} from model commands; set other shell_environment_policy keys one at a time`,
+        );
+    }
     options(
       native?.thread,
       [
@@ -114,15 +134,19 @@ export class CodexAdapter implements ProviderAdapter {
           ? undefined
           : native?.apiKey || inherited.OPENAI_API_KEY || undefined,
       env,
-      config: {
-        model_reasoning_summary: "auto",
-        // Shell snapshots write the child env, credentials included, to CODEX_HOME.
-        features: { shell_snapshot: false },
-        // The SDK passes the key as CODEX_API_KEY; hide it from model commands.
-        ...(req.cliLogin !== "require"
-          ? { shell_environment_policy: { set: { CODEX_API_KEY: "" } } }
-          : {}),
-      },
+      config: merged(
+        {
+          model_reasoning_summary: "auto",
+          // Shell snapshots write the child env, credentials included, to CODEX_HOME.
+          features: { shell_snapshot: false },
+        },
+        native?.config ?? {},
+      ),
+      // The SDK passes the key as CODEX_API_KEY; hide it from model commands. The
+      // SDK sends these after config, so no caller table can drop the entry.
+      ...(req.cliLogin !== "require"
+        ? { configOverrides: ['shell_environment_policy.set.CODEX_API_KEY=""'] }
+        : {}),
     };
   }
   private async client(req: ResolvedRequest): Promise<NativeCodex> {
@@ -351,6 +375,56 @@ export class CodexAdapter implements ProviderAdapter {
       await iterator?.return?.(); // The SDK's cleanup terminates a running child.
     }
   }
+}
+/**
+ * The keys the SDK sends as `--config` entries: nested keys joined with dots,
+ * one per leaf, and `{}` for an empty table. Rejects values the SDK would throw on.
+ */
+function configPaths(value: unknown, path: string): string[] {
+  if (value === undefined) return [];
+  const table = object(value);
+  if (!table) {
+    if (!path) throw new ConfigError("openai.client.config must be an object");
+    configValue(value, path);
+    return [path];
+  }
+  const entries = Object.entries(table).filter(
+    ([, child]) => child !== undefined,
+  );
+  if (path && !entries.length) return [path];
+  return entries.flatMap(([key, child]) => {
+    if (!key)
+      throw new ConfigError("openai.client.config keys must be non-empty");
+    return configPaths(child, path ? `${path}.${key}` : key);
+  });
+}
+function configValue(value: unknown, path: string): void {
+  if (typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number" && Number.isFinite(value)) return;
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries())
+      configValue(item, `${path}[${index}]`);
+    return;
+  }
+  const table = object(value);
+  if (!table)
+    throw new ConfigError(
+      `openai.client.config ${path} must be a string, finite number, boolean, array or table`,
+    );
+  for (const [key, child] of Object.entries(table))
+    if (child !== undefined) configValue(child, `${path}.${key}`);
+}
+/** The caller's config wins; nested tables merge key by key. */
+function merged(base: CodexConfig, over: CodexConfig): CodexConfig {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    const current = out[key];
+    out[key] =
+      object(current) && object(value)
+        ? merged(current as CodexConfig, value as CodexConfig)
+        : value;
+  }
+  return out;
 }
 function toolInfo(
   item: ThreadItem,

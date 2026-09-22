@@ -1121,7 +1121,7 @@
     {
       "id": "codex.web_tools_config_conflict",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript passes no Codex config overrides besides networkAccessEnabled; provider settings live in CODEX_HOME/config.toml" },
+      "languages": { "typescript": "unsupported: TypeScript has no web_tools" },
       "options": {
         "model": "gpt-5.4",
         "web_tools": false,
@@ -1436,10 +1436,10 @@
       "provider": "codex",
       "options": { "model": "gpt-5.4", "env": { "OPENAI_API_KEY": "sk-env-conformance" } },
       "prompt": "Print the key.",
-      "mock": [{ "shell": "printf %s \"${OPENAI_API_KEY:-unset}\"" }, { "text": "done" }],
+      "mock": [{ "shell": "printf '%s %s' \"${OPENAI_API_KEY:-unset}\" \"${CODEX_API_KEY:-unset}\"" }, { "text": "done" }],
       "expect": {
         "status": "success",
-        "tool_results": [{ "contains": "unset" }],
+        "tool_results": [{ "contains": "unset unset" }],
         "requests": {
           "match": [
             { "header": "authorization", "equals": "Bearer sk-env-conformance" },
@@ -1614,7 +1614,6 @@
     {
       "id": "codex.config_runtime_retries",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript passes no Codex config overrides besides networkAccessEnabled; provider settings live in CODEX_HOME/config.toml" },
       "options": {
         "model": "gpt-5.4",
         "provider_options": { "config": { "config_overrides": ["model_providers.mock.request_max_retries=1"] } }
@@ -1629,10 +1628,40 @@
     {
       "id": "codex.config_credential_store",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript passes no Codex config overrides besides networkAccessEnabled; provider settings live in CODEX_HOME/config.toml" },
       "options": {
         "model": "gpt-5.4",
         "provider_options": { "config": { "config_overrides": ["cli_auth_credentials_store=\"file\""] } }
+      },
+      "prompt": "Say ok.",
+      "expect": { "config_error": true }
+    },
+    {
+      "id": "codex.config_features",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "provider_options": { "config": { "config_overrides": ["features.shell_tool=false"] } }
+      },
+      "prompt": "Run ls.",
+      "mock": [{ "shell": "echo SHOULD_NOT_RUN" }, { "text": "done" }],
+      "expect": {
+        "status": "success",
+        "tool_calls": [],
+        "requests": {
+          "match": [
+            { "request": 0, "path": "tools", "excludes": "\"name\":\"exec_command\"" },
+            { "request": 0, "path": "tools", "contains": "\"name\":\"apply_patch\"" },
+            { "request": 1, "path": "input.-1.output", "contains": "unsupported call: exec_command" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "codex.config_command_keys",
+      "provider": "codex",
+      "options": {
+        "model": "gpt-5.4",
+        "provider_options": { "config": { "config_overrides": ["shell_environment_policy.set.CODEX_API_KEY=\"sk-visible\""] } }
       },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
@@ -1678,7 +1707,7 @@
     {
       "id": "codex.model_provider",
       "provider": "codex",
-      "languages": { "typescript": "unsupported: TypeScript selects Codex providers only through CODEX_HOME/config.toml or baseUrl" },
+      "languages": { "typescript": "unsupported: TypeScript requires an OpenAI API key under cliLogin deny, even with a custom model provider" },
       "options": {
         "model": "gpt-5.4",
         "env": { "OPENAI_API_KEY": "" },

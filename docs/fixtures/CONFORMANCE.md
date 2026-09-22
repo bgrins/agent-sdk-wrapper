@@ -49,7 +49,7 @@ Options are JSON; runners turn these into their native values:
 | `cwd`, `trace_file`, `artifacts_dir` | Paths relative to the case's scratch directory (`cwd` is created) |
 | `on_event` | `true` passes the runner's recording callback. Runners record every run's envelopes anyway: Python through `on_event`, TypeScript from the stream |
 | `on_provider_event` | `true` installs a recording callback |
-| `provider_options.config` | Codex: Python passes it with the mock wiring before its `config_overrides`; TypeScript takes only `sandbox_workspace_write.network_access=<bool>` entries, as `networkAccessEnabled` |
+| `provider_options.config` | Codex: Python passes it with the mock wiring before its `config_overrides`; TypeScript sends `sandbox_workspace_write.network_access=<bool>` as `networkAccessEnabled` and other `config_overrides` entries, whose values must be JSON-compatible TOML, as `client.config` keys |
 | `provider_options.codex` | `"client"`: a pre-built Codex client the runner starts with the mock wiring and `provider_options.config` |
 
 Without `cwd`, runners use a scratch `work` directory.

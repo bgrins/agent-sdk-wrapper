@@ -297,18 +297,22 @@ const pythonOptions: Record<string, Entry> = {
   },
   "provider_options.api_key": { codex: client("apiKey") },
   "provider_options.sandbox": { codex: thread("sandboxMode") },
-  // The TypeScript SDK sets this config key from networkAccessEnabled.
+  // Entries become client.config keys, which the SDK joins with dots, except the
+  // key it sets from networkAccessEnabled. Values are the JSON-compatible TOML subset.
   "provider_options.config.config_overrides": {
     codex: (entries: string[]) => {
       const fragment: Fragment = {};
+      const config: Options = {};
       for (const entry of entries) {
-        const value =
-          /^sandbox_workspace_write\.network_access=(true|false)$/.exec(
-            entry,
-          )?.[1];
-        if (!value) throw new Unmapped(`config_overrides entry ${entry}`);
-        merge(fragment, thread("networkAccessEnabled")(value === "true"));
+        const [, key, text] = /^([\w.-]+)=(.+)$/.exec(entry) ?? [];
+        if (!key || !text)
+          throw new Unmapped(`config_overrides entry ${entry}`);
+        const value: unknown = JSON.parse(text);
+        if (key === "sandbox_workspace_write.network_access")
+          merge(fragment, thread("networkAccessEnabled")(value));
+        else config[key] = value;
       }
+      if (Object.keys(config).length) merge(fragment, client("config")(config));
       return fragment;
     },
   },

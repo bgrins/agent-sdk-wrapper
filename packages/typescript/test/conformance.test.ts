@@ -176,6 +176,7 @@ const surface = {
       baseUrl: true,
       env: true,
       codexPathOverride: true,
+      config: true,
     } satisfies Keys<CodexNativeOptions>).map((key) => `client.${key}`),
     ...Object.keys({
       sandboxMode: true,
