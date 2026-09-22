@@ -247,6 +247,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     // Background subagents make the CLI emit an extra turn and a second result.
     if (native?.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === undefined)
       additions.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
+    // An inherited subagent model would override the run's model for subagents.
+    if (native?.env?.CLAUDE_CODE_SUBAGENT_MODEL === undefined)
+      additions.CLAUDE_CODE_SUBAGENT_MODEL = "";
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     req.signal?.addEventListener("abort", onAbort, { once: true });

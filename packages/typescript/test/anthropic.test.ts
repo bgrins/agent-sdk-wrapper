@@ -740,12 +740,19 @@ test("Claude stops at its first result, ignoring background-task turns", async (
   assert.equal(run.final_text, "launched");
   assert.equal(closed(), 1);
 });
-test("Claude child env disables background tasks and pins effort without replacing env semantics", async () => {
-  const inherited = harness([result()], { effort: "low" });
-  await inherited.agent.run("inherit");
-  const env = inherited.captured[0]?.env;
+test("Claude child env disables background tasks, pins effort and blanks the subagent model without replacing env semantics", async () => {
+  process.env.CLAUDE_CODE_SUBAGENT_MODEL = "claude-inherited";
+  let env: Options["env"];
+  try {
+    const inherited = harness([result()], { effort: "low" });
+    await inherited.agent.run("inherit");
+    env = inherited.captured[0]?.env;
+  } finally {
+    delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
+  }
   assert.equal(env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(env?.CLAUDE_CODE_EFFORT_LEVEL, "low");
+  assert.equal(env?.CLAUDE_CODE_SUBAGENT_MODEL, "");
   assert.equal(env?.PATH, process.env.PATH);
   const options = (env: Record<string, string>): AgentDefaults => ({
     providerOptions: { provider: "anthropic", options: { env } },
@@ -755,12 +762,14 @@ test("Claude child env disables background tasks and pins effort without replaci
     options({
       ANTHROPIC_API_KEY: "k",
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+      CLAUDE_CODE_SUBAGENT_MODEL: "claude-sub",
     }),
   );
   await explicit.agent.run("explicit");
   assert.deepEqual(explicit.captured[0]?.env, {
     ANTHROPIC_API_KEY: "k",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+    CLAUDE_CODE_SUBAGENT_MODEL: "claude-sub",
     CLAUDE_CODE_EFFORT_LEVEL: "",
   });
   const same = harness([result()], {
@@ -772,6 +781,7 @@ test("Claude child env disables background tasks and pins effort without replaci
     ANTHROPIC_API_KEY: "k",
     CLAUDE_CODE_EFFORT_LEVEL: "high",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    CLAUDE_CODE_SUBAGENT_MODEL: "",
   });
   assert.throws(
     () =>
