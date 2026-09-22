@@ -9,8 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { type TestContext, test } from "node:test";
-import { Agent } from "../src/index.js";
+import { Codex, type ThreadEvent } from "@openai/codex-sdk";
+import { Agent, type AgentDefaults } from "../src/index.js";
 import { type Step, startMock } from "./conformance/mock.js";
 
 // Drives the bundled Codex runtime against a local mock Responses API.
@@ -49,6 +51,14 @@ async function files(dir: string): Promise<string[]> {
     .filter((entry) => entry.isFile())
     .map((entry) => join(entry.parentPath, entry.name));
 }
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 test("Codex runs keep the API key out of CODEX_HOME and shell commands", async (t) => {
   const key = "sk-wrapper-test-SECRET";
@@ -81,4 +91,59 @@ test("Codex runs keep the API key out of CODEX_HOME and shell commands", async (
   for (const path of await files(home))
     if ((await readFile(path)).includes(key)) leaked.push(path);
   assert.deepEqual(leaked, []);
+});
+
+test("an async provider-event rejection stops codex exec and propagates", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const commandPid = join(tmpdir(), `agent-sdk-wrapper-command-${process.pid}`);
+  const { root, cwd, env, mock } = await scratch(t, [
+    { shell: `echo $$ > ${commandPid}; exec sleep 20` },
+    { text: "done" },
+  ]);
+  // Record the runtime's PID: exec keeps it for the real binary.
+  const codex = join(root, "codex");
+  const binary = (
+    new Codex() as unknown as { exec: { executablePath: string } }
+  ).exec.executablePath;
+  await writeFile(
+    codex,
+    `#!/bin/sh\necho $$ > "$0.pid"\nexec "${binary}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  const error = new Error("async callback failed");
+  const defaults: AgentDefaults = {
+    provider: "codex",
+    model: "gpt-5.4",
+    cwd,
+    // Without the rejection stopping it, the run would end cancelled instead.
+    signal: AbortSignal.timeout(10_000),
+    providerOptions: {
+      provider: "openai",
+      client: {
+        env: { ...env, OPENAI_API_KEY: "sk-mock" },
+        codexPathOverride: codex,
+      },
+      thread: { ...thread, sandboxMode: "danger-full-access" },
+    },
+    onProviderEvent: async (event) => {
+      if ((event as ThreadEvent).type === "item.started") throw error;
+    },
+  };
+  try {
+    await assert.rejects(
+      new Agent(defaults).run("Run it."),
+      (thrown) => thrown === error,
+    );
+    const pid = Number(await readFile(`${codex}.pid`, "utf8"));
+    for (let wait = 0; alive(pid) && wait < 50; wait++) await sleep(100);
+    assert.equal(alive(pid), false, "codex exec is still running");
+    assert.equal(mock.requests.length, 1, "the run continued past the command");
+  } finally {
+    // Model commands outlive codex exec (a documented limit); stop this one.
+    await sleep(500);
+    const pid = Number(await readFile(commandPid, "utf8").catch(() => ""));
+    if (pid && alive(pid)) process.kill(pid, "SIGKILL");
+    await rm(commandPid, { force: true });
+  }
 });

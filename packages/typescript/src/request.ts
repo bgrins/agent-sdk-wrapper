@@ -25,7 +25,8 @@ export interface AgentDefaults {
   includeRaw?: boolean;
   signal?: AbortSignal;
   providerOptions?: ProviderOptions;
-  onProviderEvent?: (event: unknown) => void;
+  /** A returned promise that rejects fails the run like a thrown exception. */
+  onProviderEvent?: (event: unknown) => void | PromiseLike<void>;
   traceFile?: string;
   cliLogin?: CliLogin;
   // Reserved features fail at compile time and at runtime, including empty values.

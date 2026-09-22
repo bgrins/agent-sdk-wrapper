@@ -152,17 +152,40 @@ export class Agent {
       let thrown: unknown;
       // A callback exception is the caller's, not the provider's: rethrow it unclassified.
       let callback: { error: unknown } | undefined;
+      // An async callback's rejection stops the runtime through the adapter's signal.
+      const stop = new AbortController();
+      const pending = new Set<Promise<void>>();
       const onNativeEvent = (native: unknown) => {
+        let result: unknown;
         try {
-          req.onProviderEvent?.(native);
+          result = req.onProviderEvent?.(native);
         } catch (error) {
           callback ??= { error };
           throw error;
         }
+        if (typeof (result as PromiseLike<unknown>)?.then !== "function")
+          return;
+        const settled: Promise<void> = Promise.resolve(result).then(
+          () => {
+            pending.delete(settled);
+          },
+          (error: unknown) => {
+            pending.delete(settled);
+            callback ??= { error };
+            stop.abort(error);
+          },
+        );
+        pending.add(settled);
       };
+      const signal = req.signal
+        ? AbortSignal.any([req.signal, stop.signal])
+        : stop.signal;
       try {
         req.signal?.throwIfAborted();
-        for await (const event of adapter.stream(req, { onNativeEvent })) {
+        for await (const event of adapter.stream(
+          { ...req, signal },
+          { onNativeEvent },
+        )) {
           if (callback) throw callback.error;
           if (event.type === "error") failure ??= event;
           if (event.type === "session_info") {
@@ -171,8 +194,11 @@ export class Agent {
           }
           yield frame(event);
         }
+        // A rejection after the last native event still fails the run.
+        await Promise.all(pending);
         if (callback) throw callback.error;
       } catch (cause) {
+        await Promise.all(pending);
         if (callback) throw callback.error;
         if (cause instanceof TraceWriteError) throw cause;
         // A runtime killed by the caller's abort was cancelled, not terminated.

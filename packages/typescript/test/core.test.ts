@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   Agent,
@@ -631,6 +632,55 @@ test("provider-event callback exceptions propagate unclassified and close the ad
       (thrown) => thrown === error,
     );
     assert.deepEqual(types, ["run_started"]);
+  }
+  assert.equal(closed, 2);
+});
+test("async provider-event rejections propagate unclassified and stop the adapter", async () => {
+  let closed = 0;
+  const adapters = [
+    // The rejection arrives while the runtime is busy; the adapter's signal stops it.
+    fake(async function* (req, context) {
+      try {
+        context.onNativeEvent({ type: "native" });
+        yield { type: "text", text: "before" };
+        await new Promise((resolve) =>
+          req.signal?.addEventListener("abort", resolve),
+        );
+        throw new Error("runtime stopped");
+      } finally {
+        closed++;
+      }
+    }),
+    // The rejection arrives after the last native event.
+    fake(async function* (_req, context) {
+      try {
+        context.onNativeEvent({ type: "native" });
+        yield { type: "text", text: "complete" };
+      } finally {
+        closed++;
+      }
+    }),
+  ];
+  for (const adapter of adapters) {
+    const error = new Error("my webhook failed");
+    const agent = new Agent(
+      {
+        provider: "openai",
+        onProviderEvent: async () => {
+          await sleep(10);
+          throw error;
+        },
+      },
+      { openai: adapter },
+    );
+    const types: string[] = [];
+    await assert.rejects(
+      collectRun(agent.stream("callback"), (env) => {
+        types.push(env.event.type);
+      }),
+      (thrown) => thrown === error,
+    );
+    assert.deepEqual(types, ["run_started", "text"]);
   }
   assert.equal(closed, 2);
 });
