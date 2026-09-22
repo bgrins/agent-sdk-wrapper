@@ -551,35 +551,6 @@ def test_anthropic_signal_killed_runtime_raises_process_terminated(
     assert excinfo.value.signal == signal
 
 
-@pytest.mark.parametrize(
-    ("text", "error_type"),
-    [
-        ("Failed to start Claude Code: [Errno 13] Permission denied", "provider_exception"),
-        (
-            "Failed to start Claude Code: [Errno 35] Resource temporarily unavailable",
-            "transient_api_error",
-        ),
-    ],
-)
-def test_anthropic_connection_errors_are_transient_only_when_classified_so(
-    monkeypatch, text, error_type
-):
-    import claude_agent_sdk
-    from claude_agent_sdk import CLIConnectionError
-
-    from agent_sdk_wrapper import Agent
-
-    async def fake_query(*, prompt, options):
-        raise CLIConnectionError(text)
-        yield  # pragma: no cover - generator marker
-
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
-    result = asyncio.run(Agent(provider="anthropic").run("x"))
-
-    assert result.error_type == error_type
-    assert text in result.error
-
-
 def test_anthropic_stream_maps_subagent_lifecycle_and_names_tool_results(monkeypatch):
     import claude_agent_sdk
     from claude_agent_sdk import (
@@ -1014,29 +985,44 @@ def test_anthropic_subagents_without_a_notification_end_at_the_result(monkeypatc
     ]
 
 
-def test_anthropic_process_errors_carry_the_stderr_tail(monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "stderr", "evidence"),
+    [
+        (
+            "connection",
+            None,
+            "Failed to start Claude Code: [Errno 35] Resource temporarily unavailable",
+        ),
+        ("process", "API Error: 529 overloaded_error", "API Error: 529 overloaded_error"),
+    ],
+)
+def test_anthropic_runtime_failures_keep_the_evidence_the_runner_classifies(
+    monkeypatch, error, stderr, evidence
+):
     import claude_agent_sdk
-    from claude_agent_sdk import ProcessError
+    from claude_agent_sdk import CLIConnectionError, ProcessError
 
-    from agent_sdk_wrapper import TransientError
+    from agent_sdk_wrapper import AgentSdkWrapperError
+    from agent_sdk_wrapper.classify import classify
 
     async def fake_query(*, prompt, options):
-        options.stderr("API Error: 529 overloaded_error")
+        if stderr:
+            options.stderr(stderr)
+        if error == "connection":
+            raise CLIConnectionError(evidence)
         raise ProcessError("Command failed with exit code 1", exit_code=1)
         yield  # pragma: no cover - generator marker
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
 
     async def collect():
-        return [
-            event
-            async for event in AnthropicProvider().stream(
-                RunRequest(provider="anthropic", prompt="ignored")
-            )
-        ]
+        req = RunRequest(provider="anthropic", prompt="ignored")
+        return [event async for event in AnthropicProvider().stream(req)]
 
-    with pytest.raises(TransientError, match="529 overloaded_error"):
+    with pytest.raises(AgentSdkWrapperError) as excinfo:
         asyncio.run(collect())
+    assert evidence in str(excinfo.value)
+    assert classify(str(excinfo.value)) == "transient_api_error"
 
 
 def test_anthropic_chains_a_user_stderr_callback():

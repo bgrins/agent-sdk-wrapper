@@ -43,13 +43,12 @@ from claude_agent_sdk import (
 )
 
 from ..artifacts import ProviderEventLogger
-from ..classify import TRANSIENT, classify
+from ..classify import classify
 from ..errors import (
     AgentSdkWrapperError,
     ConfigError,
     ProcessTerminatedError,
     ProviderNotAvailableError,
-    TransientError,
 )
 from ..events import (
     AgentEvent,
@@ -594,18 +593,15 @@ class AnthropicProvider(ProviderAdapter):
         except CLINotFoundError as exc:
             raise ProviderNotAvailableError(str(exc), cause=exc) from exc
         except CLIConnectionError as exc:
-            msg = f"connection to Claude Code runtime failed: {exc}"
-            if classify(str(exc)) == TRANSIENT:
-                raise TransientError(msg, cause=exc) from exc
-            raise AgentSdkWrapperError(msg, cause=exc) from exc
+            raise AgentSdkWrapperError(
+                f"connection to Claude Code runtime failed: {exc}", cause=exc
+            ) from exc
         except ProcessError as exc:
             stderr = "\n".join(stderr_tail)
             msg = f"{exc}\n{stderr}" if stderr else str(exc)
             signum = _exit_signal(exc.exit_code)
             if signum is not None:
                 raise ProcessTerminatedError(signum, message=msg, cause=exc) from exc
-            if classify(stderr) == TRANSIENT:
-                raise TransientError(msg, cause=exc) from exc
             raise AgentSdkWrapperError(msg, cause=exc) from exc
         except CLIJSONDecodeError as exc:
             raise AgentSdkWrapperError(f"failed to decode CLI output: {exc}", cause=exc) from exc
