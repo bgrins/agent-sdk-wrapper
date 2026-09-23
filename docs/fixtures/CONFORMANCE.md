@@ -33,7 +33,7 @@ runs it live.
 Live runs never check `requests`. Live runs use the model from the package's own variables (Python
 `AGENT_SDK_WRAPPER_ANTHROPIC_MODEL` / `AGENT_SDK_WRAPPER_OPENAI_MODEL`, TypeScript
 `AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL` / `AGENT_SDK_WRAPPER_TS_OPENAI_MODEL`), else
-`live.options.model`, else `claude-haiku-4-5` / `gpt-5.6-luna`; the offline model is never used
+`live.options.model`, else `claude-haiku-4-5` / `gpt-6-luna`; the offline model is never used
 live.
 
 ### Option values
@@ -43,7 +43,7 @@ Options are JSON; runners turn these into their native values:
 | Option | Value |
 |---|---|
 | `tools` | Names of runner-defined tools: `add(a: int, b: int) -> int` returns `a + b`; `shout(text: str) -> str` returns `text` upper-cased and raises `ValueError("nothing to shout")` for empty text |
-| `output_schema` | A runner-defined model: `Weather` is `{city: str, temp_c: int}` |
+| `output_schema` | Python uses the runner-defined `Weather` model (`{city: str, temp_c: int}`); TypeScript takes an object-root JSON Schema in a language override |
 | `mcp_servers` | Python `McpStdioServer` fields; `"fixture": "simple_mcp_server"` launches `packages/python/tests/fixtures/simple_mcp_server.py` (server `brief_tools`, tool `read_brief`) with the runner's interpreter in place of `command`/`args` |
 | `subagents` | Name to Python `SubagentDef` fields |
 | `cwd`, `trace_file`, `artifacts_dir` | Paths relative to the case's scratch directory (`cwd` is created) |

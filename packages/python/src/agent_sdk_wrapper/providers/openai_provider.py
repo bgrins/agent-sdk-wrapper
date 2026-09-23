@@ -688,11 +688,6 @@ def _validate_supported(req: RunRequest) -> None:
     unsupported: list[str] = []
     if req.max_turns is not None:
         unsupported.append("max_turns. Codex has no turn limit")
-    if req.builtin_tools is not None:
-        unsupported.append(
-            "builtin_tools. Codex built-in tools cannot be disabled or allowlisted "
-            "through agent-sdk-wrapper yet"
-        )
     if req.permission_mode is not None:
         unsupported.append("permission_mode")
     if req.setting_sources is not None:

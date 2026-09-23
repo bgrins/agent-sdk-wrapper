@@ -22,7 +22,8 @@ subset of Python; native tools, options and permission policies are not a shared
 | Native `env` | Merged over the parent environment | Replaces the parent environment |
 | Codex config | `config_overrides` strings, after the wrapper's | `client.config` tables, merged over the wrapper's |
 | Codex tool filters | `McpServer.enabled_tools`/`disabled_tools`; `allowed_tools`/`disallowed_tools` rejected | No MCP servers; native `config` can set `mcp_servers` |
-| Tools, structured output, MCP, subagent lifecycle | Supported with provider limits | Not yet implemented |
+| Tools, MCP, subagent lifecycle | Supported with provider limits | Not yet implemented |
+| Structured output | Pydantic model; validated locally | Object-root JSON Schema; native enforcement, object-shape check |
 | Traces | `trace_file` and managed artifacts | `traceFile`; no managed artifact bundle |
 | Effort | Codex includes `none`; input is lowercased | Codex includes `persistent`; input is exact |
 | Redacted thinking | Size from the thinking signature | Size from `redacted_thinking` blocks |
@@ -117,7 +118,7 @@ in that session.
 
 - Breaking iteration leaves an incomplete run.
 - Codex web-search results expose no result body.
-- `structured_output` and `artifacts_dir` stay null. Compaction and Python-only event variants are omitted.
+- `artifacts_dir` stays null. Compaction and Python-only event variants are omitted.
 - Codex model commands keep running after a cancel, timeout or callback failure: `codex exec`
   exits on SIGTERM without stopping them. Python closes the app-server's stdin first, which
   stops them.

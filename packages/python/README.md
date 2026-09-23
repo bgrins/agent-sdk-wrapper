@@ -101,8 +101,8 @@ Caller `config_overrides` take precedence except login-store keys,
 web-search keys when `web_tools` is set. Stopping a run closes the app-server's stdin
 to stop its commands.
 
-For a run without a shell, Claude takes `builtin_tools="none"`, which leaves the model no
-tools. Codex always offers `apply_patch` and `request_user_input`. Its feature flags remove
+For a run without built-in tools, Claude takes `extra_options={"tools": []}`. Codex always offers
+`apply_patch` and `request_user_input`. Its feature flags remove
 the other built-in tools, and a read-only sandbox with `deny_all` approvals refuses every
 file write:
 
@@ -152,15 +152,9 @@ fallback, the original model's text, then a warning, precede a new `SessionInfo`
 changed session ID also emits one.
 [Accounting limits](../typescript/PARITY.md).
 
-CLI: `uv run agent-sdk-wrapper run --provider codex --prompt "Say hello" --output jsonl`.
-`--stream` requires `--output text`; `--cli-login` and repeatable `--setting-source`
-set those options. `--config` reads a TOML or JSON file whose keys are `Agent` keywords
-(except tools, `output_schema`, callbacks and `continue_session`) plus `prompt`,
-`prompt_file`, `output` and `stream`; `mcp_servers` entries are `McpStdioServer` or, with a
-`url`, `McpHttpServer` fields. Values must match the keyword's type exactly: `"false"` is
-not a boolean and a string is not a list. Relative `cwd`, `trace_file`, `artifacts_dir`,
-`prompt_file` and `mcp_servers[].cwd` paths resolve against the file. Flags replace its
-values, except that `--env`, `--provider-option` and `--extra-option` merge by key.
-Exit codes: 1 failed run, 2 invalid settings, 128+N killed runtime (`--output json` or
-`text` prints the result first).
+Run a single prompt with `uv run python examples/run_basic.py`, or a staged
+plan–draft–review flow with `uv run python examples/agent_flow.py`. Set `PROVIDER=codex`
+and optionally `MODEL` to choose Codex. The staged flow uses a separate, schema-free
+exploration turn before Codex's structured extraction turn; each turn has its own
+`artifacts_dir`.
 Run tests with `uv run pytest`; see [validation](../typescript/VALIDATION.md) for Compose and live tests.

@@ -7,7 +7,8 @@
       "anthropic:systemPrompt": "Claude takes it as options.systemPrompt; codex.system_prompt covers the reserved top-level name",
       "anthropic:maxTurns": "Claude takes it as options.maxTurns; codex.max_turns covers the reserved top-level name",
       "anthropic:permissionMode": "Claude takes it as options.permissionMode; codex.permission_mode covers the reserved top-level name",
-      "anthropic:builtinTools": "Claude takes it as options.tools; codex.builtin_tools covers the reserved top-level name",
+      "anthropic:builtinTools": "Python and TypeScript use Claude's native tools option instead of a first-class setting",
+      "codex:builtinTools": "Codex has no portable built-in tool allowlist; use native feature flags and sandbox controls",
       "anthropic:timeout": "Python's timeout maps to signal; TypeScript reserves the name",
       "codex:timeout": "Python's timeout maps to signal; TypeScript reserves the name",
       "codex:client.baseUrl": "Selects the built-in provider, whose websocket transport and retries the mock cannot turn off; cases select a custom provider in CODEX_HOME/config.toml",
@@ -108,9 +109,9 @@
       "expect": { "config_error": true }
     },
     {
-      "id": "anthropic.builtin_tools",
+      "id": "anthropic.native_tools",
       "provider": "anthropic",
-      "options": { "model": "claude-haiku-4-5", "builtin_tools": ["Read"] },
+      "options": { "model": "claude-haiku-4-5", "extra_options": { "tools": ["Read"] } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": {
@@ -124,9 +125,9 @@
       }
     },
     {
-      "id": "anthropic.builtin_tools_none",
+      "id": "anthropic.native_tools_empty",
       "provider": "anthropic",
-      "options": { "model": "claude-haiku-4-5", "builtin_tools": "none" },
+      "options": { "model": "claude-haiku-4-5", "extra_options": { "tools": [] } },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": { "status": "success", "requests": { "match": [{ "path": "tools.0", "absent": true }] } }
@@ -190,8 +191,8 @@
     {
       "id": "anthropic.web_tools_on",
       "provider": "anthropic",
-      "languages": { "typescript": "unsupported: TypeScript has no web_tools; anthropic.builtin_tools covers native tools lists" },
-      "options": { "model": "claude-haiku-4-5", "web_tools": true, "builtin_tools": ["Read"] },
+      "languages": { "typescript": "unsupported: TypeScript has no web_tools; anthropic.native_tools covers native tools lists" },
+      "options": { "model": "claude-haiku-4-5", "web_tools": true },
       "prompt": "Say ok.",
       "mock": [{ "text": "ok" }],
       "expect": {
@@ -199,8 +200,7 @@
         "requests": {
           "match": [
             { "path": "tools", "contains": "\"name\":\"WebSearch\"" },
-            { "path": "tools", "contains": "\"name\":\"WebFetch\"" },
-            { "path": "tools", "excludes": "\"name\":\"Bash\"" }
+            { "path": "tools", "contains": "\"name\":\"WebFetch\"" }
           ]
         }
       }
@@ -209,7 +209,7 @@
       "id": "anthropic.web_tools_conflict",
       "provider": "anthropic",
       "languages": { "typescript": "unsupported: TypeScript has no web_tools; a native tools list has no conflict to reject" },
-      "options": { "model": "claude-haiku-4-5", "web_tools": true, "builtin_tools": "none" },
+      "options": { "model": "claude-haiku-4-5", "web_tools": true, "extra_options": { "tools": [] } },
       "prompt": "Say ok.",
       "expect": { "config_error": true }
     },
@@ -377,7 +377,7 @@
       "id": "anthropic.structured_tool_handoff",
       "provider": "anthropic",
       "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
-      "options": { "model": "claude-haiku-4-5", "tools": ["add"], "output_schema": "Weather", "builtin_tools": "none" },
+      "options": { "model": "claude-haiku-4-5", "tools": ["add"], "output_schema": "Weather", "extra_options": { "tools": [] } },
       "prompt": "Call add with a=19 and b=2, then report the weather for Paris with temp_c set to the sum.",
       "mock": [
         { "tool": { "name": "mcp__agent_sdk_wrapper_tools__add", "input": { "a": 19, "b": 2 } } },
@@ -407,7 +407,7 @@
     {
       "id": "anthropic.output_schema_missing",
       "provider": "anthropic",
-      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement structured output yet" } },
+      "languages": { "typescript": { "options": { "model": "claude-haiku-4-5", "output_schema": { "type": "object", "properties": { "city": { "type": "string" }, "temp_c": { "type": "integer" } }, "required": ["city", "temp_c"], "additionalProperties": false } }, "reason": "TypeScript accepts a JSON Schema object rather than a Python model name" } },
       "options": { "model": "claude-haiku-4-5", "output_schema": "Weather" },
       "prompt": "Report the weather for Paris.",
       "mock": [{ "text": "It is sunny." }],
@@ -445,7 +445,7 @@
         "model": "claude-haiku-4-5",
         "continue_session": true,
         "on_event": true,
-        "builtin_tools": "none",
+        "extra_options": { "tools": [] },
         "permission_mode": "dontAsk"
       },
       "prompt": "Remember the token NATIVE_TWIN_42 for later. Reply READY.",
@@ -1008,13 +1008,6 @@
       }
     },
     {
-      "id": "codex.builtin_tools",
-      "provider": "codex",
-      "options": { "model": "gpt-5.4", "builtin_tools": ["command"] },
-      "prompt": "Say ok.",
-      "expect": { "config_error": true }
-    },
-    {
       "id": "codex.tools",
       "provider": "codex",
       "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement callable tools yet" } },
@@ -1254,7 +1247,7 @@
     {
       "id": "codex.output_schema_invalid",
       "provider": "codex",
-      "languages": { "typescript": { "expect": { "config_error": true }, "reason": "TypeScript does not implement structured output yet" } },
+      "languages": { "typescript": { "options": { "model": "gpt-5.4", "output_schema": { "type": "object", "properties": { "city": { "type": "string" }, "temp_c": { "type": "integer" } }, "required": ["city", "temp_c"], "additionalProperties": false } }, "reason": "TypeScript accepts a JSON Schema object rather than a Python model name" } },
       "options": { "model": "gpt-5.4", "output_schema": "Weather" },
       "prompt": "Report the weather for Paris.",
       "mock": [{ "text": "It is sunny." }],

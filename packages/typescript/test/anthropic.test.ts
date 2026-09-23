@@ -138,6 +138,38 @@ function harness(
     closed: () => closed,
   };
 }
+const outputSchema = {
+  type: "object",
+  properties: { answer: { type: "string" } },
+  required: ["answer"],
+  additionalProperties: false,
+};
+test("Claude returns the SDK structured result", async () => {
+  const { agent, captured } = harness([
+    assistant([textBlock('{"answer":"done"}')]),
+    result({ structured_output: { answer: "done" } }),
+  ]);
+  const run = await agent.run({ prompt: "question", outputSchema });
+  assert.equal(run.status, "success");
+  assert.deepEqual(captured[0]?.outputFormat, {
+    type: "json_schema",
+    schema: outputSchema,
+  });
+  assert.deepEqual(run.structured_output, { answer: "done" });
+  assert.deepEqual(
+    run.events
+      .filter(({ event }) => event.type === "structured_output")
+      .map(({ event }) => event),
+    [{ type: "structured_output", value: { answer: "done" } }],
+  );
+});
+test("Claude rejects a success without structured output", async () => {
+  const { agent } = harness([result()]);
+  const run = await agent.run({ prompt: "question", outputSchema });
+  assert.equal(run.status, "failure");
+  assert.equal(run.error_type, "structured_output_failed");
+  assert.equal(run.structured_output, null);
+});
 test("Claude maps completed blocks, hidden reasoning, tool results, final usage and raw events", async () => {
   const text = assistant([{ type: "text", text: "answer", citations: null }]);
   const messages: SDKMessage[] = [

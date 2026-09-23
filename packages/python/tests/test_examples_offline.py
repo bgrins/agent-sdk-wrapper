@@ -120,6 +120,12 @@ def _write_offline_subagent_provider_events(req: RunRequest, name: str) -> None:
 
 def _fake_structured_output(schema: type):
     name = getattr(schema, "__name__", "")
+    if name == "Plan":
+        return schema(steps=["Greet the teammate", "Offer help getting started"])
+    if name == "Draft":
+        return schema(text="Welcome to the team! Let us know how we can help you get started.")
+    if name == "Review":
+        return schema(approved=True, feedback="The note follows both steps.")
     if name == "Weather":
         return schema(city="Portland", temperature_c=21.0, conditions="clear")
     if name == "WorkflowPlan":
@@ -344,3 +350,63 @@ async def test_subagent_example_logs_codex_provider_events(
     stdout = (artifacts_dir / "stdout.txt").read_text(encoding="utf-8")
     assert "provider event: codex subagent started [reviewer]" in stdout
     assert "provider event: codex subagent completed [reviewer]" in stdout
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["anthropic", "codex"])
+async def test_agent_flow_preserves_stages_and_codex_extraction(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requests: list[RunRequest] = []
+    native_codex_provider = openai_mod.OpenAIProvider
+    install_fake_providers(monkeypatch, requests)
+    if provider == "codex":
+
+        class CheckedCodexProvider(OfflineExampleProvider):
+            def __init__(self, **options: object) -> None:
+                super().__init__(requests)
+                self._native = native_codex_provider(**options)
+
+            def validate_request(self, req: RunRequest) -> None:
+                self._native.validate_request(req)
+
+        monkeypatch.setattr(openai_mod, "OpenAIProvider", CheckedCodexProvider)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PROVIDER", provider)
+    monkeypatch.delenv("MODEL", raising=False)
+
+    module = load_example_module("agent_flow", monkeypatch)
+    await module.main()
+
+    canonical = "openai" if provider == "codex" else provider
+    root = latest_artifact_dir(tmp_path, canonical, "agent_flow")
+    for name in ("planner", "writer", "reviewer"):
+        stage_dir = root / name / "result"
+        assert (stage_dir / "manifest.json").exists()
+        assert (stage_dir / "trace.jsonl").exists()
+        result = json.loads((stage_dir / "result.json").read_text(encoding="utf-8"))
+        assert result["status"] == "success"
+        assert result["structured_output"] is not None
+        if canonical == "openai":
+            assert (root / name / "explore" / "trace.jsonl").exists()
+
+    if canonical == "openai":
+        assert len(requests) == 6
+        for explore, extract in zip(requests[::2], requests[1::2], strict=True):
+            assert explore.output_schema is None
+            assert explore.session_id is None
+            assert extract.output_schema is not None
+            assert extract.session_id == "offline-session"
+            assert extract.effort == "low"
+            assert explore.extra_options == {}
+            assert explore.artifacts_dir != extract.artifacts_dir
+    else:
+        assert len(requests) == 3
+        assert all(req.output_schema is not None for req in requests)
+        assert all(req.extra_options == {"tools": []} for req in requests)
+    assert "Greet the teammate" in requests[2 if canonical == "openai" else 1].prompt
+    assert "Artifacts:" in capsys.readouterr().out

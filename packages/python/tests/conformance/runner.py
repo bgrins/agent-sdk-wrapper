@@ -36,7 +36,7 @@ SCHEMA = json.loads((ROOT / "docs/fixtures/conformance-v1.schema.json").read_tex
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 LIVE_MODELS = {
     "anthropic": ("AGENT_SDK_WRAPPER_ANTHROPIC_MODEL", "claude-haiku-4-5"),
-    "codex": ("AGENT_SDK_WRAPPER_OPENAI_MODEL", "gpt-5.6-luna"),
+    "codex": ("AGENT_SDK_WRAPPER_OPENAI_MODEL", "gpt-6-luna"),
 }
 LIVE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
 # Live runs keep their artifacts for inspection unless a case writes its own.

@@ -28,6 +28,28 @@ if (result.session_id) {
 }
 ```
 
+For structured output, pass an object-root JSON Schema to either provider:
+
+```ts
+const run = await agent.run({
+  prompt: "Return a short answer as JSON.",
+  outputSchema: {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"],
+    additionalProperties: false,
+  },
+});
+if (run.status !== "success") throw new Error(run.error ?? "Run failed");
+console.log(run.structured_output);
+```
+
+`structured_output` events carry the parsed object. For Codex, only the last
+completed assistant message is used, after the turn completes; intermediate
+messages remain ordinary `text` events. Missing or invalid output fails the run
+with `structured_output_failed`. The provider enforces the schema; the wrapper
+checks that the returned value is an object, not every JSON Schema constraint.
+
 Claude needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or an enabled cloud-provider
 flag such as `CLAUDE_CODE_USE_BEDROCK=1`; a keyless `ANTHROPIC_BASE_URL` gateway needs a
 placeholder key. Codex needs `OPENAI_API_KEY` or `client.apiKey`, including with

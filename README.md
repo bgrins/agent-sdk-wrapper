@@ -14,8 +14,8 @@ Both expose `Agent.run()` and `Agent.stream()`. Use provider `anthropic` or `cod
 (an alias for `openai`). Unsupported settings raise `ConfigError`. Runs use API or
 cloud-provider credentials and never a runtime's stored login unless Codex
 `cli_login="require"` asks for it.
-Python supports callable tools, MCP and structured output; TypeScript intentionally
-supports a smaller run/stream/resume API. See [API limits](packages/typescript/PARITY.md)
+Python supports callable tools and MCP; both packages support structured output.
+TypeScript intentionally supports a smaller run/stream/resume API. See [API limits](packages/typescript/PARITY.md)
 and [SDK versions](docs/sdk-versions.md).
 
 ## Develop

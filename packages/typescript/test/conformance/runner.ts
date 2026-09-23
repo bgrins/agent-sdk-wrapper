@@ -119,7 +119,7 @@ export const specErrors = (value: unknown = spec) =>
 
 const liveModels: Record<CaseProvider, [env: string, model: string]> = {
   anthropic: ["AGENT_SDK_WRAPPER_TS_ANTHROPIC_MODEL", "claude-haiku-4-5"],
-  codex: ["AGENT_SDK_WRAPPER_TS_OPENAI_MODEL", "gpt-5.6-luna"],
+  codex: ["AGENT_SDK_WRAPPER_TS_OPENAI_MODEL", "gpt-6-luna"],
 };
 const keyEnv: Record<CaseProvider, string> = {
   anthropic: "ANTHROPIC_API_KEY",
@@ -261,11 +261,6 @@ const pythonOptions: Record<string, Entry> = {
       },
     }),
     codex: request("permissionMode"),
-  },
-  builtin_tools: {
-    anthropic: (tools: string | string[]) =>
-      claude("tools")(tools === "none" ? [] : tools),
-    codex: request("builtinTools"),
   },
   web_tools: {
     codex: (enabled: boolean) =>

@@ -163,7 +163,7 @@ def test_live_fixture_promotion_models_ignore_generic_model_env(monkeypatch) -> 
             "openai",
             use_generic_model_env=False,
         )
-        == "gpt-5.6-luna"
+        == "gpt-6-luna"
     )
 
     monkeypatch.setenv("PROVIDER", "anthropic")

@@ -37,7 +37,6 @@ from .logging import LOGGER_NAME, TraceWriter, get_logger
 from .mcp import McpHttpServer, McpServer, McpStdioServer, McpToolApprovalMode
 from .request import (
     INHERIT_MODEL,
-    BuiltinTools,
     Effort,
     Provider,
     ProviderInput,
@@ -65,7 +64,6 @@ __version__ = "0.1.0"
 __all__ = [
     "Agent",
     "AgentEvent",
-    "BuiltinTools",
     "ConfigError",
     "ContextCompacted",
     "Error",

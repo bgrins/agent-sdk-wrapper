@@ -5,8 +5,8 @@
     "model": "gpt-test-2026",
     "status": "success",
     "ended_reason": "success",
-    "final_text": "Hello world",
-    "structured_output": null,
+    "final_text": "{\"answer\":\"Hello world\"}",
+    "structured_output": { "answer": "Hello world" },
     "usage": {
       "input_tokens": 20,
       "output_tokens": 7,
@@ -94,7 +94,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "Hello world"
+          "text": "{\"answer\":\"Hello world\"}"
         }
       },
       {
@@ -126,6 +126,15 @@
       {
         "run_id": "contract-success",
         "sequence": 9,
+        "timestamp": "2026-09-01T00:00:00Z",
+        "event": {
+          "type": "structured_output",
+          "value": { "answer": "Hello world" }
+        }
+      },
+      {
+        "run_id": "contract-success",
+        "sequence": 10,
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "run_finished",

@@ -137,9 +137,7 @@ _WRAPPER_OWNED_OPTIONS: dict[str, Callable[[RunRequest], bool]] = {
     "resume": lambda req: bool(req.session_id),
     "setting_sources": lambda req: req.setting_sources is not None,
     "system_prompt": lambda req: req.system_prompt is not None,
-    "tools": lambda req: (
-        req.builtin_tools is not None or req.web_tools is True or bool(req.subagents)
-    ),
+    "tools": lambda req: req.web_tools is True or bool(req.subagents),
 }
 
 _SUBTYPE_ERRORS = {
@@ -293,8 +291,6 @@ class AnthropicProvider(ProviderAdapter):
                 f"effort={req.effort!r} conflicts with env[{_EFFORT_ENV!r}]={inherited_effort!r}"
             )
         if req.web_tools is True:
-            if req.builtin_tools == "none":
-                raise ConfigError("web_tools=True conflicts with builtin_tools='none'")
             blocked = [name for name in _WEB_TOOL_NAMES if name in req.disallowed_tools]
             if blocked:
                 raise ConfigError(f"web_tools=True conflicts with disallowed_tools {blocked}")
@@ -306,14 +302,8 @@ class AnthropicProvider(ProviderAdapter):
 
         allowed = list(req.allowed_tools)
         disallowed = list(req.disallowed_tools)
-        builtin: list[str] | None = None
-        if req.builtin_tools is not None:
-            builtin = [] if req.builtin_tools == "none" else list(req.builtin_tools)
-
         if req.web_tools is False:
             disallowed.extend(name for name in _WEB_TOOL_NAMES if name not in disallowed)
-        elif req.web_tools is True and builtin is not None:
-            builtin.extend(name for name in _WEB_TOOL_NAMES if name not in builtin)
 
         active_mcp_servers = [
             server for server in req.mcp_servers if server.enabled is not False
@@ -341,8 +331,6 @@ class AnthropicProvider(ProviderAdapter):
             # The delegation tool must be both available and approved.
             if "Agent" not in allowed:
                 allowed.append("Agent")
-            if builtin is not None and "Agent" not in builtin:
-                builtin.append("Agent")
 
         env = dict(req.env)
         # An empty value keeps an inherited effort from overriding the CLI default.
@@ -382,8 +370,6 @@ class AnthropicProvider(ProviderAdapter):
                 "type": "json_schema",
                 "schema": json_schema_of_type(req.output_schema),
             }
-        if builtin is not None:
-            kwargs["tools"] = builtin
         # The SDK ranks thinking above max_thinking_tokens, so a default would hide it.
         if "thinking" not in extra and "max_thinking_tokens" not in extra:
             kwargs["thinking"] = dict(_DEFAULT_THINKING)

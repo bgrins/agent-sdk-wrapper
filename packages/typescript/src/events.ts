@@ -49,6 +49,7 @@ export type ProviderEvent =
       is_error: boolean;
     })
   | (Raw & { type: "usage"; usage: TokenUsage; cost_usd?: number })
+  | (Raw & { type: "structured_output"; value: unknown })
   /** `model` is the model the runtime reports, which can differ from the request. */
   | { type: "session_info"; id: string; model?: string }
   | (Raw & { type: "warning"; message: string })
@@ -82,7 +83,7 @@ export interface RunResult {
   status: RunStatus;
   ended_reason: RunEndedReason;
   final_text: string;
-  structured_output: null;
+  structured_output: unknown | null;
   usage: TokenUsage | null;
   cost_usd: number | null;
   duration_ms: number;

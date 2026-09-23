@@ -284,6 +284,8 @@ export async function collectRun(
     result.events.push(envelope);
     // Native SDKs report the last assistant message as the final response.
     if (event.type === "text") result.final_text = event.text;
+    if (event.type === "structured_output")
+      result.structured_output = event.value;
     if (event.type === "session_info") {
       result.session_id = event.id;
       if (event.model) result.model = event.model;
