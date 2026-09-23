@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import AsyncIterable, Callable, Iterable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .events import (
     AgentEvent,
-    AgentUpdated,
     ContextCompacted,
     Error,
     EventEnvelope,
@@ -81,6 +81,11 @@ class FakeProvider(ProviderAdapter):
         else:
             source = self.events
 
+        if isinstance(source, AsyncGenerator):
+            async with contextlib.aclosing(source):
+                async for event in source:
+                    yield event
+            return
         if isinstance(source, AsyncIterable):
             async for event in source:
                 yield event
@@ -136,8 +141,6 @@ def event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         return ToolCall(**data)
     if event_type == "tool_result":
         return ToolResult(**data)
-    if event_type == "agent_updated":
-        return AgentUpdated(**data)
     if event_type == "subagent_started":
         return SubagentStarted(**data)
     if event_type == "subagent_ended":
@@ -225,16 +228,18 @@ def load_trace_replay(path: str | Path) -> TraceReplay:
 def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
     """Return the stable result summary represented by trace envelopes."""
 
-    text_parts: list[str] = []
+    final_text = ""
     usage: TokenUsage | None = None
     cost_usd: float | None = None
     structured_output: Any = None
     session_id: str | None = None
     provider = ""
     model: str | None = None
+    reported_model: str | None = None
     status = RunStatus.SUCCESS
     ended_reason = RunEndedReason.SUCCESS
     error: str | None = None
+    error_type: str | None = None
     event_payloads: list[dict[str, Any]] = []
 
     for env in envelopes:
@@ -244,7 +249,7 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
             provider = event.provider
             model = event.model
         elif isinstance(event, Text):
-            text_parts.append(event.text)
+            final_text = event.text
         elif isinstance(event, Usage):
             usage = event.usage if usage is None else usage + event.usage
             if event.cost_usd is not None:
@@ -253,23 +258,27 @@ def trace_summary(envelopes: Iterable[EventEnvelope]) -> dict[str, Any]:
             structured_output = event.value
         elif isinstance(event, SessionInfo):
             session_id = event.id
+            if event.model:
+                reported_model = event.model
         elif isinstance(event, Error) and error is None:
             error = event.message
+            error_type = event.error_type
         elif isinstance(event, RunFinished):
             status = event.status
             ended_reason = event.ended_reason
 
     return {
         "provider": provider,
-        "model": model,
+        "model": reported_model or model,
         "status": status.value,
         "ended_reason": ended_reason.value,
-        "final_text": "".join(text_parts),
+        "final_text": final_text,
         "structured_output": structured_output,
         "usage": _usage_dict(usage),
         "cost_usd": cost_usd,
         "session_id": session_id,
         "error": error if status != RunStatus.SUCCESS else None,
+        "error_type": error_type if status != RunStatus.SUCCESS else None,
         "events": event_payloads,
     }
 
@@ -288,6 +297,7 @@ def run_result_summary(result: RunResult) -> dict[str, Any]:
         "cost_usd": result.cost_usd,
         "session_id": result.session_id,
         "error": result.error,
+        "error_type": result.error_type,
         "events": [_stable_event_payload(env.event) for env in result.events],
     }
 

@@ -12,8 +12,8 @@ from ..request import RunRequest
 class ProviderAdapter(ABC):
     """Translate a ``RunRequest`` into native calls and normalized ``AgentEvent`` values.
 
-    Raise ``TransientError`` for retryable failures and ``ProviderNotAvailableError``
-    for an unavailable runtime. The runner handles retries and event envelopes.
+    Raise ``ProviderNotAvailableError`` for an unavailable runtime; the runner classifies
+    other exceptions by their message. It also handles deadlines and event envelopes.
     """
 
     name: str
@@ -23,6 +23,10 @@ class ProviderAdapter(ABC):
 
     def validate_request(self, req: RunRequest) -> None:  # noqa: B027
         """Raise ConfigError for unsupported request options."""
+
+    def check_credentials(self, req: RunRequest) -> str | None:
+        """Explain why ``req.cli_login`` can't be satisfied, or return None."""
+        return None
 
     @abstractmethod
     def stream(self, req: RunRequest) -> AsyncIterator[AgentEvent]:

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import type {
   CodexOptions,
   ThreadEvent,
@@ -7,6 +8,7 @@ import type {
 } from "@openai/codex-sdk";
 import {
   ConfigError,
+  ProviderError,
   ProviderProtocolError,
   RuntimeUnavailableError,
 } from "../errors.js";
@@ -35,6 +37,16 @@ interface NativeCodex {
   startThread(options: ThreadOptions): NativeThread;
   resumeThread(id: string, options: ThreadOptions): NativeThread;
 }
+const loginTokenEnv = "CODEX_ACCESS_TOKEN";
+const apiKeyEnv = ["CODEX_API_KEY", "OPENAI_API_KEY"];
+const credentialKeys = ["cli_auth_credentials_store", "forced_login_method"];
+// Setting any of these would replace the blank API keys model commands get.
+const commandKeyPaths = [
+  "shell_environment_policy",
+  "shell_environment_policy.set",
+  ...apiKeyEnv.map((name) => `shell_environment_policy.set.${name}`),
+];
+type CodexConfig = NonNullable<CodexOptions["config"]>;
 type CodexFactory = (options: CodexOptions) => NativeCodex;
 export class CodexAdapter implements ProviderAdapter {
   readonly name = "openai";
@@ -47,9 +59,25 @@ export class CodexAdapter implements ProviderAdapter {
     options(native, ["provider", "client", "thread"], "providerOptions");
     options(
       native?.client,
-      ["apiKey", "baseUrl", "env", "codexPathOverride"],
+      ["apiKey", "baseUrl", "env", "codexPathOverride", "config"],
       "openai.client",
     );
+    for (const path of configPaths(native?.client?.config, "")) {
+      if (path === "features" || path === "features.shell_snapshot")
+        throw new ConfigError(
+          "openai.client.config cannot override features.shell_snapshot: false",
+        );
+      if (
+        credentialKeys.some((key) => path === key || path.startsWith(`${key}.`))
+      )
+        throw new ConfigError(
+          `openai.client.config ${path} conflicts with cliLogin, which controls how Codex stores and selects credentials`,
+        );
+      if (commandKeyPaths.includes(path))
+        throw new ConfigError(
+          `openai.client.config ${path} would undo the shell_environment_policy.set entries that hide ${apiKeyEnv.join(", ")} from model commands; set other shell_environment_policy keys one at a time`,
+        );
+    }
     options(
       native?.thread,
       [
@@ -57,7 +85,6 @@ export class CodexAdapter implements ProviderAdapter {
         "skipGitRepoCheck",
         "networkAccessEnabled",
         "webSearchMode",
-        "approvalPolicy",
         "additionalDirectories",
       ],
       "openai.thread",
@@ -73,11 +100,6 @@ export class CodexAdapter implements ProviderAdapter {
       ["disabled", "cached", "live"],
       "webSearchMode",
     );
-    enumOption(
-      thread?.approvalPolicy,
-      ["never", "on-request", "on-failure", "untrusted"],
-      "approvalPolicy",
-    );
     for (const key of ["skipGitRepoCheck", "networkAccessEnabled"] as const)
       if (thread?.[key] !== undefined && typeof thread[key] !== "boolean")
         throw new ConfigError(`${key} must be boolean`);
@@ -85,52 +107,125 @@ export class CodexAdapter implements ProviderAdapter {
     for (const key of ["apiKey", "baseUrl", "codexPathOverride"] as const)
       stringOption(native?.client?.[key], key);
     envOption(native?.client?.env);
+    if (
+      req.cliLogin === "require" &&
+      (native?.client?.apiKey || native?.client?.baseUrl)
+    )
+      throw new ConfigError(
+        "cliLogin 'require' uses the stored ChatGPT login; remove apiKey and baseUrl",
+      );
   }
-  private async client(req: ResolvedRequest): Promise<NativeCodex> {
+  private options(req: ResolvedRequest): CodexOptions {
     const native =
       req.providerOptions?.provider === "openai"
         ? req.providerOptions.client
         : undefined;
-    const opts: CodexOptions = {
-      apiKey: native?.env
-        ? native.env.OPENAI_API_KEY
-        : process.env.OPENAI_API_KEY,
+    const inherited = native?.env ?? process.env;
+    // deny: pass the key only as the SDK's CODEX_API_KEY, which `codex exec` uses
+    // without reading or writing stored logins; require: keep API keys out of the child.
+    // An access token would replace the stored login under either policy.
+    const removed =
+      req.cliLogin === "require"
+        ? [loginTokenEnv, ...apiKeyEnv]
+        : [loginTokenEnv, "OPENAI_API_KEY"];
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(inherited))
+      if (value !== undefined && !removed.includes(key)) env[key] = value;
+    return {
       ...native,
-      config: { model_reasoning_summary: "auto" },
+      apiKey:
+        req.cliLogin === "require"
+          ? undefined
+          : native?.apiKey || inherited.OPENAI_API_KEY || undefined,
+      env,
+      config: merged(
+        {
+          model_reasoning_summary: "auto",
+          // Shell snapshots write the child env, credentials included, to CODEX_HOME.
+          features: { shell_snapshot: false },
+        },
+        native?.config ?? {},
+      ),
+      // The SDK passes the key as CODEX_API_KEY; hide it from model commands. The
+      // SDK sends these after config, so no caller table can drop the entry.
+      ...(req.cliLogin !== "require"
+        ? { configOverrides: ['shell_environment_policy.set.CODEX_API_KEY=""'] }
+        : {}),
     };
+  }
+  private async client(req: ResolvedRequest): Promise<NativeCodex> {
+    const opts = this.options(req);
     return this.factory
       ? this.factory(opts)
       : new (await import("@openai/codex-sdk")).Codex(opts);
   }
   async ensureAvailable(req: ResolvedRequest): Promise<void> {
+    if (req.cliLogin !== "require" && !this.options(req).apiKey)
+      throw new ProviderError(
+        "No OpenAI API key: set OPENAI_API_KEY or providerOptions.client.apiKey; cliLogin 'deny' never uses a stored Codex login",
+        "authentication_failed",
+      );
     if (this.factory) return;
+    let client: NativeCodex;
     try {
       const override =
         req.providerOptions?.provider === "openai"
           ? req.providerOptions.client?.codexPathOverride
           : undefined;
       if (override) await executable(override);
-      await this.client(req); // The SDK constructor resolves its bundled runtime without spawning it.
+      client = await this.client(req); // The SDK constructor resolves its bundled runtime without spawning it.
     } catch (cause) {
       throw new RuntimeUnavailableError(
         "Codex SDK/runtime unavailable; install its platform optional dependency or supply codexPathOverride",
         { cause },
       );
     }
+    if (req.cliLogin === "require") await this.requireChatgptLogin(req, client);
+  }
+  private async requireChatgptLogin(
+    req: ResolvedRequest,
+    client: NativeCodex,
+  ): Promise<void> {
+    // `codex exec` has no account query; `login status` reports the stored login.
+    const binary = (client as { exec?: { executablePath?: string } }).exec
+      ?.executablePath;
+    if (!binary)
+      throw new RuntimeUnavailableError(
+        "Cannot locate the Codex runtime to check its stored login",
+      );
+    const output = await new Promise<string>((resolve) =>
+      execFile(
+        binary,
+        ["login", "status"],
+        { env: this.options(req).env, timeout: 30_000 },
+        (_error, stdout, stderr) => resolve(`${stdout}${stderr}`),
+      ),
+    );
+    if (!/Logged in using ChatGPT/.test(output))
+      throw new ProviderError(
+        "cliLogin 'require' needs a stored ChatGPT login; run `codex login`",
+        "authentication_failed",
+      );
   }
   async *stream(
     req: ResolvedRequest,
     context: ProviderContext,
   ): AsyncGenerator<ProviderEvent> {
+    // SDK cleanup removes the child's listeners before killing it, so an abort
+    // after cleanup raises an unhandled AbortError. Only the caller's signal
+    // aborts, and `finally` detaches it before closing the native iterator.
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     req.signal?.addEventListener("abort", onAbort, { once: true });
     if (req.signal?.aborted) abort.abort();
-    let terminal = false;
+    let iterator: AsyncIterator<ThreadEvent> | undefined;
     let session = req.sessionId;
     let sawReasoning = false;
     const started = new Set<string>();
     const completed = new Set<string>();
+    // A fatal failure repeats its error notice in turn.failed; hold the notice
+    // one event so it isn't reported twice.
+    let notice: ProviderEvent | undefined;
     try {
       const client = await this.client(req);
       const native =
@@ -149,20 +244,28 @@ export class CodexAdapter implements ProviderAdapter {
       const { events } = await thread.runStreamed(req.prompt, {
         signal: abort.signal,
       });
-      for await (const event of events) {
+      const source = events[Symbol.asyncIterator]();
+      iterator = source;
+      // No `return`: leaving the loop must not close the SDK iterator before
+      // `finally` detaches the caller's signal.
+      const frames = {
+        [Symbol.asyncIterator]: () => ({ next: () => source.next() }),
+      };
+      for await (const event of frames) {
         context.onNativeEvent(event);
         const raw = req.includeRaw
           ? { raw: event as unknown as Record<string, unknown> }
           : {};
+        const repeated =
+          event.type === "turn.failed" &&
+          notice?.type === "warning" &&
+          notice.message === event.error.message;
+        if (notice && !repeated) yield notice;
+        notice = undefined;
         if (event.type === "thread.started") {
           session = event.thread_id;
           yield { type: "session_info", id: session };
         } else if (event.type === "turn.completed") {
-          if (terminal)
-            throw new ProviderProtocolError(
-              "Codex emitted more than one terminal result",
-            );
-          terminal = true;
           const nativeUsage = event.usage;
           const input = nativeUsage.input_tokens;
           // ThreadTokenUsage.total is cumulative; output includes reasoning.
@@ -206,17 +309,16 @@ export class CodexAdapter implements ProviderAdapter {
           if (usage.reasoning_output_tokens > 0 && !sawReasoning)
             yield { type: "thinking", text: "" };
           yield { type: "usage", usage, ...raw };
-        } else if (event.type === "turn.failed" || event.type === "error") {
-          terminal = true;
+          return;
+        } else if (event.type === "turn.failed") {
           yield {
-            ...classify(
-              event.type === "turn.failed"
-                ? event.error.message
-                : event.message,
-              event.type === "turn.failed" ? "turn_failed" : "stream_error",
-            ),
+            ...classify(event.error.message, "provider_exception"),
             ...raw,
           };
+          return;
+        } else if (event.type === "error") {
+          // Top-level errors include recoverable "Reconnecting... N/5" notices.
+          notice = { type: "warning", message: event.message, ...raw };
         } else if (
           event.type === "item.started" ||
           event.type === "item.updated" ||
@@ -224,7 +326,10 @@ export class CodexAdapter implements ProviderAdapter {
         ) {
           const item = event.item;
           const tool = toolInfo(item);
-          if (tool && !started.has(item.id)) {
+          // A started web search has no query yet; emit its call on completion.
+          const early =
+            item.type === "web_search" && event.type !== "item.completed";
+          if (tool && !early && !started.has(item.id)) {
             started.add(item.id);
             yield { type: "tool_call", id: item.id, ...tool, ...raw };
           }
@@ -236,7 +341,15 @@ export class CodexAdapter implements ProviderAdapter {
           else if (item.type === "reasoning") {
             sawReasoning = true;
             yield { type: "thinking", text: item.text, ...raw };
-          } else if (tool)
+          } else if (item.type === "todo_list")
+            yield {
+              type: "thinking",
+              text: item.items
+                .map((todo) => `- [${todo.completed ? "x" : " "}] ${todo.text}`)
+                .join("\n"),
+              ...raw,
+            };
+          else if (tool)
             yield {
               type: "tool_result",
               id: item.id,
@@ -254,24 +367,75 @@ export class CodexAdapter implements ProviderAdapter {
             };
         }
       }
-      if (!terminal)
-        throw new ProviderProtocolError(
-          "Codex stream ended without turn.completed or a terminal error",
-        );
+      throw new ProviderProtocolError(
+        "Codex stream ended without turn.completed or turn.failed",
+      );
     } catch (cause) {
+      // Without turn.failed, the held notice may be the only explanation.
+      if (notice) yield notice;
       throw nativeError(cause);
     } finally {
-      abort.abort();
       req.signal?.removeEventListener("abort", onAbort);
+      await iterator?.return?.(); // The SDK's cleanup terminates a running child.
     }
   }
+}
+/**
+ * The keys the SDK sends as `--config` entries: nested keys joined with dots,
+ * one per leaf, and `{}` for an empty table. Rejects values the SDK would throw on.
+ */
+function configPaths(value: unknown, path: string): string[] {
+  if (value === undefined) return [];
+  const table = object(value);
+  if (!table) {
+    if (!path) throw new ConfigError("openai.client.config must be an object");
+    configValue(value, path);
+    return [path];
+  }
+  const entries = Object.entries(table).filter(
+    ([, child]) => child !== undefined,
+  );
+  if (path && !entries.length) return [path];
+  return entries.flatMap(([key, child]) => {
+    if (!key)
+      throw new ConfigError("openai.client.config keys must be non-empty");
+    return configPaths(child, path ? `${path}.${key}` : key);
+  });
+}
+function configValue(value: unknown, path: string): void {
+  if (typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number" && Number.isFinite(value)) return;
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries())
+      configValue(item, `${path}[${index}]`);
+    return;
+  }
+  const table = object(value);
+  if (!table)
+    throw new ConfigError(
+      `openai.client.config ${path} must be a string, finite number, boolean, array or table`,
+    );
+  for (const [key, child] of Object.entries(table))
+    if (child !== undefined) configValue(child, `${path}.${key}`);
+}
+/** The caller's config wins; nested tables merge key by key. */
+function merged(base: CodexConfig, over: CodexConfig): CodexConfig {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    const current = out[key];
+    out[key] =
+      object(current) && object(value)
+        ? merged(current as CodexConfig, value as CodexConfig)
+        : value;
+  }
+  return out;
 }
 function toolInfo(
   item: ThreadItem,
 ): { name: string; input?: Record<string, unknown> } | undefined {
   switch (item.type) {
     case "command_execution":
-      return { name: "command_execution", input: { command: item.command } };
+      return { name: "command", input: { command: item.command } };
     case "file_change":
       return { name: "file_change", input: { changes: item.changes } };
     case "mcp_tool_call":

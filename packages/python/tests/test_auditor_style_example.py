@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
 from pathlib import Path
 from types import ModuleType
 
-from agent_sdk_wrapper import Error, EventEnvelope, Text
+import pytest
+
+from agent_sdk_wrapper import Error, RunRequest, StructuredOutput, install_fake_providers
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
@@ -24,19 +27,59 @@ def load_example_module(name: str) -> ModuleType:
     return module
 
 
-def test_auditor_style_uses_structured_agent_chain() -> None:
+def test_auditor_style_run_stage_applies_stage_settings(monkeypatch, tmp_path: Path) -> None:
     module = load_example_module("auditor_style")
+    seen: list[RunRequest] = []
+    plan = {"objective": "Check", "tasks": [], "success_criteria": ["Done"]}
+    install_fake_providers(
+        monkeypatch, events=[StructuredOutput(value=plan)], seen_requests=seen
+    )
+    recorder = module.WorkflowRecorder(tmp_path)
 
-    assert set(module.STAGE_SYSTEM_PROMPTS) == {
-        "planner",
-        "analyst",
-        "verifier",
-        "fix_planner",
-        "reporter",
-    }
-    assert "Do not perform a security or vulnerability audit" in module.WORKFLOW_BRIEF
-    assert ".env files" in module.SCOPE_BOUNDARY
-    assert module.MAX_TURNS_BY_STAGE["fix_planner"] > 0
+    async def run(stage: str, mcp_servers):
+        return await module.run_stage(
+            provider="anthropic",
+            model="claude-haiku-4-5",
+            stage=stage,
+            prompt="go",
+            output_schema=module.WorkflowPlan,
+            artifacts_dir=tmp_path / stage,
+            recorder=recorder,
+            mcp_servers=mcp_servers,
+        )
+
+    _, verified = asyncio.run(run("verifier", module.auditor_mcp_servers()))
+    asyncio.run(run("planner", None))
+
+    verifier_req, planner_req = seen
+    assert verified == module.WorkflowPlan.model_validate(plan)
+    assert verifier_req.system_prompt == module.STAGE_SYSTEM_PROMPTS["verifier"]
+    assert verifier_req.max_turns == module.MAX_TURNS_BY_STAGE["verifier"]
+    assert verifier_req.output_schema is module.WorkflowPlan
+    assert [server.enabled_tools for server in verifier_req.mcp_servers] == [module.MCP_TOOLS]
+    assert planner_req.system_prompt == module.STAGE_SYSTEM_PROMPTS["planner"]
+    assert planner_req.mcp_servers == []
+    assert recorder.stage_statuses == {"verifier": "success", "planner": "success"}
+
+
+def test_auditor_style_run_stage_raises_provider_error(monkeypatch, tmp_path: Path) -> None:
+    module = load_example_module("auditor_style")
+    install_fake_providers(
+        monkeypatch, events=[Error(message="provider rejected model", error_type="api_error_404")]
+    )
+
+    with pytest.raises(RuntimeError, match="analyst failed with error: provider rejected model"):
+        asyncio.run(
+            module.run_stage(
+                provider="anthropic",
+                model="claude-haiku-4-5",
+                stage="analyst",
+                prompt="go",
+                output_schema=module.AnalysisReport,
+                artifacts_dir=tmp_path,
+                recorder=module.WorkflowRecorder(tmp_path),
+            )
+        )
 
 
 def test_auditor_style_mcp_tools_are_read_only() -> None:
@@ -101,23 +144,12 @@ def test_auditor_style_prompts_chain_structured_outputs() -> None:
 
     analyst_prompt = module.analyst_prompt(plan)
     verifier_prompt = module.verifier_prompt(plan, analysis)
-    fix_prompt = module.fix_planner_prompt(plan, analysis, verification)
     reporter_prompt = module.reporter_prompt(plan, analysis, verification, fix_plan)
-    prompts = [
-        module.planner_prompt(),
-        analyst_prompt,
-        verifier_prompt,
-        fix_prompt,
-        reporter_prompt,
-    ]
 
     assert '"objective": "Check release readiness"' in analyst_prompt
     assert '"summary": "Document Docker examples"' in verifier_prompt
     assert '"title": "Update docs"' in reporter_prompt
     assert '"overall_verdict": "ready"' in reporter_prompt
-    assert "Do not look for vulnerabilities" in analyst_prompt
-    assert "rather than a source patch" in fix_prompt
-    assert all(module.SCOPE_BOUNDARY in prompt for prompt in prompts)
 
 
 def test_auditor_style_writes_structured_artifact(tmp_path: Path) -> None:
@@ -140,32 +172,3 @@ def test_auditor_style_writes_structured_artifact(tmp_path: Path) -> None:
     updated_manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert saved["summary"] == "Ready for release."
     assert updated_manifest["files"]["report"] == "report.json"
-
-
-def test_auditor_style_recorder_prints_live_progress(tmp_path: Path) -> None:
-    module = load_example_module("auditor_style")
-    messages: list[str] = []
-    recorder = module.WorkflowRecorder(tmp_path, live_print=messages.append)
-
-    recorder.start_stage("planner", tmp_path / "planner", mcp_enabled=False)
-    recorder.on_event("planner")(
-        EventEnvelope(
-            run_id="run",
-            sequence=0,
-            timestamp="2026-06-03T00:00:00+00:00",
-            event=Text(text="planning complete"),
-        )
-    )
-    recorder.on_event("planner")(
-        EventEnvelope(
-            run_id="run",
-            sequence=1,
-            timestamp="2026-06-03T00:00:01+00:00",
-            event=Error(message="provider rejected model"),
-        )
-    )
-
-    assert messages[0].startswith("planner")
-    assert "start" in messages[0]
-    assert "planning complete" in messages[1]
-    assert "provider rejected model" in messages[2]

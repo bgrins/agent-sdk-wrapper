@@ -11,8 +11,9 @@ Bash → gVisor worker → mounted output → trace viewer
 
 ## Run
 
-Requires Bash and Linux Docker with Compose. Install `curl`, `bzip2` and gVisor
-on the Docker host: `bash examples/gvisor/infra/install-runsc.sh`.
+Requires Bash, Perl and Linux Docker with Compose; the launcher filters worker
+output with Perl. Install `curl`, `bzip2` and gVisor on the Docker host:
+`bash examples/gvisor/infra/install-runsc.sh`.
 
 From the repository root, with API keys exported:
 
@@ -47,14 +48,24 @@ for test runs.
 - `workload/agent-{python,typescript}/`: your program and local SDK dependency.
 - `workload/shared/` and `workload/project/`: sample task and app setup.
 - `infra/` and `compose.yaml`: lifecycle, images, gateway and isolation.
+- `infra/gateway/Caddyfile`: API paths and the `anthropic-beta` values SDKs send.
 - `tests/run.sh` and `tests/compose.yaml`: test endpoint and workers.
 
-Workers take `PROVIDER`, `GVISOR_MODEL` and optional `JOB_REQUEST` JSON for prompts
-or a session ID. They write results to stdout and files to `/job/output`.
-Cleanup removes session state. Cloud deployment is not included.
+Workers take `PROVIDER`, `GVISOR_MODEL` and optional `JOB_REQUEST` JSON with prompts.
+They write files to `/job/output` and results to stdout as ASCII JSON lines; the
+launcher drops other bytes. A session lasts one job: cleanup deletes its state,
+so a later job cannot resume it. Cloud deployment is not included.
+
+`test.sh` needs Node and uv. It first runs the output-file and Python worker
+tests, which need neither Docker nor gVisor, then builds only its test images.
+Compose never pulls the worker images (`pull_policy: never`), so run `build.sh`
+first and again after changing a worker or an SDK package. With Colima, run
+`test.sh` in either mode from the checkout whose `results/gvisor-output` the VM
+mounts (see macOS setup).
 
 ```sh
-bash examples/gvisor/scripts/test.sh  # offline; builds test images; requires Node
+bash examples/gvisor/scripts/build.sh
+bash examples/gvisor/scripts/test.sh  # offline
 AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION=1 \
   bash examples/gvisor/scripts/test.sh --live
 bash examples/gvisor/workload/run.sh cleanup  # remove leftover example resources

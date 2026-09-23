@@ -18,8 +18,8 @@ import {
   type ProviderAdapter,
   RuntimeUnavailableError,
   TraceWriteError,
-  TransientError,
 } from "../src/index.js";
+import { TraceWriter } from "../src/trace.js";
 
 function directory(t: TestContext): string {
   const root = mkdtempSync(join(tmpdir(), "agent-trace-"));
@@ -72,19 +72,16 @@ test("trace files are visible during streaming and retain resumed calls in separ
   assert.notEqual(third.run_id, events[0]?.run_id);
 });
 
-test("trace records retries, normalized failure and cancellation", async (t) => {
+test("trace records normalized failure and cancellation", async (t) => {
   const root = directory(t);
-  let calls = 0;
   const agent = new Agent(
-    { provider: "openai", maxRetries: 1, retryDelayMs: 0 },
+    { provider: "openai" },
     {
       openai: provider(async function* () {
-        if (++calls === 1) throw new TransientError("temporary");
         yield {
           type: "error",
           message: "refused",
           error_type: "refused",
-          retryable: false,
         };
       }),
     },
@@ -94,11 +91,10 @@ test("trace records retries, normalized failure and cancellation", async (t) => 
     traceFile: join(root, "failure.jsonl"),
   });
   assert.equal(failed.status, "failure");
-  assert.equal(calls, 2);
   assert.deepEqual(readTrace(join(root, "failure.jsonl")), failed.events);
   assert.deepEqual(
     failed.events.map((env) => env.event.type),
-    ["run_started", "warning", "error", "run_finished"],
+    ["run_started", "error", "run_finished"],
   );
   const abort = new AbortController();
   abort.abort();
@@ -137,9 +133,56 @@ test("breaking iteration and killed runtimes preserve partial traces and release
   );
   await assert.rejects(agent.run("killed"), ProcessTerminatedError);
   assert.equal(closed, 2);
+  const killed = readTrace(path).map((env) => env.event);
   assert.deepEqual(
-    readTrace(path).map((env) => env.event.type),
-    ["run_started", "text"],
+    killed.map((event) => event.type),
+    ["run_started", "text", "error", "run_finished"],
+  );
+  assert.deepEqual(killed[2], {
+    type: "error",
+    message: "killed",
+    error_type: "process_terminated",
+  });
+  assert.equal(
+    killed[3]?.type === "run_finished" && killed[3].status,
+    "failure",
+  );
+});
+
+test("stopping at run_finished without draining closes the trace and releases the Agent", async (t) => {
+  const root = directory(t);
+  let closed = 0;
+  const close = TraceWriter.prototype.close;
+  TraceWriter.prototype.close = function () {
+    closed++;
+    close.call(this);
+  };
+  t.after(() => {
+    TraceWriter.prototype.close = close;
+  });
+  const agent = new Agent(
+    { provider: "openai", traceFile: join(root, "first.jsonl") },
+    {
+      openai: provider(async function* () {
+        yield { type: "text", text: "ok" };
+      }),
+    },
+  );
+  const events = agent.stream("first");
+  for (;;) {
+    const { value } = await events.next();
+    if (value?.event.type === "run_finished") break;
+  }
+  assert.equal(closed, 1);
+  const second = await agent.run({
+    prompt: "second",
+    traceFile: join(root, "second.jsonl"),
+  });
+  assert.equal(second.status, "success");
+  assert.equal(closed, 2);
+  assert.deepEqual(
+    readTrace(join(root, "first.jsonl")).map((env) => env.event.type),
+    ["run_started", "text", "run_finished"],
   );
 });
 
@@ -167,7 +210,7 @@ test("trace validation and runtime checks leave files untouched", async (t) => {
   assert.equal(existsSync(path), false);
 });
 
-test("trace I/O and serialization failures propagate without provider retries", async (t) => {
+test("trace I/O and serialization failures propagate", async (t) => {
   const root = directory(t);
   const path = join(root, "trace.jsonl");
   let calls = 0;
@@ -175,7 +218,7 @@ test("trace I/O and serialization failures propagate without provider retries", 
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   const agent = new Agent(
-    { provider: "openai", maxRetries: 3, traceFile: path },
+    { provider: "openai", traceFile: path },
     {
       openai: provider(async function* () {
         calls++;

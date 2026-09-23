@@ -3,6 +3,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 mode=${1:---offline}
 [[ $mode == --offline || $mode == --live ]] || { echo 'Use --offline or --live' >&2; exit 1; }
+# These need neither Docker nor gVisor.
+node --test examples/gvisor/tests/output-file.test.mjs
+uv run --project packages/python --extra dev pytest -q examples/gvisor/tests/test_python_worker.py
 for target in gateway-tests checks; do
   docker build -f examples/gvisor/infra/Dockerfile --target "$target" \
     -t "agent-sdk-wrapper-gvisor-$target" .

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readOutputFile } from "./output-file.mjs";
 
 const mode = process.argv[2] ?? "--offline";
 assert.ok(
@@ -34,10 +35,13 @@ if (mode === "--live") {
       ? "AGENT_SDK_WRAPPER_RUN_INTEGRATION"
       : "AGENT_SDK_WRAPPER_TS_RUN_INTEGRATION";
   assert.equal(env[flag], "1", `Set ${flag}=1 for live tests`);
+}
+if (["--offline", "--live"].includes(mode)) {
   request.prompts = JSON.parse(
     readFileSync(new URL("../workload/shared/prompts.json", import.meta.url)),
   );
-  request.prompts[0] += ` Remember token ${token}.`;
+  // Non-ASCII checks that results survive the launcher's ASCII-only output.
+  request.prompts[0] += ` Remember token ${token} (café).`;
   request.prompts[1] += " Include the token I asked you to remember.";
 }
 env.JOB_REQUEST = JSON.stringify(request);
@@ -62,7 +66,7 @@ const envelopes = readdirSync(output)
   .filter((name) => name.endsWith(".trace.jsonl"))
   .sort()
   .flatMap((name) =>
-    readFileSync(`${output}/${name}`, "utf8")
+    readOutputFile(`${output}/${name}`)
       .trim()
       .split("\n")
       .filter(Boolean)
@@ -99,10 +103,11 @@ if (["--offline", "--live"].includes(mode)) {
     assert.match(stderr, /Missing or empty output patch/);
   else assert.equal(envelopes.at(-1).event.type, "run_finished");
   if (mode === "--bad-patch")
-    assert.match(
-      readFileSync(`${output}/fix.patch`, "utf8"),
-      /milliseconds \/ 10\)/,
-    );
+    assert.match(readOutputFile(`${output}/fix.patch`), /milliseconds \/ 10\)/);
+  for (const text of [stdout, stderr]) {
+    assert.match(text, /forged/);
+    assert.doesNotMatch(text.replace(/[\t\n]/g, ""), /\p{Cc}/u);
+  }
 }
 console.log(
   `${env.LANGUAGE} ${env.PROVIDER ?? "anthropic"} ${mode}: ${output}`,

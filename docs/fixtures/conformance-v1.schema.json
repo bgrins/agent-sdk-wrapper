@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bgrins/agent-sdk-wrapper/docs/fixtures/conformance-v1.schema.json",
+  "title": "Conformance cases",
+  "description": "The format of conformance-v1.json; CONFORMANCE.md explains each field. Both runners validate the whole file, including cases they skip.",
+  "type": "object",
+  "required": ["description", "version", "coverage_exemptions", "cases"],
+  "additionalProperties": false,
+  "properties": {
+    "description": { "type": "string" },
+    "version": { "const": 1 },
+    "coverage_exemptions": {
+      "type": "object",
+      "required": ["python", "typescript"],
+      "additionalProperties": false,
+      "properties": {
+        "python": { "$ref": "#/$defs/exemptions" },
+        "typescript": { "$ref": "#/$defs/exemptions" }
+      }
+    },
+    "cases": { "type": "array", "items": { "$ref": "#/$defs/case" } }
+  },
+  "$defs": {
+    "exemptions": {
+      "type": "object",
+      "propertyNames": { "pattern": "^(anthropic|codex):." },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "case": {
+      "type": "object",
+      "required": ["id", "provider", "prompt", "expect"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^(anthropic|codex)\\.[a-z0-9_]+$" },
+        "provider": { "enum": ["anthropic", "codex"] },
+        "options": { "$ref": "#/$defs/options" },
+        "run_options": { "$ref": "#/$defs/options" },
+        "prompt": { "type": "string" },
+        "setup": { "$ref": "#/$defs/setup" },
+        "mock": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } },
+        "expect": { "$ref": "#/$defs/expect" },
+        "runs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/run" } },
+        "languages": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "python": { "$ref": "#/$defs/override" },
+            "typescript": { "$ref": "#/$defs/override" }
+          }
+        },
+        "live": { "$ref": "#/$defs/live" }
+      },
+      "anyOf": [
+        { "properties": { "provider": { "const": "anthropic" }, "id": { "pattern": "^anthropic\\." } } },
+        { "properties": { "provider": { "const": "codex" }, "id": { "pattern": "^codex\\." } } }
+      ]
+    },
+    "options": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z_]+$" },
+      "properties": {
+        "tools": { "type": "array", "items": { "enum": ["add", "shout"] } },
+        "output_schema": { "enum": ["Weather"] },
+        "mcp_servers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" }, "fixture": { "enum": ["simple_mcp_server"] } }
+          }
+        },
+        "subagents": { "type": "object", "additionalProperties": { "type": "object" } },
+        "cwd": { "$ref": "#/$defs/relative_path" },
+        "trace_file": { "$ref": "#/$defs/relative_path" },
+        "artifacts_dir": { "$ref": "#/$defs/relative_path" },
+        "on_event": { "const": true },
+        "on_provider_event": { "const": true },
+        "provider_options": {
+          "type": "object",
+          "properties": {
+            "codex": { "const": "client" },
+            "config": {
+              "type": "object",
+              "properties": { "config_overrides": { "type": "array", "items": { "type": "string" } } }
+            }
+          }
+        }
+      }
+    },
+    "relative_path": { "type": "string", "pattern": "^[^/]" },
+    "setup_path": { "type": "string", "pattern": "^(cwd|home|claude_config|anthropic_config|codex_home)/[^/]" },
+    "setup": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/setup_path" },
+          "additionalProperties": { "type": "string" }
+        },
+        "codex_login": { "enum": ["chatgpt", "api_key"] },
+        "codex_provider": { "const": "builtin" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "thinking": { "type": "string" },
+        "tool": {
+          "oneOf": [
+            { "$ref": "#/$defs/tool_call" },
+            { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tool_call" } }
+          ]
+        },
+        "shell": { "type": "string" },
+        "tool_search": { "type": "string" },
+        "usage": { "type": "array", "minItems": 2, "maxItems": 3, "items": { "type": "integer", "minimum": 0 } },
+        "stop_reason": { "type": "string" },
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "body": {},
+        "stream_error": { "type": "object" },
+        "truncate": { "const": true },
+        "hang": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "tool_call": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string" }, "input": { "type": "object" } }
+    },
+    "run": {
+      "type": "object",
+      "required": ["prompt"],
+      "additionalProperties": false,
+      "properties": {
+        "prompt": { "type": "string" },
+        "options": { "$ref": "#/$defs/options" },
+        "agent": { "enum": ["same", "new"] },
+        "expect": { "$ref": "#/$defs/expect" }
+      }
+    },
+    "live": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prompt": { "type": "string" },
+        "options": { "$ref": "#/$defs/options" },
+        "expect": { "$ref": "#/$defs/expect" },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "prompt": { "type": "string" },
+              "options": { "$ref": "#/$defs/options" },
+              "agent": { "enum": ["same", "new"] },
+              "expect": { "$ref": "#/$defs/expect" }
+            }
+          }
+        }
+      }
+    },
+    "override": {
+      "oneOf": [
+        { "type": "string", "pattern": "^unsupported: ." },
+        {
+          "type": "object",
+          "required": ["reason"],
+          "minProperties": 2,
+          "additionalProperties": false,
+          "properties": {
+            "options": { "$ref": "#/$defs/options" },
+            "expect": { "$ref": "#/$defs/expect" },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "expect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["config_error"],
+          "additionalProperties": false,
+          "properties": { "config_error": { "const": true } }
+        },
+        {
+          "type": "object",
+          "required": ["setup_error"],
+          "additionalProperties": false,
+          "properties": {
+            "setup_error": { "$ref": "#/$defs/error_type" },
+            "files_unchanged": { "$ref": "#/$defs/files_unchanged" }
+          }
+        },
+        { "$ref": "#/$defs/outcome" }
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["success", "failure", "timeout", "cancelled"] },
+        "error_type": { "$ref": "#/$defs/error_type" },
+        "final_text": { "type": "string" },
+        "final_text_contains": { "type": "string", "minLength": 1 },
+        "events": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "includes": { "$ref": "#/$defs/event_types" },
+            "excludes": { "$ref": "#/$defs/event_types" },
+            "count": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "tool_calls": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" } },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "includes": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                "excludes": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+              }
+            }
+          ]
+        },
+        "tool_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "contains": { "type": "string" }, "is_error": { "type": "boolean" } }
+          }
+        },
+        "structured_output": {},
+        "requests": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "match": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/match" } }
+          }
+        },
+        "same_session": { "type": "boolean" },
+        "on_event": { "const": true },
+        "trace_file": { "const": true },
+        "on_provider_event": { "const": true },
+        "raw": { "$ref": "#/$defs/event_types" },
+        "artifacts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/relative_path" } },
+        "raises": { "const": "RunFailedError" },
+        "files_unchanged": { "$ref": "#/$defs/files_unchanged" }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request": { "type": "integer" },
+        "path": { "type": "string", "pattern": "^[^.]+(\\.[^.]+)*$" },
+        "header": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "equals": {},
+        "contains": { "type": "string", "minLength": 1 },
+        "excludes": { "type": "string", "minLength": 1 },
+        "absent": { "const": true }
+      },
+      "allOf": [
+        { "oneOf": [{ "required": ["path"] }, { "required": ["header"] }] },
+        {
+          "oneOf": [
+            { "required": ["equals"] },
+            { "required": ["contains"] },
+            { "required": ["excludes"] },
+            { "required": ["absent"] }
+          ]
+        }
+      ]
+    },
+    "files_unchanged": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/setup_path" } },
+    "error_type": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "event_types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "run_started",
+          "text",
+          "thinking",
+          "tool_call",
+          "tool_result",
+          "subagent_started",
+          "subagent_ended",
+          "usage",
+          "session_info",
+          "structured_output",
+          "context_compacted",
+          "warning",
+          "error",
+          "run_finished"
+        ]
+      }
+    }
+  }
+}

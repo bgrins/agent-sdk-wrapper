@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
   Agent,
   ConfigError,
   ProcessTerminatedError,
+  ProviderError,
   ProviderProtocolError,
   RuntimeUnavailableError,
-  TransientError,
   collectRun,
   resolveProvider,
 } from "../src/index.js";
@@ -20,7 +22,9 @@ import type {
   ResolvedRequest,
   RunResult,
 } from "../src/index.js";
-import { emptyUsage } from "../src/events.js";
+import { emptyUsage, type ErrorEvent } from "../src/events.js";
+import { nativeError } from "../src/providers/common.js";
+import { classify } from "../src/providers/common.js";
 
 function fake(
   events: (
@@ -51,8 +55,15 @@ test("provider aliases, inference, model prefixes and conflicting selections", (
     provider: "openai",
     model: "gpt-test",
   });
+  // Blank values mean omitted, as with an empty environment variable.
+  assert.deepEqual(resolveProvider(" ", "claude-test"), {
+    provider: "anthropic",
+    model: "claude-test",
+  });
+  assert.deepEqual(resolveProvider("codex", " "), { provider: "openai" });
   for (const [provider, model] of [
     [undefined, undefined],
+    ["", ""],
     ["bad", undefined],
     [undefined, "unknown"],
     ["anthropic", "codex:gpt-test"],
@@ -60,6 +71,69 @@ test("provider aliases, inference, model prefixes and conflicting selections", (
     ["openai", "codex:"],
   ])
     assert.throws(() => resolveProvider(provider, model), ConfigError);
+});
+test("model IDs with colons stay whole unless the prefix is a provider", () => {
+  for (const [provider, model, expected] of [
+    [
+      "anthropic",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+    [
+      "anthropic",
+      "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+      "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+    ],
+    [
+      undefined,
+      "anthropic:us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+    ["codex", "ft:gpt-4o:org:custom:id", "ft:gpt-4o:org:custom:id"],
+    ["openai", "qwen2.5-coder:7b", "qwen2.5-coder:7b"],
+  ] as const)
+    assert.equal(resolveProvider(provider, model).model, expected);
+  assert.throws(
+    () => resolveProvider(undefined, "anthropic.claude-3-5-sonnet-v2:0"),
+    ConfigError,
+  );
+});
+test("a missing or non-directory cwd fails request resolution", async () => {
+  let checked = 0;
+  const provider = successful();
+  provider.ensureAvailable = async () => {
+    checked++;
+  };
+  const file = fileURLToPath(import.meta.url);
+  for (const cwd of ["/definitely/missing/dir", file]) {
+    assert.throws(
+      () => new Agent({ provider: "openai", cwd }, { openai: provider }),
+      ConfigError,
+    );
+    const agent = new Agent({ provider: "openai" }, { openai: provider });
+    await assert.rejects(agent.checkRuntime({ cwd }), ConfigError);
+    await assert.rejects(agent.run({ prompt: "x", cwd }), ConfigError);
+  }
+  assert.equal(checked, 0);
+});
+test("message classification matches the shared cases", () => {
+  const { cases } = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../docs/fixtures/error-classification-v1.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    cases: { message: string; status?: number; error_type: string | null }[];
+  };
+  for (const { message, status, error_type } of cases)
+    assert.equal(
+      classify(message, "fallback", status).error_type,
+      error_type ?? "fallback",
+      message,
+    );
 });
 test("unknown, reserved, malformed and cross-provider options fail before availability", async () => {
   let checked = 0;
@@ -77,9 +151,6 @@ test("unknown, reserved, malformed and cross-provider options fail before availa
     { artifactsDir: "out" },
     { subagents: {} },
     { builtinTools: [] },
-    { maxRetries: -1 },
-    { maxRetries: Number.NaN },
-    { retryDelayMs: 0.5 },
     { includeRaw: "yes" },
     { continueSession: 1 },
     { effort: "none" },
@@ -111,8 +182,8 @@ test("constructor defaults, envelopes, streaming collection and usage aggregatio
       openai: fake(async function* (req) {
         seen.push(req);
         yield { type: "session_info", id: "session-1" };
-        yield { type: "text", text: "one " };
-        yield { type: "text", text: "two" };
+        yield { type: "text", text: "draft" };
+        yield { type: "text", text: "one two" };
         yield {
           type: "usage",
           usage: {
@@ -175,7 +246,6 @@ test("sessions persist after stream/run/failure, explicit resume wins, providers
       type: "error",
       message: "terminal",
       error_type: "turn_failed",
-      retryable: false,
     };
   });
   const agent = new Agent(
@@ -206,125 +276,110 @@ test("constructor session ID is available before the first run", async () => {
   assert.equal(agent.sessionId, "saved");
   assert.equal((await agent.run("resume")).session_id, "saved");
 });
-test("retries are opt-in by default", async () => {
-  let calls = 0;
+test("continueSession follows the latest session after a constructor session ID", async () => {
+  const resumed: (string | undefined)[] = [];
+  const agent = new Agent(
+    { provider: "codex", sessionId: "A", continueSession: true },
+    {
+      openai: fake(async function* (req) {
+        resumed.push(req.sessionId);
+        yield { type: "session_info", id: `S${resumed.length}` };
+      }),
+    },
+  );
+  for (let run = 0; run < 3; run++) await agent.run("next");
+  assert.deepEqual(resumed, ["A", "S1", "S2"]);
+});
+test("a thrown ProviderError ends the run with its type", async () => {
   const agent = new Agent(
     { provider: "codex" },
     {
       // biome-ignore lint/correctness/useYield: model a transient startup failure
       openai: fake(async function* () {
-        calls++;
-        throw new TransientError("unavailable");
+        throw new ProviderError("unavailable", "transient_api_error");
       }),
     },
   );
-  assert.equal((await agent.run("no automatic retry")).status, "failure");
-  assert.equal(calls, 1);
-});
-test("retries transient startup failures with ordered warnings then succeeds", async () => {
-  let calls = 0;
-  const agent = new Agent(
-    { provider: "openai", maxRetries: 2, retryDelayMs: 0 },
-    {
-      openai: fake(async function* () {
-        if (++calls < 3) throw new TransientError("overloaded");
-        yield { type: "text", text: "ok" };
-      }),
-    },
-  );
-  const result = await agent.run("retry");
-  assert.equal(calls, 3);
-  assert.deepEqual(
-    result.events.map((env) => env.event.type),
-    ["run_started", "warning", "warning", "text", "run_finished"],
-  );
-});
-test("retry exhaustion emits a typed retryable failure", async () => {
-  let calls = 0;
-  const agent = new Agent(
-    { provider: "openai", maxRetries: 1, retryDelayMs: 0 },
-    {
-      // biome-ignore lint/correctness/useYield: model an async stream failing before its first frame
-      openai: fake(async function* () {
-        calls++;
-        throw new TransientError("overloaded");
-      }),
-    },
-  );
-  const result = await agent.run("retry");
-  assert.equal(calls, 2);
+  const result = await agent.run("transient");
   assert.equal(result.status, "failure");
-  assert.deepEqual(result.events.at(-2)?.event, {
-    type: "error",
-    message: "overloaded",
-    error_type: "transient_api_error",
-    retryable: true,
-  });
+  assert.deepEqual(
+    [result.error, result.error_type],
+    ["unavailable", "transient_api_error"],
+  );
 });
-for (const progress of ["normalized", "native", "terminal"] as const)
-  test(`does not retry after ${progress} progress`, async () => {
-    let calls = 0;
-    const agent = new Agent(
-      { provider: "openai", maxRetries: 5, retryDelayMs: 0 },
-      {
-        openai: fake(async function* (_req, context) {
-          calls++;
-          if (progress === "normalized")
-            yield { type: "text", text: "partial" };
-          if (progress === "native")
-            context.onNativeEvent({ type: "turn.started" });
-          if (progress === "terminal")
-            yield {
-              type: "error",
-              message: "real failure",
-              error_type: "max_turns",
-              retryable: false,
-            };
-          throw new TransientError("cleanup failure");
-        }),
-      },
-    );
-    const result = await agent.run("retry");
-    assert.equal(calls, 1);
-    assert.equal(result.status, "failure");
-    if (progress === "terminal") {
-      assert.equal(result.error, "real failure");
-      assert.equal(result.ended_reason, "max_turns");
-    }
-  });
-test("signal-killed runtimes throw and never retry", async () => {
-  let calls = 0;
+test("a provider error wins over a later exception", async () => {
   const agent = new Agent(
-    { provider: "openai", maxRetries: 5 },
+    { provider: "openai" },
+    {
+      openai: fake(async function* () {
+        yield { type: "text", text: "partial" };
+        yield {
+          type: "error",
+          message: "real failure",
+          error_type: "max_turns",
+        };
+        throw new Error("cleanup failure");
+      }),
+    },
+  );
+  const result = await agent.run("limit");
+  assert.equal(result.final_text, "partial");
+  assert.deepEqual(
+    [result.error, result.error_type, result.ended_reason],
+    ["real failure", "max_turns", "max_turns"],
+  );
+  assert.equal(
+    result.events.filter((env) => env.event.type === "error").length,
+    1,
+  );
+});
+test("signal-killed runtimes record the failure, then throw", async () => {
+  const agent = new Agent(
+    { provider: "openai" },
     {
       // biome-ignore lint/correctness/useYield: model a runtime killed before its first frame
       openai: fake(async function* () {
-        calls++;
         throw new ProcessTerminatedError("SIGTERM");
       }),
     },
   );
-  await assert.rejects(agent.run("stop"), ProcessTerminatedError);
-  assert.equal(calls, 1);
+  const seen: EventEnvelope[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("stop"), (env) => {
+      seen.push(env);
+    }),
+    ProcessTerminatedError,
+  );
+  assert.deepEqual(
+    seen.map((env) => env.event.type),
+    ["run_started", "error", "run_finished"],
+  );
+  assert.deepEqual(seen[1]?.event, {
+    type: "error",
+    message: "SIGTERM",
+    error_type: "process_terminated",
+  });
+  const finished = seen[2]?.event;
+  assert.equal(finished?.type === "run_finished" && finished.status, "failure");
 });
-test("aborted runs finish cancelled, including cancellation during backoff", async () => {
+test("a runtime killed after the caller's abort is cancelled", async () => {
   const controller = new AbortController();
   const agent = new Agent(
-    { provider: "openai", signal: controller.signal, maxRetries: 2 },
+    { provider: "openai", signal: controller.signal },
     {
-      // biome-ignore lint/correctness/useYield: model an async stream failing before its first frame
+      // biome-ignore lint/correctness/useYield: model a kill racing the caller's abort
       openai: fake(async function* () {
-        throw new TransientError("retry");
+        controller.abort();
+        throw new ProcessTerminatedError(
+          "Codex Exec exited with signal SIGTERM",
+        );
       }),
     },
   );
-  const result = await collectRun(agent.stream("abort"), (envelope) => {
-    if (envelope.event.type === "warning") controller.abort();
-  });
+  const result = await agent.run("abort");
   assert.equal(result.status, "cancelled");
-  assert.equal(result.ended_reason, "cancelled");
 });
-test("cancellation also works when the native iterator returns without throwing", async () => {
+test("a native failure after the caller's abort is cancelled once", async () => {
   const controller = new AbortController();
   const agent = new Agent(
     { provider: "openai", signal: controller.signal },
@@ -332,6 +387,7 @@ test("cancellation also works when the native iterator returns without throwing"
       openai: fake(async function* () {
         yield { type: "session_info", id: "cancelled-session" };
         controller.abort();
+        throw new ProviderProtocolError("stream ended without a result");
       }),
     },
   );
@@ -343,6 +399,24 @@ test("cancellation also works when the native iterator returns without throwing"
     result.events.filter((env) => env.event.type === "error").length,
     1,
   );
+});
+test("an abort after the terminal frame leaves a completed run successful", async () => {
+  const controller = new AbortController();
+  const agent = new Agent(
+    { provider: "openai", signal: controller.signal },
+    {
+      openai: fake(async function* () {
+        yield { type: "text", text: "complete answer" };
+        yield { type: "usage", usage: emptyUsage() };
+      }),
+    },
+  );
+  const result = await collectRun(agent.stream("late"), (env) => {
+    if (env.event.type === "usage") controller.abort();
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.final_text, "complete answer");
+  assert.equal(result.error, null);
 });
 test("early iterator closure cleans up and releases the Agent concurrency guard", async () => {
   let closed = 0;
@@ -407,7 +481,7 @@ test("shared v1 fixtures produce the same result in Python and TypeScript", asyn
         yield env.event as ProviderEvent;
     });
     const actual = await new Agent(
-      { provider: expected.provider, model: expected.model ?? undefined },
+      { provider: expected.provider, model: started.model },
       { openai: adapter },
     ).run(started.prompt);
     const stable = ({
@@ -433,4 +507,209 @@ test("shared v1 fixtures produce the same result in Python and TypeScript", asyn
       expected,
     );
   }
+});
+test("only real signal names mark a runtime as terminated", () => {
+  for (const message of [
+    "Codex Exec exited with code 1: 401 Unauthorized. Please log out and sign in again.",
+    "Claude Code process exited: The request signature we calculated does not match",
+    // A known exit code outranks a signal named in the text.
+    "Codex Exec exited with code 1: ERROR: exec_command killed by SIGKILL after timeout",
+    "Claude Code process exited with code 1. stderr: hook terminated with SIGTERM",
+  ])
+    assert.ok(
+      !(nativeError(new Error(message)) instanceof ProcessTerminatedError),
+    );
+  assert.ok(
+    nativeError(
+      new Error("Claude Code process terminated by signal SIGKILL"),
+    ) instanceof ProcessTerminatedError,
+  );
+});
+test("the first error sets the result error; later errors are kept", async () => {
+  const agent = new Agent(
+    { provider: "openai" },
+    {
+      openai: fake(async function* () {
+        yield {
+          type: "error",
+          message: "busy",
+          error_type: "transient_api_error",
+        };
+        yield {
+          type: "error",
+          message: "denied",
+          error_type: "permission_denied",
+        };
+      }),
+    },
+  );
+  const run = await agent.run("errors");
+  assert.deepEqual(
+    [run.error, run.error_type],
+    ["busy", "transient_api_error"],
+  );
+  assert.deepEqual(
+    run.events
+      .map((env) => env.event)
+      .filter((event): event is ErrorEvent => event.type === "error")
+      .map((event) => event.error_type),
+    ["transient_api_error", "permission_denied"],
+  );
+});
+test("any upper-case signal name marks a runtime as terminated", () => {
+  assert.ok(
+    nativeError(
+      new Error("Codex Exec exited with signal SIGXFSZ: stream disconnected"),
+    ) instanceof ProcessTerminatedError,
+  );
+});
+test("exit codes 129-159 and negative codes are signal kills", () => {
+  const terminated = (code: number) =>
+    nativeError(
+      new Error(`Codex Exec exited with code ${code}: fatal`),
+    ) instanceof ProcessTerminatedError;
+  assert.deepEqual(
+    [129, 130, 134, 137, 143, 159, -9, -15].filter(terminated),
+    [129, 130, 134, 137, 143, 159, -9, -15],
+  );
+  assert.deepEqual([0, 1, 2, 127, 128, 160, 255].filter(terminated), []);
+});
+test("a kill after a provider error records both", async () => {
+  const agent = new Agent(
+    { provider: "openai" },
+    {
+      openai: fake(async function* () {
+        yield {
+          type: "error",
+          message: "overloaded",
+          error_type: "transient_api_error",
+        };
+        throw new ProcessTerminatedError("killed by SIGKILL");
+      }),
+    },
+  );
+  const errors: string[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("kill"), (env) => {
+      if (env.event.type === "error") errors.push(env.event.error_type);
+    }),
+    ProcessTerminatedError,
+  );
+  assert.deepEqual(errors, ["transient_api_error", "process_terminated"]);
+});
+test("provider-event callback exceptions propagate unclassified and close the adapter", async () => {
+  let closed = 0;
+  const adapters = [
+    // Built-in adapters classify whatever their native loop throws.
+    fake(async function* (_req, context) {
+      try {
+        context.onNativeEvent({ type: "native" });
+        yield { type: "text", text: "unreachable" };
+      } catch (cause) {
+        throw nativeError(cause);
+      } finally {
+        closed++;
+      }
+    }),
+    fake(async function* (_req, context) {
+      try {
+        try {
+          context.onNativeEvent({ type: "native" });
+        } catch {}
+        yield { type: "text", text: "after a swallowed callback error" };
+        yield { type: "text", text: "unreachable" };
+      } finally {
+        closed++;
+      }
+    }),
+  ];
+  for (const adapter of adapters) {
+    const error = new Error("my webhook: request timed out");
+    const agent = new Agent(
+      {
+        provider: "openai",
+        onProviderEvent: () => {
+          throw error;
+        },
+      },
+      { openai: adapter },
+    );
+    const types: string[] = [];
+    await assert.rejects(
+      collectRun(agent.stream("callback"), (env) => {
+        types.push(env.event.type);
+      }),
+      (thrown) => thrown === error,
+    );
+    assert.deepEqual(types, ["run_started"]);
+  }
+  assert.equal(closed, 2);
+});
+test("async provider-event rejections propagate unclassified and stop the adapter", async () => {
+  let closed = 0;
+  const adapters = [
+    // The rejection arrives while the runtime is busy; the adapter's signal stops it.
+    fake(async function* (req, context) {
+      try {
+        context.onNativeEvent({ type: "native" });
+        yield { type: "text", text: "before" };
+        await new Promise((resolve) =>
+          req.signal?.addEventListener("abort", resolve),
+        );
+        throw new Error("runtime stopped");
+      } finally {
+        closed++;
+      }
+    }),
+    // The rejection arrives after the last native event.
+    fake(async function* (_req, context) {
+      try {
+        context.onNativeEvent({ type: "native" });
+        yield { type: "text", text: "complete" };
+      } finally {
+        closed++;
+      }
+    }),
+  ];
+  for (const adapter of adapters) {
+    const error = new Error("my webhook failed");
+    const agent = new Agent(
+      {
+        provider: "openai",
+        onProviderEvent: async () => {
+          await sleep(10);
+          throw error;
+        },
+      },
+      { openai: adapter },
+    );
+    const types: string[] = [];
+    await assert.rejects(
+      collectRun(agent.stream("callback"), (env) => {
+        types.push(env.event.type);
+      }),
+      (thrown) => thrown === error,
+    );
+    assert.deepEqual(types, ["run_started", "text"]);
+  }
+  assert.equal(closed, 2);
+});
+test("a mid-stream ConfigError is recorded and finishes the run before it throws", async () => {
+  const agent = new Agent(
+    { provider: "openai" },
+    {
+      openai: fake(async function* () {
+        yield { type: "session_info", id: "s" };
+        throw new ConfigError("late invalid setting");
+      }),
+    },
+  );
+  const types: string[] = [];
+  await assert.rejects(
+    collectRun(agent.stream("late"), (env) => {
+      types.push(env.event.type);
+    }),
+    ConfigError,
+  );
+  assert.deepEqual(types.slice(-2), ["error", "run_finished"]);
 });

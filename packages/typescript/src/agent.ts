@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
 import {
   ConfigError,
   ProcessTerminatedError,
@@ -7,7 +6,6 @@ import {
   ProviderProtocolError,
   RuntimeUnavailableError,
   TraceWriteError,
-  TransientError,
 } from "./errors.js";
 import {
   type AgentEvent,
@@ -17,7 +15,6 @@ import {
   type Provider,
   type RunEndedReason,
   type RunResult,
-  type RunStatus,
 } from "./events.js";
 import type { ProviderAdapter } from "./providers/base.js";
 import { buildProvider } from "./providers/index.js";
@@ -28,6 +25,26 @@ import {
   resolveRequest,
 } from "./request.js";
 import { TraceWriter } from "./trace.js";
+
+const cancelledError = (): ErrorEvent => ({
+  type: "error",
+  message: "Run cancelled",
+  error_type: "cancelled",
+});
+function errorEvent(cause: unknown): ErrorEvent {
+  return {
+    type: "error",
+    message: cause instanceof Error ? cause.message : String(cause),
+    error_type:
+      cause instanceof ProviderError
+        ? cause.errorType
+        : cause instanceof ProviderProtocolError
+          ? "provider_protocol_error"
+          : cause instanceof RuntimeUnavailableError
+            ? "runtime_unavailable"
+            : "provider_exception",
+  };
+}
 
 export class Agent {
   private readonly defaults: AgentDefaults;
@@ -50,8 +67,9 @@ export class Agent {
   }
   private request(input: RunRequest): [ResolvedRequest, ProviderAdapter] {
     const req = resolveRequest({ ...this.defaults, ...input });
-    if (!req.sessionId && req.continueSession)
-      req.sessionId = this.sessions.get(req.provider);
+    // A per-call sessionId wins; a constructor one gives way to the latest reported session.
+    if (req.continueSession && input.sessionId === undefined)
+      req.sessionId = this.sessions.get(req.provider) ?? req.sessionId;
     const adapter = this.adapters[req.provider] ?? buildProvider(req.provider);
     this.adapters[req.provider] = adapter;
     if (adapter.name !== req.provider)
@@ -78,6 +96,17 @@ export class Agent {
     );
     this.active = true;
     let writer: TraceWriter | undefined;
+    let released = false;
+    // Runs before the final envelope is yielded: a consumer may stop pulling there.
+    const release = () => {
+      if (released) return;
+      released = true;
+      try {
+        writer?.close();
+      } finally {
+        this.active = false;
+      }
+    };
     try {
       await adapter.ensureAvailable(req);
       if (req.traceFile !== undefined) writer = new TraceWriter(req.traceFile);
@@ -108,116 +137,108 @@ export class Agent {
           ? { system_prompt: systemPrompt }
           : {}),
       });
+      const finished = (failure: ErrorEvent | undefined) => {
+        const reason: RunEndedReason = !failure
+          ? "success"
+          : failure.error_type === "cancelled"
+            ? "cancelled"
+            : failure.error_type === "max_turns"
+              ? "max_turns"
+              : failure.error_type === "refused"
+                ? "refused"
+                : "error";
+        const envelope = frame({
+          type: "run_finished",
+          status:
+            reason === "success"
+              ? "success"
+              : reason === "cancelled"
+                ? "cancelled"
+                : "failure",
+          ended_reason: reason,
+          duration_ms: Math.max(0, Math.round(performance.now() - start)),
+        });
+        release();
+        return envelope;
+      };
       let failure: ErrorEvent | undefined;
-      for (let attempt = 0; ; attempt++) {
-        let progressed = false;
+      let threw = false;
+      let thrown: unknown;
+      // A callback exception is the caller's, not the provider's: rethrow it unclassified.
+      let callback: { error: unknown } | undefined;
+      // An async callback's rejection stops the runtime through the adapter's signal.
+      const stop = new AbortController();
+      const pending = new Set<Promise<void>>();
+      const onNativeEvent = (native: unknown) => {
+        let result: unknown;
         try {
-          req.signal?.throwIfAborted();
-          for await (const event of adapter.stream(req, {
-            onNativeEvent: (native) => {
-              progressed = true;
-              req.onProviderEvent?.(native);
-            },
-          })) {
-            progressed = true;
-            if (event.type === "error") failure ??= event;
-            if (event.type === "session_info") {
-              this.sessions.set(req.provider, event.id);
-              this.latestSession = event.id;
-            }
-            yield frame(event);
-          }
-          break;
-        } catch (cause) {
-          if (
-            cause instanceof ProcessTerminatedError ||
-            cause instanceof TraceWriteError ||
-            cause instanceof ConfigError
-          )
-            throw cause;
-          if (failure) break; // Keep the provider's terminal error over a cleanup error.
-          if (
-            cause instanceof TransientError &&
-            !progressed &&
-            attempt < req.maxRetries &&
-            !req.signal?.aborted
-          ) {
-            const ms = Math.min(
-              req.retryDelayMs * 2 ** Math.min(attempt, 20),
-              30_000,
-            );
-            yield frame({
-              type: "warning",
-              message: `Transient failure; retry ${attempt + 1}/${req.maxRetries} in ${ms}ms: ${cause.message}`,
-            });
-            try {
-              await delay(ms, undefined, { signal: req.signal });
-            } catch {
-              /* cancellation is normalized below */
-            }
-            if (!req.signal?.aborted) continue;
-          }
-          failure = {
-            type: "error",
-            message: req.signal?.aborted
-              ? "Run cancelled"
-              : cause instanceof Error
-                ? cause.message
-                : String(cause),
-            error_type: req.signal?.aborted
-              ? "cancelled"
-              : cause instanceof TransientError
-                ? "transient_api_error"
-                : cause instanceof ProviderError
-                  ? cause.errorType
-                  : cause instanceof ProviderProtocolError
-                    ? "provider_protocol_error"
-                    : cause instanceof RuntimeUnavailableError
-                      ? "runtime_unavailable"
-                      : "provider_exception",
-            retryable: cause instanceof TransientError && !req.signal?.aborted,
-          };
-          yield frame(failure);
-          break;
+          result = req.onProviderEvent?.(native);
+        } catch (error) {
+          callback ??= { error };
+          throw error;
         }
+        if (typeof (result as PromiseLike<unknown>)?.then !== "function")
+          return;
+        const settled: Promise<void> = Promise.resolve(result).then(
+          () => {
+            pending.delete(settled);
+          },
+          (error: unknown) => {
+            pending.delete(settled);
+            callback ??= { error };
+            stop.abort(error);
+          },
+        );
+        pending.add(settled);
+      };
+      const signal = req.signal
+        ? AbortSignal.any([req.signal, stop.signal])
+        : stop.signal;
+      try {
+        req.signal?.throwIfAborted();
+        for await (const event of adapter.stream(
+          { ...req, signal },
+          { onNativeEvent },
+        )) {
+          if (callback) throw callback.error;
+          if (event.type === "error") failure ??= event;
+          if (event.type === "session_info") {
+            this.sessions.set(req.provider, event.id);
+            this.latestSession = event.id;
+          }
+          yield frame(event);
+        }
+        // A rejection after the last native event still fails the run.
+        await Promise.all(pending);
+        if (callback) throw callback.error;
+      } catch (cause) {
+        await Promise.all(pending);
+        if (callback) throw callback.error;
+        if (cause instanceof TraceWriteError) throw cause;
+        // A runtime killed by the caller's abort was cancelled, not terminated.
+        const terminated =
+          cause instanceof ProcessTerminatedError && !req.signal?.aborted;
+        if (terminated || cause instanceof ConfigError) {
+          const error: ErrorEvent = {
+            type: "error",
+            message: cause.message,
+            error_type: terminated ? "process_terminated" : "invalid_request",
+          };
+          yield frame(error);
+          yield finished(failure ?? error);
+          throw cause;
+        }
+        threw = true;
+        thrown = cause;
       }
-      // A native iterator can finish cleanly after observing its abort signal.
-      if (!failure && req.signal?.aborted) {
-        failure = {
-          type: "error",
-          message: "Run cancelled",
-          error_type: "cancelled",
-          retryable: false,
-        };
+      // The provider's terminal error wins over a later cleanup error.
+      if (!failure && threw) {
+        failure = req.signal?.aborted ? cancelledError() : errorEvent(thrown);
         yield frame(failure);
       }
-      const reason: RunEndedReason = !failure
-        ? "success"
-        : failure.error_type === "cancelled"
-          ? "cancelled"
-          : failure.error_type === "max_turns"
-            ? "max_turns"
-            : failure.error_type === "refused"
-              ? "refused"
-              : "error";
-      const status: RunStatus =
-        reason === "success"
-          ? "success"
-          : reason === "cancelled"
-            ? "cancelled"
-            : "failure";
-      yield frame({
-        type: "run_finished",
-        status,
-        ended_reason: reason,
-        duration_ms: Math.max(0, Math.round(performance.now() - start)),
-      });
+      yield finished(failure);
     } finally {
-      try {
-        writer?.close();
-      } finally {
-        this.active = false;
-      }
+      release();
     }
   }
 }
@@ -255,14 +276,22 @@ export async function collectRun(
         session_id: null,
         artifacts_dir: null,
         error: null,
+        error_type: null,
         events: [],
       };
     } else if (event.type === "run_started")
       throw new ProviderProtocolError("Duplicate run_started");
     result.events.push(envelope);
-    if (event.type === "text") result.final_text += event.text;
-    if (event.type === "session_info") result.session_id = event.id;
-    if (event.type === "error") result.error ??= event.message;
+    // Native SDKs report the last assistant message as the final response.
+    if (event.type === "text") result.final_text = event.text;
+    if (event.type === "session_info") {
+      result.session_id = event.id;
+      if (event.model) result.model = event.model;
+    }
+    if (event.type === "error" && result.error === null) {
+      result.error = event.message;
+      result.error_type = event.error_type;
+    }
     if (event.type === "usage") {
       result.usage ??= emptyUsage();
       for (const key of Object.keys(

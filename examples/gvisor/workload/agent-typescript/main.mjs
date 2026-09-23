@@ -48,7 +48,6 @@ const providerOptions =
         client: { apiKey: token, baseUrl: `${baseUrl}/v1` },
         thread: {
           sandboxMode: "danger-full-access",
-          approvalPolicy: "never",
           skipGitRepoCheck: true,
           webSearchMode: "disabled",
         },
@@ -58,9 +57,7 @@ try {
     provider: request.provider,
     model: request.model,
     cwd: "/job/work",
-    sessionId: request.session_id,
     continueSession: true,
-    maxRetries: 0,
     signal: AbortSignal.timeout(150000),
     providerOptions,
   });
@@ -71,7 +68,13 @@ try {
       prompt,
       traceFile: `${tracePrefix}-${String(turn).padStart(4, "0")}.trace.jsonl`,
     });
-    console.log(JSON.stringify({ kind: "result", result }));
+    // The launcher passes only printable ASCII, like Python's json.dumps output.
+    console.log(
+      JSON.stringify({ kind: "result", result }).replace(
+        /[^ -~]/g,
+        (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      ),
+    );
     if (result.status !== "success") {
       process.exitCode = 1;
       break;

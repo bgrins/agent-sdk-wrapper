@@ -35,8 +35,8 @@ compose=(docker compose)
 cli= timer=
 cleanup() {
   status=$?
-  trap - EXIT
   trap '' INT TERM USR1
+  trap - EXIT
   if [[ -n $timer ]]; then kill "$timer" 2>/dev/null || :; wait "$timer" 2>/dev/null || :; fi
   if [[ -n $cli ]]; then kill -KILL "$cli" 2>/dev/null || :; wait "$cli" 2>/dev/null || :; fi
   # Stopping the attached CLI alone does not stop its container.
@@ -62,6 +62,13 @@ trap 'echo "Job deadline exceeded" >&2; exit 124' USR1
 "${compose[@]}" up -d --wait --wait-timeout 10 --no-deps gateway >&2 & cli=$!
 wait "$cli"
 cli=
-"${compose[@]}" run --rm -T --no-deps --name "$COMPOSE_PROJECT_NAME-agent" "$@" & cli=$!
+# Sandboxed processes can write to worker output: pass only printable ASCII to the terminal.
+# Bounded, unbuffered chunks: output survives a timeout, and an endless line
+# from the sandbox cannot grow host memory.
+printable() {
+  LC_ALL=C perl -e '$| = 1; while (sysread(STDIN, my $chunk, 65536)) { $chunk =~ s/[^\t\n\x20-\x7e]//g; print $chunk }'
+}
+"${compose[@]}" --progress plain run --rm -T --no-deps --name "$COMPOSE_PROJECT_NAME-agent" "$@" \
+  > >(printable) 2> >(printable >&2) & cli=$!
 wait "$cli"
 cli=

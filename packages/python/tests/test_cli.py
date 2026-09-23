@@ -120,7 +120,6 @@ def test_run_forwards_extended_cli_options(monkeypatch, capsys):
             "repo.write_file",
             "--session-id",
             "sess-123",
-            "--continue-session",
             "--env",
             "MODE=test",
             "--env",
@@ -142,12 +141,11 @@ def test_run_forwards_extended_cli_options(monkeypatch, capsys):
     ]
 
     req = seen_requests[0]
-    assert req.effort == "xhigh"
+    assert req.effort == "max"
     assert req.builtin_tools == ["Read", "Grep"]
     assert req.allowed_tools == ["repo.read_file"]
     assert req.disallowed_tools == ["repo.write_file"]
     assert req.session_id == "sess-123"
-    assert req.continue_session is True
     assert req.env == {"MODE": "test", "TOKEN": "a=b"}
     assert req.extra_options == {"sandbox": {"mode": "workspace-write"}}
 
@@ -182,6 +180,29 @@ def test_run_web_tools_flags_map_to_request(monkeypatch, capsys):
     capsys.readouterr()
 
     assert [r.web_tools for r in seen_requests] == [False, True, None]
+
+
+def test_run_cli_login_flag_and_config_map_to_request(monkeypatch, tmp_path, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    config = tmp_path / "agent.toml"
+    config.write_text('cli_login = "require"\n', encoding="utf-8")
+
+    base_args = ["run", "--provider", "openai", "--prompt", "x"]
+    assert cli.main(base_args) == 0
+    assert cli.main([*base_args, "--config", str(config)]) == 0
+    assert cli.main([*base_args, "--config", str(config), "--cli-login", "deny"]) == 0
+    capsys.readouterr()
+
+    assert [r.cli_login for r in seen_requests] == ["deny", "require", "deny"]
 
 
 def test_run_rejects_conflicting_web_tools_flags(capsys):
@@ -252,9 +273,7 @@ provider = "openai"
 model = "gpt-5"
 system_prompt = "system from config"
 cwd = "."
-max_retries = 0
 effort = "high"
-continue_session = true
 builtin_tools = "none"
 allowed_tools = ["repo.read_file"]
 disallowed_tools = ["repo.delete_file"]
@@ -325,11 +344,10 @@ tool_approval_modes = { search = "approve" }
     assert req.model == "gpt-5"
     assert req.system_prompt == "system from config"
     assert req.cwd == tmp_path
-    assert req.max_retries == 0
     assert req.effort == "high"
-    assert req.continue_session is True
     assert req.builtin_tools == "none"
-    assert req.allowed_tools == ["repo.read_file", "repo.search"]
+    # A flag replaces the config value; env and option maps merge by key.
+    assert req.allowed_tools == ["repo.search"]
     assert req.disallowed_tools == ["repo.delete_file"]
     assert req.env == {"MODE": "config", "TOKEN": "cli-token"}
     assert req.extra_options == {"sandbox": {"mode": "workspace-write"}}
@@ -388,3 +406,252 @@ def test_run_rejects_unknown_config_field(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "unknown config field(s): unknown" in captured.err
+
+
+def test_run_rejects_session_continuation_it_cannot_honor(tmp_path, capsys):
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_text('provider = "openai"\ncontinue_session = true\n', encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["run", "--provider", "openai", "--prompt", "x", "--continue-session"])
+    assert exc_info.value.code == 2
+    assert cli.main(["run", "--config", str(config_path), "--prompt", "x"]) == 2
+    assert "unknown config field(s): continue_session" in capsys.readouterr().err
+
+
+def test_run_rejects_a_config_file_that_is_not_utf8(tmp_path, capsys):
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_bytes(b'provider = "\xff"\n')
+
+    rc = cli.main(["run", "--config", str(config_path), "--prompt", "x"])
+
+    assert rc == 2
+    assert "could not read config file" in capsys.readouterr().err
+
+
+def test_stream_rejects_json_output(monkeypatch, capsys):
+    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
+
+    rc = cli.main(
+        ["run", "--provider", "openai", "--prompt", "x", "--stream", "--output", "json"]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "--stream cannot be combined with --output json" in captured.err
+
+
+_MCP = '[[mcp_servers]]\nname = "s"\ncommand = "c"\n'
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('timeout = "30"', "timeout: Input should be a valid number"),
+        ('max_turns = "3"', "max_turns: Input should be a valid integer"),
+        ("model = 5", "model: Input should be a valid string"),
+        ("cwd = 5", "cwd must be str | Path | None"),
+        ("output = 1", "output: Input should be 'jsonl', 'text' or 'json'"),
+        ('output = ["json"]', "output: Input should be 'jsonl', 'text' or 'json'"),
+        ('web_tools = "false"', "web_tools: Input should be a valid boolean"),
+        ('include_raw = "false"', "include_raw: Input should be a valid boolean"),
+        ('disallowed_tools = "Bash"', "disallowed_tools: 'str' instances are not allowed"),
+        ("env = { KEY = 1 }", "env.KEY: Input should be a valid string"),
+        ('[mcp_servers.s]\ncommand = "c"', "mcp_servers: Input should be a valid list"),
+        (f'{_MCP}disabled_tools = "x"', "mcp_servers[0].disabled_tools: Input should be a valid"),
+        (f'{_MCP}enabled = "false"', "mcp_servers[0].enabled: Input should be a valid boolean"),
+        (f'{_MCP}args = "--flag"', "mcp_servers[0].args: Input should be a valid list"),
+        (f'{_MCP}tool_approval_modes = "approve"', "tool_approval_modes: Input should be a valid"),
+        (
+            '[subagents.r]\ndescription = "d"\nprompt = "p"\ntools = "Read"',
+            "subagents.r.tools: Input should be a valid list",
+        ),
+    ],
+)
+def test_run_rejects_mistyped_config_values(monkeypatch, tmp_path, capsys, line, message):
+    monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
+    config_path = tmp_path / "agent-sdk-wrapper.toml"
+    config_path.write_text(f'provider = "openai"\n{line}\n', encoding="utf-8")
+
+    rc = cli.main(["run", "--config", str(config_path), "--prompt", "x"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert message in captured.err
+    assert captured.out == ""
+
+
+def test_run_reports_missing_prompt_file(tmp_path, capsys):
+    missing = tmp_path / "missing.txt"
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt-file", str(missing)])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert f"error: could not read prompt file {missing}" in captured.err
+
+
+def test_run_rejects_empty_prompt_with_prompt_file(tmp_path, capsys):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("real prompt", encoding="utf-8")
+
+    rc = cli.main(
+        ["run", "--provider", "openai", "--prompt", "", "--prompt-file", str(prompt_file)]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "pass only one of --prompt / --prompt-file" in captured.err
+
+
+def test_jsonl_output_keeps_lone_surrogates(monkeypatch, capsys):
+    odd = "bad \ud800 text"
+
+    class SurrogateProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            yield Text(text=odd)
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", SurrogateProvider)
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt", "x"])
+
+    events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    assert rc == 0
+    assert [event["text"] for event in events if event["type"] == "text"] == [odd]
+
+
+def test_run_reports_process_termination(monkeypatch, capsys):
+    from agent_sdk_wrapper import ProcessTerminatedError
+
+    class KilledProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            raise ProcessTerminatedError(9)
+            yield Text(text="unreachable")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", KilledProvider)
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt", "x"])
+
+    captured = capsys.readouterr()
+    events = [json.loads(line)["event"] for line in captured.out.splitlines()]
+    assert rc == 128 + 9
+    assert [event["type"] for event in events] == ["run_started", "error", "run_finished"]
+    assert "killed by signal 9" in captured.err
+
+
+@pytest.mark.parametrize("output", ["json", "text"])
+def test_run_prints_a_killed_runs_result(monkeypatch, capsys, output):
+    from agent_sdk_wrapper import ProcessTerminatedError
+
+    class KilledProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            yield Text(text="partial answer")
+            raise ProcessTerminatedError(9)
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", KilledProvider)
+
+    rc = cli.main(["run", "--provider", "openai", "--prompt", "x", "--output", output])
+
+    captured = capsys.readouterr()
+    assert rc == 128 + 9
+    if output == "json":
+        result = json.loads(captured.out)
+        assert (result["final_text"], result["error_type"]) == (
+            "partial answer",
+            "process_terminated",
+        )
+    else:
+        assert captured.out == "partial answer\n"
+    assert "killed by signal 9" in captured.err
+
+
+def test_run_setting_source_flag_maps_to_request(monkeypatch, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    base_args = ["run", "--provider", "openai", "--prompt", "x"]
+    assert cli.main(base_args) == 0
+    assert cli.main([*base_args, "--setting-source", "project", "--setting-source", "user"]) == 0
+    capsys.readouterr()
+
+    assert [r.setting_sources for r in seen_requests] == [None, ["project", "user"]]
+
+
+def test_stream_separates_assistant_messages(monkeypatch, capsys):
+    class TwoMessages(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            yield Text(text="Checking the shell.")
+            yield Text(text="49")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", TwoMessages)
+
+    assert cli.main(["run", "--provider", "openai", "--prompt", "x", "--stream"]) == 0
+    assert capsys.readouterr().out == "Checking the shell.\n49\n"
+
+
+def test_run_treats_a_null_max_turns_config_as_no_limit(monkeypatch, tmp_path, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    config = tmp_path / "agent.json"
+    config.write_text('{"provider": "codex", "max_turns": null}', encoding="utf-8")
+
+    assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 0
+    capsys.readouterr()
+    assert seen_requests[0].max_turns is None
+
+
+def test_run_builds_subagents_from_config(monkeypatch, tmp_path, capsys):
+    seen_requests = []
+
+    class CapturingProvider(base.ProviderAdapter):
+        name = "openai"
+
+        async def stream(self, req):  # type: ignore[override]
+            seen_requests.append(req)
+            yield Text(text="ok")
+
+    monkeypatch.setattr(op_mod, "OpenAIProvider", CapturingProvider)
+    config = tmp_path / "agent.toml"
+    config.write_text(
+        'provider = "codex"\n[subagents.reviewer]\ndescription = "Reviews"\nprompt = "Review."\n',
+        encoding="utf-8",
+    )
+
+    assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 0
+    capsys.readouterr()
+    assert seen_requests[0].subagents["reviewer"].description == "Reviews"
+
+
+def test_run_rejects_an_invalid_mcp_server_entry(tmp_path, capsys):
+    config = tmp_path / "agent.toml"
+    config.write_text(
+        'provider = "codex"\n[[mcp_servers]]\nname = "repo"\ncommand = "x"\nbogus = 1\n',
+        encoding="utf-8",
+    )
+
+    assert cli.main(["run", "--prompt", "x", "--config", str(config)]) == 2
+    assert "invalid config" in capsys.readouterr().err

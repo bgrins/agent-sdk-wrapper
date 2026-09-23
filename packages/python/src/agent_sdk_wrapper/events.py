@@ -61,7 +61,6 @@ class TokenUsage:
     ``input_tokens`` includes cache; ``output_tokens`` includes reasoning.
     Cache read/write and reasoning fields are subsets of those totals.
     ``requests`` counts model requests where available; provider proxies differ.
-    Codex cache-write counts are unavailable and remain zero.
     """
 
     input_tokens: int = 0
@@ -157,14 +156,6 @@ class ToolResult(_EventBase):
 
 
 @dataclass
-class AgentUpdated(_EventBase):
-    """The active (sub)agent changed."""
-
-    type: ClassVar[str] = "agent_updated"
-    name: str = ""
-
-
-@dataclass
 class SubagentStarted(_EventBase):
     """A delegated subagent task began."""
 
@@ -194,10 +185,14 @@ class Usage(_EventBase):
 
 @dataclass
 class SessionInfo(_EventBase):
-    """An underlying provider session/thread identifier."""
+    """An underlying provider session/thread identifier.
+
+    ``model`` is the model the runtime reports, which can differ from the request.
+    """
 
     type: ClassVar[str] = "session_info"
     id: str = ""
+    model: str | None = None
 
 
 @dataclass
@@ -230,8 +225,6 @@ class Error(_EventBase):
     type: ClassVar[str] = "error"
     message: str = ""
     error_type: str | None = None
-    # Retry classification, including provider errors that do not raise.
-    retryable: bool = False
     raw: dict[str, Any] | None = None
 
 
@@ -249,7 +242,6 @@ AgentEvent = (
     | Thinking
     | ToolCall
     | ToolResult
-    | AgentUpdated
     | SubagentStarted
     | SubagentEnded
     | Usage
@@ -283,7 +275,11 @@ class EventEnvelope:
 
 @dataclass
 class RunResult:
-    """The collected run result."""
+    """The collected run result.
+
+    ``final_text`` is the last assistant message. ``model`` is the model the
+    runtime reported, falling back to the requested model.
+    """
 
     run_id: str
     provider: str
@@ -298,6 +294,7 @@ class RunResult:
     session_id: str | None = None
     artifacts_dir: str | None = None
     error: str | None = None
+    error_type: str | None = None
     events: list[EventEnvelope] = field(default_factory=list)
 
     @property
@@ -322,6 +319,7 @@ class RunResult:
             "session_id": self.session_id,
             "artifacts_dir": self.artifacts_dir,
             "error": self.error,
+            "error_type": self.error_type,
             "events": [e.to_dict() for e in self.events],
         }
 

@@ -29,7 +29,6 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 EXAMPLE_NAME = "auditor_style"
 MCP_SERVER_NAME = "auditor_demo"
 MCP_TOOLS = ["read_project_brief", "read_artifact_policy"]
-ALLOWED_MCP_TOOLS = [f"mcp__{MCP_SERVER_NAME}__{name}" for name in MCP_TOOLS]
 MAX_TURNS_BY_STAGE = {
     "planner": 6,
     "analyst": 8,
@@ -476,9 +475,9 @@ async def run_stage(
         system_prompt=STAGE_SYSTEM_PROMPTS[stage],
         output_schema=output_schema,
         artifacts_dir=artifacts_dir,
-        max_turns=MAX_TURNS_BY_STAGE[stage],
+        # Codex has no turn limit.
+        max_turns=MAX_TURNS_BY_STAGE[stage] if provider == "anthropic" else None,
         mcp_servers=mcp_servers,
-        allowed_tools=ALLOWED_MCP_TOOLS if mcp_servers else None,
         on_event=recorder.on_event(stage),
         include_events_in_result=False,
     )

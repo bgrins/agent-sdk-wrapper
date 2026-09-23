@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { ConfigError } from "./errors.js";
 import type { Provider } from "./events.js";
 import type { ProviderOptions } from "./providers/options.js";
@@ -12,6 +13,8 @@ export type Effort =
   | "max"
   | "ultra"
   | "persistent";
+/** Whether the runtime may use its stored login. `require` is Codex-only. */
+export type CliLogin = "deny" | "require";
 export interface AgentDefaults {
   provider?: ProviderInput;
   model?: string;
@@ -19,13 +22,13 @@ export interface AgentDefaults {
   cwd?: string;
   sessionId?: string;
   continueSession?: boolean;
-  maxRetries?: number;
-  retryDelayMs?: number;
   includeRaw?: boolean;
   signal?: AbortSignal;
   providerOptions?: ProviderOptions;
-  onProviderEvent?: (event: unknown) => void;
+  /** A returned promise that rejects fails the run like a thrown exception. */
+  onProviderEvent?: (event: unknown) => void | PromiseLike<void>;
   traceFile?: string;
+  cliLogin?: CliLogin;
   // Reserved features fail at compile time and at runtime, including empty values.
   tools?: never;
   mcpServers?: never;
@@ -43,10 +46,9 @@ export interface RunRequest extends AgentDefaults {
 }
 export interface ResolvedRequest extends RunRequest {
   provider: Provider;
-  maxRetries: number;
-  retryDelayMs: number;
   continueSession: boolean;
   includeRaw: boolean;
+  cliLogin: CliLogin;
 }
 const keys = new Set([
   "prompt",
@@ -56,13 +58,12 @@ const keys = new Set([
   "cwd",
   "sessionId",
   "continueSession",
-  "maxRetries",
-  "retryDelayMs",
   "includeRaw",
   "signal",
   "providerOptions",
   "onProviderEvent",
   "traceFile",
+  "cliLogin",
 ]);
 export function checkKeys(
   value: object,
@@ -74,15 +75,21 @@ export function checkKeys(
       throw new ConfigError(`${label}.${key} is not implemented or recognized`);
   }
 }
-export function normalizeProvider(value: string): Provider {
-  if (typeof value !== "string")
-    throw new ConfigError("provider must be a string");
+function knownProvider(value: string): Provider | undefined {
   const name = value.trim().toLowerCase();
   if (name === "codex" || name === "openai") return "openai";
   if (name === "anthropic") return name;
-  throw new ConfigError(
-    `Unknown provider '${value}'; expected anthropic, openai, or codex`,
-  );
+  return undefined;
+}
+export function normalizeProvider(value: string): Provider {
+  if (typeof value !== "string")
+    throw new ConfigError("provider must be a string");
+  const provider = knownProvider(value);
+  if (!provider)
+    throw new ConfigError(
+      `Unknown provider '${value}'; expected anthropic, openai, or codex`,
+    );
+  return provider;
 }
 export function resolveProvider(
   provider?: string,
@@ -90,13 +97,16 @@ export function resolveProvider(
 ): { provider: Provider; model?: string } {
   if (provider !== undefined && typeof provider !== "string")
     throw new ConfigError("provider must be a string");
-  if (model !== undefined && (typeof model !== "string" || !model.trim()))
-    throw new ConfigError("model must be a non-empty string");
-  let name = model?.trim();
-  let prefix: Provider | undefined;
-  if (name?.includes(":")) {
-    const colon = name.indexOf(":");
-    prefix = normalizeProvider(name.slice(0, colon));
+  if (model !== undefined && typeof model !== "string")
+    throw new ConfigError("model must be a string");
+  // Blank values mean omitted, as with an empty environment variable.
+  if (!provider?.trim()) provider = undefined;
+  let name = model?.trim() || undefined;
+  // Bedrock IDs, ARNs and fine-tune names contain colons; only a provider name is a prefix.
+  const colon = name?.indexOf(":") ?? -1;
+  const prefix =
+    name && colon >= 0 ? knownProvider(name.slice(0, colon)) : undefined;
+  if (name && prefix) {
     name = name.slice(colon + 1).trim();
     if (!name)
       throw new ConfigError("Expected provider:model with a non-empty model");
@@ -121,6 +131,13 @@ export function resolveProvider(
     );
   return { provider: selected, ...(name ? { model: name } : {}) };
 }
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
 export function resolveRequest(input: RunRequest): ResolvedRequest {
   checkKeys(input, keys, "request");
   if (typeof input.prompt !== "string")
@@ -134,17 +151,18 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
   }
   if (input.traceFile?.includes("\0"))
     throw new ConfigError("traceFile must not contain NUL characters");
+  if (input.cwd !== undefined && !isDirectory(input.cwd))
+    throw new ConfigError(`cwd is not a directory: ${input.cwd}`);
   for (const key of ["includeRaw", "continueSession"] as const) {
     if (input[key] !== undefined && typeof input[key] !== "boolean")
       throw new ConfigError(`${key} must be boolean`);
   }
-  for (const key of ["maxRetries", "retryDelayMs"] as const) {
-    if (
-      input[key] !== undefined &&
-      (!Number.isSafeInteger(input[key]) || (input[key] ?? 0) < 0)
-    )
-      throw new ConfigError(`${key} must be a non-negative integer`);
-  }
+  if (
+    input.cliLogin !== undefined &&
+    input.cliLogin !== "deny" &&
+    input.cliLogin !== "require"
+  )
+    throw new ConfigError("cliLogin must be 'deny' or 'require'");
   if (input.signal !== undefined && !(input.signal instanceof AbortSignal))
     throw new ConfigError("signal must be an AbortSignal");
   if (
@@ -181,10 +199,10 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
     );
   return {
     ...input,
-    ...resolved,
-    maxRetries: input.maxRetries ?? 0,
-    retryDelayMs: input.retryDelayMs ?? 250,
+    provider: resolved.provider,
+    model: resolved.model,
     continueSession: input.continueSession ?? false,
     includeRaw: input.includeRaw ?? false,
+    cliLogin: input.cliLogin ?? "deny",
   };
 }

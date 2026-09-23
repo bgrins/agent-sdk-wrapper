@@ -14,6 +14,10 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { Agent, RuntimeUnavailableError } from "../src/index.js";
 
+// Adapters refuse to launch without API credentials; these tests fake the runtime.
+process.env.ANTHROPIC_API_KEY ||= "test-key";
+process.env.OPENAI_API_KEY ||= "test-key";
+
 test("Claude resolves its runtime through the SDK's symlinked dependency scope", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-sdk-wrapper-nested-"));
   t.after(() => rm(root, { recursive: true, force: true }));

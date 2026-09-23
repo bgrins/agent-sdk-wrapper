@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
+import re
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_type_hints
+
+from pydantic import TypeAdapter, ValidationError
 
 from . import (
     Agent,
@@ -18,11 +22,13 @@ from . import (
     McpHttpServer,
     McpServer,
     McpStdioServer,
+    ProcessTerminatedError,
     RunFinished,
+    RunResult,
     RunStatus,
+    SubagentDef,
     Text,
     __version__,
-    normalize_builtin_tools,
 )
 from .logging import LOGGER_NAME
 
@@ -58,7 +64,11 @@ def _parser() -> argparse.ArgumentParser:
             "Defaults to jsonl, or text when --stream is set."
         ),
     )
-    run.add_argument("--stream", action="store_true", help="Stream text deltas to stdout.")
+    run.add_argument(
+        "--stream",
+        action="store_true",
+        help="Print each completed assistant message as it arrives.",
+    )
     run.add_argument("--trace-file", default=None, type=Path)
     run.add_argument(
         "--artifacts-dir",
@@ -71,11 +81,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--effort",
         default=None,
-        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         help="Reasoning effort tier. Unsupported provider/tier combinations are rejected.",
     )
     run.add_argument("--timeout", default=None, type=float)
-    run.add_argument("--max-retries", default=None, type=int)
     run.add_argument("--include-raw", action="store_true", default=None)
     run.add_argument(
         "--builtin-tool",
@@ -99,14 +108,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_const",
         const=True,
         default=None,
-        help="Enable WebSearch/WebFetch (Anthropic) or tools.web_search (Codex).",
+        help="Enable WebSearch/WebFetch (Anthropic) or live web_search (Codex).",
     )
     web_tools.add_argument(
         "--no-web-tools",
         dest="web_tools",
         action="store_const",
         const=False,
-        help="Disable WebSearch/WebFetch (Anthropic) or tools.web_search (Codex).",
+        help="Disable WebSearch/WebFetch (Anthropic) or web_search (Codex).",
     )
     run.add_argument(
         "--allowed-tool",
@@ -118,18 +127,12 @@ def _parser() -> argparse.ArgumentParser:
         "--disallowed-tool",
         action="append",
         default=None,
-        help="Disallow a builtin, callable, or MCP tool where supported. Repeatable.",
+        help="Disallow a tool (anthropic). Repeatable.",
     )
     run.add_argument(
         "--session-id",
         default=None,
         help="Resume an existing provider session/thread.",
-    )
-    run.add_argument(
-        "--continue-session",
-        action="store_true",
-        default=None,
-        help="Store emitted session ids and continue the same session for later calls.",
     )
     run.add_argument(
         "--env",
@@ -157,30 +160,46 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         choices=["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"],
     )
+    run.add_argument(
+        "--setting-source",
+        action="append",
+        default=None,
+        choices=["user", "project", "local"],
+        help="Claude on-disk settings to load. Repeatable; default none.",
+    )
+    run.add_argument(
+        "--cli-login",
+        default=None,
+        choices=["deny", "require"],
+        help="Whether the runtime may use its stored login (require: Codex only).",
+    )
     run.add_argument("--verbose", "-v", action="count", default=0)
     return p
 
 
-def _read_prompt(args: argparse.Namespace, config: dict[str, Any], base_dir: Path | None) -> str:
-    if args.prompt and args.prompt_file:
-        sys.exit("error: pass only one of --prompt / --prompt-file")
+def _read_prompt(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    if args.prompt is not None and args.prompt_file is not None:
+        raise ConfigError("pass only one of --prompt / --prompt-file")
     if args.prompt is not None:
         return args.prompt
     if args.prompt_file is not None:
-        return args.prompt_file.read_text(encoding="utf-8")
+        return _read_prompt_file(args.prompt_file)
     if "prompt" in config and "prompt_file" in config:
         raise ConfigError("config may contain only one of prompt or prompt_file")
     if "prompt" in config:
-        prompt = config["prompt"]
-        if not isinstance(prompt, str):
-            raise ConfigError("config field prompt must be a string")
-        return prompt
+        return config["prompt"]
     if "prompt_file" in config:
-        prompt_file = _path_from_config(config["prompt_file"], base_dir, field="prompt_file")
-        return prompt_file.read_text(encoding="utf-8")
+        return _read_prompt_file(config["prompt_file"])
     if not sys.stdin.isatty():
         return sys.stdin.read()
-    sys.exit("error: provide --prompt, --prompt-file, or pipe one on stdin")
+    raise ConfigError("provide --prompt, --prompt-file, or pipe one on stdin")
+
+
+def _read_prompt_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"could not read prompt file {path}: {exc}") from exc
 
 
 def _setup_logging(verbose: int) -> None:
@@ -194,73 +213,51 @@ def _setup_logging(verbose: int) -> None:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    config, config_base_dir = _load_cli_config(args.config)
-    prompt = _read_prompt(args, config, config_base_dir)
-    stream = args.stream or _config_bool(config, "stream", False)
-    output = args.output or _config_get(config, "output", None) or ("text" if stream else "jsonl")
-    if output not in _OUTPUTS:
-        raise ConfigError("config field output must be one of: jsonl, text, json")
-    if stream and output == "jsonl":
-        raise ConfigError("--stream cannot be combined with --output jsonl")
-    env = {
-        **_config_str_dict(config, "env"),
-        **_parse_env_assignments(args.env or []),
+    config = _load_cli_config(args.config)
+    prompt = _read_prompt(args, config)
+    stream = args.stream or config.get("stream", False)
+    output = args.output or config.get("output") or ("text" if stream else "jsonl")
+    if stream and output != "text":
+        raise ConfigError(f"--stream cannot be combined with --output {output}")
+    if args.no_builtin_tools and args.builtin_tool:
+        raise ConfigError("--no-builtin-tools cannot be combined with --builtin-tool")
+    flags = {
+        "provider": args.provider,
+        "model": args.model,
+        "system_prompt": args.system_prompt,
+        "cwd": args.cwd,
+        "max_turns": args.max_turns,
+        "effort": args.effort,
+        "timeout": args.timeout,
+        "include_raw": args.include_raw,
+        "builtin_tools": "none" if args.no_builtin_tools else args.builtin_tool,
+        "web_tools": args.web_tools,
+        "allowed_tools": args.allowed_tool,
+        "disallowed_tools": args.disallowed_tool,
+        "session_id": args.session_id,
+        "permission_mode": args.permission_mode,
+        "cli_login": args.cli_login,
+        "setting_sources": args.setting_source,
+        "trace_file": args.trace_file,
+        "artifacts_dir": args.artifacts_dir,
     }
-    provider_options = _deep_merge(
-        _config_mapping(config, "provider_options"),
-        _parse_json_assignments(args.provider_option or [], flag="--provider-option"),
-    )
-    extra_options = _deep_merge(
-        _config_mapping(config, "extra_options"),
-        _parse_json_assignments(args.extra_option or [], flag="--extra-option"),
-    )
-    agent_kwargs: dict[str, Any] = dict(
-        provider=args.provider or _config_get(config, "provider", None),
-        model=args.model or _config_get(config, "model", None),
-        system_prompt=args.system_prompt or _config_get(config, "system_prompt", None),
-        cwd=args.cwd or _optional_path(config, "cwd", config_base_dir),
-        env=env,
-        max_turns=(
-            args.max_turns
-            if args.max_turns is not None
-            else _config_get(config, "max_turns", None)
-        ),
-        effort=args.effort or _config_get(config, "effort", None),
-        timeout=args.timeout if args.timeout is not None else _config_get(config, "timeout", None),
-        max_retries=args.max_retries
-        if args.max_retries is not None
-        else _config_int(config, "max_retries", 2),
-        include_raw=bool(
-            args.include_raw
-            if args.include_raw is not None
-            else _config_bool(config, "include_raw", False)
-        ),
-        builtin_tools=_merge_builtin_tools(
-            config, args.builtin_tool, args.no_builtin_tools
-        ),
-        web_tools=(
-            args.web_tools
-            if args.web_tools is not None
-            else _config_optional_bool(config, "web_tools")
-        ),
-        allowed_tools=_merge_string_lists(config, "allowed_tools", args.allowed_tool),
-        disallowed_tools=_merge_string_lists(config, "disallowed_tools", args.disallowed_tool),
-        mcp_servers=_parse_mcp_servers(config.get("mcp_servers"), config_base_dir),
-        session_id=args.session_id or _config_get(config, "session_id", None),
-        continue_session=bool(
-            args.continue_session
-            if args.continue_session is not None
-            else _config_bool(config, "continue_session", False)
-        ),
-        permission_mode=args.permission_mode or _config_get(config, "permission_mode", None),
-        extra_options=extra_options,
-        provider_options=provider_options,
-        trace_file=args.trace_file or _optional_path(config, "trace_file", config_base_dir),
-        artifacts_dir=(
-            args.artifacts_dir or _optional_path(config, "artifacts_dir", config_base_dir)
-        ),
-    )
-    agent = Agent(**agent_kwargs)
+    agent_kwargs = {key: value for key, value in config.items() if key not in _CLI_HINTS}
+    agent_kwargs.update({key: value for key, value in flags.items() if value is not None})
+    try:
+        agent_kwargs["env"] = {
+            **(agent_kwargs.get("env") or {}),
+            **_parse_env_assignments(args.env or []),
+        }
+        for key, flag, values in (
+            ("provider_options", "--provider-option", args.provider_option),
+            ("extra_options", "--extra-option", args.extra_option),
+        ):
+            agent_kwargs[key] = _deep_merge(
+                agent_kwargs.get(key) or {}, _parse_json_assignments(values or [], flag=flag)
+            )
+        agent = Agent(**agent_kwargs)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ConfigError(f"invalid settings: {exc}") from exc
 
     if output == "jsonl":
         rc = 0
@@ -279,6 +276,9 @@ async def _run(args: argparse.Namespace) -> int:
             if _stream_event_failed(env.event):
                 rc = 1
             if isinstance(env.event, Text):
+                # Each Text is a whole assistant message; keep them apart.
+                if final_text_parts:
+                    sys.stdout.write("\n")
                 sys.stdout.write(env.event.text)
                 sys.stdout.flush()
                 final_text_parts.append(env.event.text)
@@ -286,7 +286,17 @@ async def _run(args: argparse.Namespace) -> int:
             sys.stdout.write("\n")
         return rc
 
-    result = await agent.run(prompt)
+    try:
+        result = await agent.run(prompt)
+    except ProcessTerminatedError as exc:
+        if exc.result is not None:
+            _write_result(exc.result, output)
+        raise
+    _write_result(result, output)
+    return 0 if result.ok else 1
+
+
+def _write_result(result: RunResult, output: str) -> None:
     if output == "text":
         sys.stdout.write(result.final_text)
         if result.final_text and not result.final_text.endswith("\n"):
@@ -294,7 +304,6 @@ async def _run(args: argparse.Namespace) -> int:
     else:  # json
         json.dump(result.to_dict(), sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
-    return 0 if result.ok else 1
 
 
 def _stream_event_failed(event: object) -> bool:
@@ -303,304 +312,109 @@ def _stream_event_failed(event: object) -> bool:
     return isinstance(event, RunFinished) and event.status != RunStatus.SUCCESS
 
 
-_CONFIG_KEYS = {
-    "allowed_tools",
-    "artifacts_dir",
-    "builtin_tools",
+_CLI_HINTS: dict[str, Any] = {
+    "prompt": str,
+    "prompt_file": str,
+    "output": Literal["jsonl", "text", "json"],
+    "stream": bool,
+}
+# A config file sets these Agent keywords. Tools, schemas and callbacks need Python
+# objects, and one prompt per process leaves nothing to continue.
+_AGENT_KEYS = frozenset(inspect.signature(Agent).parameters) - {
+    "tools",
+    "output_schema",
+    "on_event",
+    "on_provider_event",
     "continue_session",
-    "cwd",
-    "disallowed_tools",
-    "effort",
-    "env",
-    "extra_options",
-    "include_raw",
-    "max_retries",
-    "max_turns",
-    "mcp_servers",
-    "model",
-    "output",
-    "permission_mode",
-    "prompt",
-    "prompt_file",
-    "provider",
-    "provider_options",
-    "session_id",
-    "stream",
-    "system_prompt",
-    "timeout",
-    "trace_file",
-    "web_tools",
 }
-_OUTPUTS = {"jsonl", "text", "json"}
-_MCP_COMMON_KEYS = {
-    "default_tools_approval_mode",
-    "disabled_tools",
-    "enabled",
-    "enabled_tools",
-    "name",
-    "required",
-    "startup_timeout_sec",
-    "tool_approval_modes",
-    "tool_timeout_sec",
-    "type",
+_CONFIG_HINTS: dict[str, Any] = {
+    **{key: hint for key, hint in get_type_hints(Agent.__init__).items() if key in _AGENT_KEYS},
+    **_CLI_HINTS,
+    # Entries are checked against their dataclass's fields.
+    "mcp_servers": list[dict[str, Any]] | None,
+    "subagents": dict[str, dict[str, Any]] | None,
 }
-_MCP_STDIO_KEYS = _MCP_COMMON_KEYS | {
-    "args",
-    "command",
-    "cwd",
-    "env",
-    "env_passthrough",
-}
-_MCP_HTTP_KEYS = _MCP_COMMON_KEYS | {
-    "bearer_token_env_var",
-    "env_http_headers",
-    "headers",
-    "url",
-}
-_APPROVAL_MODES = {"auto", "prompt", "approve"}
+_PATH_KEYS = ("cwd", "trace_file", "artifacts_dir", "prompt_file")
 
 
-def _load_cli_config(path: Path | None) -> tuple[dict[str, Any], Path | None]:
+def _load_cli_config(path: Path | None) -> dict[str, Any]:
+    """Read a TOML or JSON file whose keys are Agent keywords plus CLI options."""
+
     if path is None:
-        return {}, None
+        return {}
     try:
         text = path.read_text(encoding="utf-8")
-        if path.suffix.lower() == ".json":
-            config = json.loads(text)
-        else:
-            config = tomllib.loads(text)
-    except OSError as exc:
+        config = json.loads(text) if path.suffix.lower() == ".json" else tomllib.loads(text)
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"could not read config file {path}: {exc}") from exc
     except (json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"could not parse config file {path}: {exc}") from exc
-
     if not isinstance(config, dict):
         raise ConfigError("config file must contain an object/table")
-    unknown = sorted(set(config) - _CONFIG_KEYS)
+    unknown = sorted(set(config) - set(_CONFIG_HINTS))
     if unknown:
         raise ConfigError(f"unknown config field(s): {', '.join(unknown)}")
-    return config, path.resolve().parent
+    _check_types(config, _CONFIG_HINTS)
+
+    # Relative paths are relative to the config file.
+    base = path.resolve().parent
+    for key in _PATH_KEYS:
+        if config.get(key) is not None:
+            config[key] = base / config[key]
+    try:
+        if config.get("mcp_servers") is not None:
+            config["mcp_servers"] = [
+                _mcp_server(dict(raw), base, f"mcp_servers[{index}].")
+                for index, raw in enumerate(config["mcp_servers"])
+            ]
+        if config.get("subagents") is not None:
+            config["subagents"] = {
+                name: _dataclass(SubagentDef, spec, f"subagents.{name}.")
+                for name, spec in config["subagents"].items()
+            }
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ConfigError(f"invalid config: {exc}") from exc
+    return config
 
 
-def _config_get(config: dict[str, Any], key: str, default: Any) -> Any:
-    return config.get(key, default)
+def _mcp_server(raw: dict[str, Any], base: Path, where: str) -> McpServer:
+    server_type = raw.pop("type", "http" if "url" in raw else "stdio")
+    if server_type not in ("stdio", "http"):
+        raise ConfigError("mcp_servers type must be 'stdio' or 'http'")
+    cls = McpStdioServer if server_type == "stdio" else McpHttpServer
+    server = _dataclass(cls, raw, where)
+    if isinstance(server, McpStdioServer) and server.cwd is not None:
+        server.cwd = base / server.cwd
+    return server
 
 
-def _config_bool(config: dict[str, Any], key: str, default: bool) -> bool:
-    if key not in config:
-        return default
-    value = config[key]
-    if not isinstance(value, bool):
-        raise ConfigError(f"config field {key} must be a boolean")
-    return value
+def _dataclass[T](cls: type[T], raw: dict[str, Any], where: str) -> T:
+    hints = get_type_hints(cls)
+    _check_types({key: value for key, value in raw.items() if key in hints}, hints, where)
+    return cls(**raw)
 
 
-def _config_int(config: dict[str, Any], key: str, default: int) -> int:
-    if key not in config:
-        return default
-    value = config[key]
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(f"config field {key} must be an integer")
-    return value
+def _check_types(values: dict[str, Any], hints: dict[str, Any], where: str = "") -> None:
+    """Reject values that don't match their hint exactly; Agent would read "false" as true."""
+
+    for key, value in values.items():
+        try:
+            TypeAdapter(hints[key]).validate_python(value, strict=True)
+        except ValidationError as exc:
+            errors = exc.errors()
+            if len(errors) > 1:  # one per member of a union
+                raise ConfigError(
+                    f"config field {where}{key} must be {_type_name(hints[key])}"
+                ) from None
+            loc = "".join(f"[{part}]" if isinstance(part, int) else f".{part}"
+                          for part in errors[0]["loc"])
+            raise ConfigError(f"config field {where}{key}{loc}: {errors[0]['msg']}") from None
 
 
-def _config_optional_bool(config: dict[str, Any], key: str) -> bool | None:
-    if key not in config:
-        return None
-    value = config[key]
-    if not isinstance(value, bool):
-        raise ConfigError(f"config field {key} must be a boolean")
-    return value
-
-
-def _config_mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
-    if key not in config:
-        return {}
-    value = config[key]
-    if not isinstance(value, dict):
-        raise ConfigError(f"config field {key} must be an object/table")
-    return dict(value)
-
-
-def _config_str_dict(config: dict[str, Any], key: str) -> dict[str, str]:
-    if key not in config:
-        return {}
-    return _string_dict(config[key], f"config field {key}")
-
-
-def _optional_path(config: dict[str, Any], key: str, base_dir: Path | None) -> Path | None:
-    if key not in config:
-        return None
-    return _path_from_config(config[key], base_dir, field=key)
-
-
-def _path_from_config(value: Any, base_dir: Path | None, *, field: str) -> Path:
-    if not isinstance(value, str):
-        raise ConfigError(f"config field {field} must be a string path")
-    path = Path(value)
-    if path.is_absolute() or base_dir is None:
-        return path
-    return base_dir / path
-
-
-def _merge_string_lists(
-    config: dict[str, Any], key: str, cli_values: list[str] | None
-) -> list[str]:
-    config_values = _string_list(config[key], f"config field {key}") if key in config else []
-    return [*config_values, *(cli_values or [])]
-
-
-def _merge_builtin_tools(
-    config: dict[str, Any],
-    cli_values: list[str] | None,
-    no_builtin_tools: bool | None,
-) -> object:
-    if no_builtin_tools and cli_values:
-        raise ConfigError("--no-builtin-tools cannot be combined with --builtin-tool")
-    if no_builtin_tools:
-        return "none"
-    if cli_values is not None:
-        return cli_values
-    if "builtin_tools" in config:
-        return normalize_builtin_tools(config["builtin_tools"])
-    return None
-
-
-def _parse_mcp_servers(value: Any, base_dir: Path | None) -> list[McpServer]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ConfigError("config field mcp_servers must be an array")
-
-    servers: list[McpServer] = []
-    for index, raw in enumerate(value):
-        field = f"mcp_servers[{index}]"
-        if not isinstance(raw, dict):
-            raise ConfigError(f"{field} must be an object/table")
-
-        server_type = raw.get("type")
-        if server_type is None:
-            server_type = "http" if "url" in raw else "stdio"
-        if server_type == "stdio":
-            _reject_unknown_keys(raw, _MCP_STDIO_KEYS, field)
-            servers.append(
-                McpStdioServer(
-                    **_mcp_common_kwargs(raw, field),
-                    command=_required_str(raw, "command", field),
-                    args=_string_list(raw.get("args", []), f"{field}.args"),
-                    cwd=(
-                        _path_from_config(raw["cwd"], base_dir, field=f"{field}.cwd")
-                        if "cwd" in raw
-                        else None
-                    ),
-                    env=_string_dict(raw.get("env", {}), f"{field}.env"),
-                    env_passthrough=_string_list(
-                        raw.get("env_passthrough", []),
-                        f"{field}.env_passthrough",
-                    ),
-                )
-            )
-        elif server_type == "http":
-            _reject_unknown_keys(raw, _MCP_HTTP_KEYS, field)
-            servers.append(
-                McpHttpServer(
-                    **_mcp_common_kwargs(raw, field),
-                    url=_required_str(raw, "url", field),
-                    headers=_string_dict(raw.get("headers", {}), f"{field}.headers"),
-                    env_http_headers=_string_dict(
-                        raw.get("env_http_headers", {}), f"{field}.env_http_headers"
-                    ),
-                    bearer_token_env_var=_optional_str(
-                        raw, "bearer_token_env_var", field
-                    ),
-                )
-            )
-        else:
-            raise ConfigError(f"{field}.type must be 'stdio' or 'http'")
-    return servers
-
-
-def _mcp_common_kwargs(raw: dict[str, Any], field: str) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"name": _required_str(raw, "name", field)}
-    if "enabled_tools" in raw:
-        kwargs["enabled_tools"] = _string_list(raw["enabled_tools"], f"{field}.enabled_tools")
-    if "disabled_tools" in raw:
-        kwargs["disabled_tools"] = _string_list(raw["disabled_tools"], f"{field}.disabled_tools")
-    if "default_tools_approval_mode" in raw:
-        kwargs["default_tools_approval_mode"] = _approval_mode(
-            raw["default_tools_approval_mode"], f"{field}.default_tools_approval_mode"
-        )
-    if "tool_approval_modes" in raw:
-        modes = _string_dict(raw["tool_approval_modes"], f"{field}.tool_approval_modes")
-        kwargs["tool_approval_modes"] = {
-            key: _approval_mode(value, f"{field}.tool_approval_modes.{key}")
-            for key, value in modes.items()
-        }
-    for key in ("required", "enabled"):
-        if key in raw:
-            kwargs[key] = _optional_bool(raw[key], f"{field}.{key}")
-    for key in ("startup_timeout_sec", "tool_timeout_sec"):
-        if key in raw:
-            kwargs[key] = _optional_float(raw[key], f"{field}.{key}")
-    return kwargs
-
-
-def _reject_unknown_keys(raw: dict[str, Any], allowed: set[str], field: str) -> None:
-    unknown = sorted(set(raw) - allowed)
-    if unknown:
-        raise ConfigError(f"unknown {field} field(s): {', '.join(unknown)}")
-
-
-def _required_str(raw: dict[str, Any], key: str, field: str) -> str:
-    value = raw.get(key)
-    if not isinstance(value, str) or value == "":
-        raise ConfigError(f"{field}.{key} must be a non-empty string")
-    return value
-
-
-def _optional_str(raw: dict[str, Any], key: str, field: str) -> str | None:
-    if key not in raw or raw[key] is None:
-        return None
-    value = raw[key]
-    if not isinstance(value, str):
-        raise ConfigError(f"{field}.{key} must be a string")
-    return value
-
-
-def _string_list(value: Any, field: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ConfigError(f"{field} must be an array of strings")
-    return list(value)
-
-
-def _string_dict(value: Any, field: str) -> dict[str, str]:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
-    ):
-        raise ConfigError(f"{field} must be an object/table of strings")
-    return dict(value)
-
-
-def _optional_bool(value: Any, field: str) -> bool | None:
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        raise ConfigError(f"{field} must be a boolean")
-    return value
-
-
-def _optional_float(value: Any, field: str) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ConfigError(f"{field} must be a number")
-    return float(value)
-
-
-def _approval_mode(value: str, field: str) -> str:
-    if value not in _APPROVAL_MODES:
-        raise ConfigError(f"{field} must be one of: auto, prompt, approve")
-    return value
+def _type_name(hint: Any) -> str:
+    if isinstance(hint, type):
+        return hint.__name__
+    return re.sub(r"\b[a-z_][\w.]*\.(?=[A-Z])", "", str(hint))
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -662,12 +476,20 @@ def _set_nested_option(target: dict[str, Any], key: str, value: Any, *, flag: st
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     _setup_logging(args.verbose)
+    # JSON output must be UTF-8. Lone surrogates in provider text would otherwise
+    # abort output; the escapes this writes decode back to the same string in JSON.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8", errors="backslashreplace")
     if args.command == "run":
         try:
             return asyncio.run(_run(args))
         except ConfigError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 2
+        except ProcessTerminatedError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 128 + exc.signal
         except KeyboardInterrupt:
             return 130
     return 1

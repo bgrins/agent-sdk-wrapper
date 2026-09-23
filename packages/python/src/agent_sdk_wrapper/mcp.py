@@ -17,6 +17,7 @@ class McpServerBase:
     name: str
     enabled_tools: list[str] | None = None
     disabled_tools: list[str] = field(default_factory=list)
+    # Codex only; None approves the server's tools, like Claude's pre-approved MCP tools.
     default_tools_approval_mode: McpToolApprovalMode | None = None
     tool_approval_modes: dict[str, McpToolApprovalMode] = field(default_factory=dict)
     required: bool | None = None

@@ -31,7 +31,6 @@ export type ErrorEvent = Raw & {
   type: "error";
   message: string;
   error_type: string;
-  retryable: boolean;
 };
 export type ProviderEvent =
   | (Raw & { type: "text"; text: string })
@@ -50,7 +49,8 @@ export type ProviderEvent =
       is_error: boolean;
     })
   | (Raw & { type: "usage"; usage: TokenUsage; cost_usd?: number })
-  | { type: "session_info"; id: string }
+  /** `model` is the model the runtime reports, which can differ from the request. */
+  | { type: "session_info"; id: string; model?: string }
   | (Raw & { type: "warning"; message: string })
   | ErrorEvent;
 export type AgentEvent =
@@ -89,5 +89,6 @@ export interface RunResult {
   session_id: string | null;
   artifacts_dir: null;
   error: string | null;
+  error_type: string | null;
   events: EventEnvelope[];
 }

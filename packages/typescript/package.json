@@ -26,10 +26,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build:test": "rm -rf .test-dist && tsc -p tsconfig.test.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
-    "test:integration": "tsc -p tsconfig.test.json && node --test .test-dist/test/live.integration.js",
+    "test": "npm run build:test && node --test .test-dist/test/*.test.js",
+    "test:integration": "npm run build:test && node --test .test-dist/test/*.integration.js",
     "test:package": "npm run build && node scripts/check-package.mjs",
     "lint": "biome lint src test examples fixtures scripts",
     "format:check": "biome format src test examples fixtures scripts *.json",

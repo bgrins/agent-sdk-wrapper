@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Literal, TypedDict
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_sdk_wrapper import (
-    AgentSdkWrapperError,
     ConfigError,
     Error,
     McpHttpServer,
@@ -28,14 +30,10 @@ from agent_sdk_wrapper import (
 from agent_sdk_wrapper.providers.openai_provider import (
     OpenAIProvider,
     _codex_config,
-    _codex_env,
     _codex_output_schema,
     _runtime_config,
     _stream_turn,
-    _tool_entry,
     _validate_supported,
-    _validate_thread_resume_options,
-    _write_sdk_debug_log,
 )
 
 
@@ -57,14 +55,55 @@ class FakeCollabAgentState:
 class FakeTurn:
     def __init__(self, events):
         self._events = events
-        self.interrupt_count = 0
 
     async def stream(self):
         for event in self._events:
             yield event
 
-    async def interrupt(self):
-        self.interrupt_count += 1
+
+def turn_completed(status: str = "completed", error: Any = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        method="turn/completed",
+        payload=SimpleNamespace(turn=SimpleNamespace(status=status, error=error)),
+    )
+
+
+def notification(method: str, payload: dict[str, Any]) -> Any:
+    """Build a real SDK notification from its wire payload."""
+
+    from openai_codex.generated.notification_registry import NOTIFICATION_MODELS
+    from openai_codex.models import Notification
+
+    return Notification(method=method, payload=NOTIFICATION_MODELS[method].model_validate(payload))
+
+
+def usage_breakdown(
+    input_tokens: int, output_tokens: int, *, cached: int = 0, reasoning: int = 0, total: int = 0
+) -> dict[str, int]:
+    return {
+        "inputTokens": input_tokens,
+        "cachedInputTokens": cached,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": reasoning,
+        "totalTokens": total or input_tokens + output_tokens,
+    }
+
+
+def token_usage(last: dict[str, int], total: dict[str, int] | None = None) -> Any:
+    usage = {"last": last, "total": total or last, "modelContextWindow": 258400}
+    return notification(
+        "thread/tokenUsage/updated", {"threadId": "t", "turnId": "u", "tokenUsage": usage}
+    )
+
+
+def failed_turn(error: dict[str, Any]) -> Any:
+    return notification(
+        "turn/completed",
+        {
+            "threadId": "t",
+            "turn": {"id": "u", "items": [], "status": "failed", "error": error},
+        },
+    )
 
 
 def test_codex_options_default_to_auto_reasoning_summary():
@@ -76,20 +115,49 @@ def test_codex_options_default_to_auto_reasoning_summary():
     assert turn_options["summary"] == "auto"
 
 
-def test_codex_options_normalize_provider_effort_alias():
+def test_codex_options_pass_native_effort_through():
+    req = RunRequest(provider="openai", prompt="ignored", effort="max")
+
+    _, turn_options = OpenAIProvider()._build_options(req, None, None)
+
+    assert turn_options["effort"] == "max"
+
+
+def test_codex_efforts_match_the_sdk_enum():
+    from openai_codex.generated.v2_all import ReasoningEffort
+
+    from agent_sdk_wrapper.request import _OPENAI_EFFORTS
+
+    assert _OPENAI_EFFORTS == {member.value for member in ReasoningEffort}
+
+
+def test_codex_api_key_requires_a_wrapper_launched_runtime(monkeypatch):
+    req = RunRequest(provider="openai", prompt="ignored")
+    custom_launch = {"launch_args_override": ("codex", "app-server")}
+
+    with pytest.raises(ConfigError, match="api_key"):
+        OpenAIProvider(api_key="sk-test", codex=object()).validate_request(req)
+    with pytest.raises(ConfigError, match="api_key"):
+        OpenAIProvider(api_key="sk-test", config=custom_launch).validate_request(req)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    plain = RunRequest(provider="openai", prompt="x")
+    assert OpenAIProvider(codex=object())._login_api_key(plain) is None
+    assert OpenAIProvider(config=custom_launch)._login_api_key(plain) is None
+    assert OpenAIProvider()._login_api_key(plain) == "sk-env"
+
+
+def test_codex_sandbox_is_a_thread_mode_not_a_turn_policy():
+    from openai_codex import Sandbox
+
     req = RunRequest(provider="openai", prompt="ignored")
 
-    _, turn_options = OpenAIProvider(effort="max")._build_options(req, None, None)
+    thread_options, turn_options = OpenAIProvider()._build_options(
+        req, None, Sandbox.workspace_write
+    )
 
-    assert turn_options["effort"] == "xhigh"
-
-
-def test_codex_options_allow_summary_constructor_override():
-    req = RunRequest(provider="openai", prompt="ignored")
-
-    _, turn_options = OpenAIProvider(summary="none")._build_options(req, None, None)
-
-    assert turn_options["summary"] == "none"
+    assert thread_options["sandbox"] is Sandbox.workspace_write
+    assert "sandbox" not in turn_options
 
 
 def test_codex_options_allow_turn_summary_override_and_disable():
@@ -135,20 +203,7 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
                 )
             ),
         ),
-        SimpleNamespace(
-            method="thread/tokenUsage/updated",
-            payload=SimpleNamespace(
-                token_usage={
-                    "total": {
-                        "inputTokens": 10,
-                        "outputTokens": 3,
-                        "totalTokens": 13,
-                        "cachedInputTokens": 2,
-                        "reasoningOutputTokens": 4,
-                    }
-                }
-            ),
-        ),
+        token_usage(usage_breakdown(10, 3, cached=2)),
         SimpleNamespace(
             method="turn/completed",
             payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
@@ -166,13 +221,11 @@ async def test_codex_stream_maps_text_usage_and_structured_output():
         '{"ok":true}'
     ]
     usage = next(event for event in out if isinstance(event, Usage))
-    # Add reasoning to output; count usage updates as requests.
     assert usage.usage == TokenUsage(
         input_tokens=10,
-        output_tokens=7,
-        total_tokens=17,
+        output_tokens=3,
+        total_tokens=13,
         cache_read_tokens=2,
-        reasoning_output_tokens=4,
         requests=1,
     )
     structured = next(event for event in out if isinstance(event, StructuredOutput))
@@ -203,20 +256,17 @@ async def test_codex_stream_writes_provider_events_sidecar(tmp_path):
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Text(text="hello")]
     path = tmp_path / "provider-events.jsonl"
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert [line["sequence"] for line in lines] == [0, 1]
-    assert [line["provider"] for line in lines] == ["openai", "openai"]
+    assert [line["sequence"] for line in lines] == [0, 1, 2]
+    assert [line["provider"] for line in lines] == ["openai", "openai", "openai"]
     assert lines[0]["class"] == "types.SimpleNamespace"
     assert lines[0]["message"]["method"] == "item/agentMessage/delta"
     assert lines[0]["message"]["payload"]["delta"] == "hello"
-    assert len(provider_events) == 2
-    assert provider_events[0].to_dict() == lines[0]
-    assert provider_events[1].to_dict() == lines[1]
-    assert not (tmp_path / "sdk").exists()
+    assert [event.to_dict() for event in provider_events] == lines
 
 
 @pytest.mark.asyncio
@@ -237,7 +287,7 @@ async def test_codex_stream_buffers_text_deltas_until_completed_message():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Text(text="complete")]
 
@@ -264,7 +314,7 @@ async def test_codex_stream_emits_buffered_text_if_completion_has_no_text():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Text(text="hello world")]
 
@@ -289,7 +339,7 @@ async def test_codex_stream_drains_uncompleted_text_on_turn_completed():
 
 
 @pytest.mark.asyncio
-async def test_codex_structured_output_validation_failure_raises():
+async def test_codex_structured_output_validation_failure_is_an_error():
     req = RunRequest(
         provider="openai",
         prompt="ignored",
@@ -302,14 +352,32 @@ async def test_codex_structured_output_validation_failure_raises():
                 item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="{}"))
             ),
         ),
+        turn_completed(),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert isinstance(out[-1], Error)
+    assert out[-1].error_type == "structured_output_failed"
+    assert "structured output did not match" in out[-1].message
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_without_turn_completed_is_a_protocol_error():
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
         SimpleNamespace(
-            method="turn/completed",
-            payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="partial"))
+            ),
         ),
     ]
 
-    with pytest.raises(AgentSdkWrapperError, match="structured output did not match"):
-        [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert [type(event) for event in out] == [Text, Error]
+    assert out[-1].error_type == "provider_protocol_error"
 
 
 @pytest.mark.asyncio
@@ -332,7 +400,7 @@ async def test_codex_stream_maps_command_tool_result():
         )
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [
         ToolCall(id="cmd-1", name="command", input={"command": "pytest"}),
@@ -372,7 +440,7 @@ async def test_codex_stream_maps_reasoning_deltas_and_completed_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [
         Thinking(text="summary\ndetail"),
@@ -403,7 +471,7 @@ async def test_codex_stream_buffers_reasoning_deltas_until_completed_item():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert out == [Thinking(text="complete")]
 
@@ -476,7 +544,7 @@ async def test_codex_stream_maps_more_tool_like_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [event.name for event in out if isinstance(event, ToolCall)] == [
         "file_change",
@@ -489,83 +557,123 @@ async def test_codex_stream_maps_more_tool_like_items():
         False,
     ]
     agent_result = [event for event in out if isinstance(event, ToolResult)][-1]
-    assert '"status": "completed"' in (agent_result.output or "")
+    assert '"status":"completed"' in (agent_result.output or "")
 
 
-def test_codex_tool_entry_keeps_source_fallback_for_importable_tool():
-    entry = _tool_entry(sample_importable_tool)
+def test_codex_rejects_positional_only_tool_parameters():
+    def scale(value: int, /) -> int:
+        return value * 2
 
-    assert entry["module"] == __name__
-    assert "def sample_importable_tool" in entry["source"]
+    req = RunRequest(provider="openai", prompt="ignored", tools=[scale])
+
+    with pytest.raises(ConfigError, match="positional-only"):
+        OpenAIProvider().validate_request(req)
+
+
+MODULE_OFFSET = 3
+
+
+def _register(fn):
+    return fn
+
+
+class _Tools:
+    def method(self, value: int) -> int:
+        return value
+
+
+def _source_fallback_candidates():
+    offset = 1
+
+    def uses_global(value: int) -> int:
+        return value + MODULE_OFFSET
+
+    def uses_closure(value: int) -> int:
+        return value + offset
+
+    @_register
+    def decorated(value: int) -> int:
+        return value
+
+    def annotated(value: Literal["a", "b"]) -> str:
+        return value
+
+    identity = lambda value: value  # noqa: E731
+    identity.__name__ = "identity"
+
+    return {
+        "module-level names MODULE_OFFSET": uses_global,
+        "closes over offset": uses_closure,
+        "decorated": decorated,
+        "module-level names Literal": annotated,
+        "bound method": _Tools().method,
+        "not a plain function definition": identity,
+    }
+
+
+@pytest.mark.parametrize("problem", list(_source_fallback_candidates()))
+def test_codex_rejects_tools_the_server_cannot_rebuild_from_source(problem):
+    tool = _source_fallback_candidates()[problem]
+    req = RunRequest(provider="openai", prompt="ignored", tools=[tool])
+
+    with pytest.raises(ConfigError, match=problem):
+        OpenAIProvider().validate_request(req)
+
+
+def test_codex_rejects_tools_without_source_even_if_cwd_has_a_same_named_file(
+    tmp_path, monkeypatch
+):
+    namespace: dict[str, Any] = {"__name__": "ghostmod"}
+    source = "def add(a: int) -> int:\n    return a\n"
+    exec(compile(source, "/gone/src/pkg/tools.py", "exec"), namespace)
+    decoy = tmp_path / "src" / "pkg" / "tools.py"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("def add(a: int) -> int:\n    return -a\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    req = RunRequest(provider="openai", prompt="x", tools=[namespace["add"]])
+
+    with pytest.raises(ConfigError, match="inspectable source"):
+        OpenAIProvider().validate_request(req)
+
+
+def test_codex_accepts_self_contained_local_tools():
+    def scale(value: float, factor: int = 2, label: str | None = None) -> dict[str, float]:
+        import math
+
+        return {label or "value": math.fsum([value] * factor)}
+
+    OpenAIProvider().validate_request(RunRequest(provider="openai", prompt="x", tools=[scale]))
+
+
+def test_codex_tool_server_gets_env_names_and_a_long_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARENT_ONLY_TOKEN", "parent-secret")
+    req = RunRequest(
+        provider="openai",
+        prompt="ignored",
+        tools=[sample_importable_tool],
+        env={"REQUEST_TOKEN": "request-secret"},
+        cwd=tmp_path,
+    )
+
+    with _runtime_config(req) as config_overrides:
+        overrides = config_overrides
+        [env_vars] = [v for v in overrides if v.startswith(f"{WRAPPER_SERVER}.env_vars=")]
+        assert '"PARENT_ONLY_TOKEN"' in env_vars
+        assert '"REQUEST_TOKEN"' in env_vars
+        assert "secret" not in " ".join(overrides)
+        assert f"{WRAPPER_SERVER}.tool_timeout_sec=600" in overrides
+
+
+WRAPPER_SERVER = "mcp_servers.agent_sdk_wrapper_tools"
 
 
 @pytest.mark.asyncio
-async def test_codex_max_turns_interrupts_after_action_item():
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
-    turn = FakeTurn(
-        [
-            SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(
-                        root=SimpleNamespace(
-                            type="commandExecution",
-                            id="cmd-1",
-                            command="python -m pytest",
-                            status="completed",
-                            aggregated_output="passed",
-                        )
-                    )
-                ),
-            ),
-            SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(
-                        root=SimpleNamespace(type="agentMessage", text="done")
-                    )
-                ),
-            ),
-            SimpleNamespace(
-                method="turn/completed",
-                payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
-            ),
-        ]
-    )
+async def test_codex_interrupt_the_wrapper_did_not_request_is_cancelled():
+    req = RunRequest(provider="openai", prompt="ignored")
 
-    out = [event async for event in _stream_turn(turn, req)]
+    out = [event async for event in _stream_turn(FakeTurn([turn_completed("interrupted")]), req)]
 
-    assert turn.interrupt_count == 1
-    assert [type(event) for event in out] == [ToolCall, ToolResult, Error]
-    error = next(event for event in out if isinstance(event, Error))
-    assert error.error_type == "max_turns"
-    assert "max_turns=1" in error.message
-
-
-@pytest.mark.asyncio
-async def test_codex_max_turns_does_not_interrupt_simple_message():
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
-    turn = FakeTurn(
-        [
-            SimpleNamespace(
-                method="item/completed",
-                payload=SimpleNamespace(
-                    item=SimpleNamespace(
-                        root=SimpleNamespace(type="agentMessage", text="done")
-                    )
-                ),
-            ),
-            SimpleNamespace(
-                method="turn/completed",
-                payload=SimpleNamespace(turn=SimpleNamespace(status="completed")),
-            ),
-        ]
-    )
-
-    out = [event async for event in _stream_turn(turn, req)]
-
-    assert turn.interrupt_count == 0
-    assert out == [Text(text="done")]
+    assert [(type(event), event.error_type) for event in out] == [(Error, "cancelled")]
 
 
 @pytest.mark.asyncio
@@ -617,7 +725,7 @@ async def test_codex_stream_maps_failed_tool_like_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [event.name for event in out if isinstance(event, ToolCall)] == [
         "command",
@@ -627,7 +735,7 @@ async def test_codex_stream_maps_failed_tool_like_items():
     results = [event for event in out if isinstance(event, ToolResult)]
     assert [event.is_error for event in results] == [True, True, True]
     assert [event.id for event in results] == [None, None, None]
-    assert results[0].output == "declined"
+    assert results[0].output == ""
     assert results[1].output == "File not found"
 
 
@@ -664,7 +772,7 @@ async def test_codex_stream_maps_image_items():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [event.name for event in out if isinstance(event, ToolCall)] == [
         "view_image",
@@ -676,176 +784,90 @@ async def test_codex_stream_maps_image_items():
     assert results[0].is_error is False
     assert results[1].id == "image-2"
     assert results[1].is_error is True
-    assert '"status": "failed"' in (results[1].output or "")
+    assert '"status":"failed"' in (results[1].output or "")
 
 
-def test_thread_resume_rejects_start_only_options():
-    with pytest.raises(ConfigError, match="ephemeral"):
-        _validate_thread_resume_options({"model": "gpt-5.4", "ephemeral": True})
+def _options_request(**kwargs: Any) -> RunRequest:
+    return RunRequest(provider="openai", prompt="ignored", **kwargs)
 
 
-def test_thread_resume_filter_allows_resume_safe_options():
-    _validate_thread_resume_options(
-        {
-            "approval_mode": "never",
-            "model": "gpt-5.4",
+@pytest.mark.parametrize(
+    ("provider_options", "request_options", "match"),
+    [
+        ({"thread_options": {"bogus": 1}}, {"session_id": "t"}, "thread_resume options: bogus"),
+        ({"thread_options": {"include_turns": True}}, {}, "thread_start options: include_turns"),
+        ({"turn_options": {"summary": "bogus"}}, {}, "turn option summary='bogus'"),
+        ({"turn_options": {"source": 5}}, {}, "turn option source=5"),
+        ({"thread_options": {"personality": "x"}}, {}, "thread option personality='x'"),
+        (
+            {"thread_options": {"session_start_source": "nope"}},
+            {"session_id": "t"},
+            "thread option session_start_source='nope'",
+        ),
+        ({"turn_options": {"output_format": "json"}}, {}, "turn options: output_format"),
+        ({}, {"extra_options": {"thread": {}}}, "extra_options keys: thread"),
+        ({"thread_options": {"ephemeral": True}}, {"session_id": "t"}, "ephemeral"),
+        ({"thread_options": {"ephemeral": True}}, {"continue_session": True}, "ephemeral"),
+        (
+            {},
+            {"continue_session": True, "extra_options": {"thread_options": {"ephemeral": True}}},
+            "ephemeral",
+        ),
+        ({"codex": object()}, {"web_tools": False}, "launch Codex"),
+        ({"sandbox": "workspace"}, {}, "invalid Sandbox value"),
+        ({"approval_mode": "sometimes"}, {}, "invalid ApprovalMode value"),
+        ({"thread_options": {"sandbox": "workspace"}}, {}, "invalid Sandbox value"),
+        (
+            {},
+            {"extra_options": {"turn_options": {"approval_mode": "sometimes"}}},
+            "invalid ApprovalMode value",
+        ),
+        (
+            {"config": {"launch_args_override": ("codex",)}},
+            {"tools": [sample_importable_tool]},
+            "launch Codex",
+        ),
+    ],
+)
+def test_codex_rejects_options_the_sdk_cannot_take(provider_options, request_options, match):
+    with pytest.raises(ConfigError, match=match):
+        OpenAIProvider(**provider_options).validate_request(_options_request(**request_options))
+
+
+def test_codex_accepts_sdk_native_options():
+    from openai_codex import ApprovalMode, Sandbox
+
+    start_only = {"ephemeral": False, "service_name": "svc", "thread_source": "user"}
+    provider = OpenAIProvider(
+        thread_options={
+            **start_only,
+            "base_instructions": "Be brief.",
+            "service_tier": "flex",
             "sandbox": "workspace-write",
-            "service_tier": "priority",
-        }
+        },
+        turn_options={
+            "turn_service_tier": "flex",
+            "summary": "concise",
+            "approval_mode": "deny_all",
+        },
     )
 
-
-def test_thread_resume_filter_rejects_turn_and_start_only_options():
-    with pytest.raises(ConfigError, match="ephemeral, turn_options"):
-        _validate_thread_resume_options({"ephemeral": True, "turn_options": {"effort": "high"}})
-
-
-def test_codex_filters_require_wrapper_managed_tools():
-    req = RunRequest(provider="openai", prompt="ignored", allowed_tools=["Read"])
-
-    with pytest.raises(ConfigError, match="without callable tools or MCP servers"):
-        _validate_supported(req)
+    provider.validate_request(_options_request())
+    # A continued session resumes with the start-only options of its first run.
+    provider.validate_request(_options_request(session_id="t", continue_session=True))
+    thread_options, turn_options = provider._build_options(
+        _options_request(session_id="t"), None, None
+    )
+    assert not set(start_only) & set(thread_options)
+    assert thread_options["sandbox"] is Sandbox.workspace_write
+    assert turn_options["approval_mode"] is ApprovalMode.deny_all
 
 
-def test_codex_accepts_positive_max_turns():
+def test_codex_rejects_max_turns():
     req = RunRequest(provider="openai", prompt="ignored", max_turns=1)
 
-    _validate_supported(req)
-
-
-def test_codex_rejects_non_positive_max_turns():
-    req = RunRequest(provider="openai", prompt="ignored", max_turns=0)
-
-    with pytest.raises(ConfigError, match="max_turns < 1"):
+    with pytest.raises(ConfigError, match="max_turns. Codex has no turn limit"):
         _validate_supported(req)
-
-
-def test_codex_filters_reject_native_builtins_even_with_mcp_server():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["command"],
-        mcp_servers=[McpStdioServer(name="repo", command="repo-mcp")],
-    )
-
-    with pytest.raises(ConfigError, match="Codex native tool filters: command"):
-        _validate_supported(req)
-
-
-def test_codex_filters_allow_qualified_tool_named_like_native_builtin():
-    def command(value: str) -> str:
-        return value
-
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        tools=[command],
-        allowed_tools=["agent_sdk_wrapper_tools.command", "repo.command"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["command"],
-            )
-        ],
-    )
-
-    _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_wrapper_server():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["missing.search"],
-        mcp_servers=[McpStdioServer(name="repo", command="repo-mcp")],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: missing.search"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_callable_tool_when_mcp_also_present():
-    def add(a: int, b: int) -> int:
-        return a + b
-
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        tools=[add],
-        allowed_tools=["agent_sdk_wrapper_tools.subtract"],
-        mcp_servers=[McpStdioServer(name="repo", command="repo-mcp")],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: agent_sdk_wrapper_tools.subtract"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_external_mcp_tool_when_known():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["repo.write_file"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["read_file", "grep_files"],
-            )
-        ],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: repo.write_file"):
-        _validate_supported(req)
-
-
-def test_codex_filters_reject_unknown_unqualified_tool_when_all_tools_known():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["write_file"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["read_file", "grep_files"],
-            )
-        ],
-    )
-
-    with pytest.raises(ConfigError, match="non-wrapper tools: write_file"):
-        _validate_supported(req)
-
-
-def test_write_sdk_debug_log(tmp_path):
-    class SyncClient:
-        def _stderr_tail(self, *, limit: int = 400) -> str:
-            return f"tail:{limit}"
-
-    codex = SimpleNamespace(_client=SimpleNamespace(_sync=SyncClient()))
-
-    path = _write_sdk_debug_log(codex, tmp_path, debug=True)
-
-    assert path == tmp_path / "sdk" / "openai-codex.debug.log"
-    assert "tail:400" in path.read_text()
-
-
-def test_write_sdk_debug_log_skips_without_debug(tmp_path):
-    codex = SimpleNamespace()
-
-    path = _write_sdk_debug_log(codex, tmp_path)
-
-    assert path is None
-    assert not (tmp_path / "sdk").exists()
-
-
-def test_codex_env_sets_debug_only_when_enabled():
-    assert _codex_env({}) == {}
-
-    env = _codex_env({"RUST_LOG": "info"}, debug=True)
-
-    assert env["RUST_LOG"] == "info"
-    assert env["RUST_BACKTRACE"] == "1"
 
 
 def test_codex_config_uses_path_codex_when_sdk_bin_missing(monkeypatch):
@@ -853,24 +875,27 @@ def test_codex_config_uses_path_codex_when_sdk_bin_missing(monkeypatch):
 
     monkeypatch.setattr(op_mod, "_path_codex_bin_when_sdk_bin_missing", lambda: "/usr/bin/codex")
 
-    config = _codex_config(None, {}, None)
+    config = _codex_config(None, {})
 
     assert config.codex_bin == "/usr/bin/codex"
 
 
-def test_codex_config_merges_config_overrides(monkeypatch):
+def test_codex_config_lets_caller_overrides_win(monkeypatch):
     from agent_sdk_wrapper.providers import openai_provider as op_mod
 
     monkeypatch.setattr(op_mod, "_path_codex_bin_when_sdk_bin_missing", lambda: None)
 
     config = _codex_config(
-        {"config_overrides": ("model=\"gpt-5\"",)},
+        {"config_overrides": ("mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=5",)},
         {},
-        None,
-        config_overrides=("features.multi_agent=true",),
+        config_overrides=("mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=600",),
     )
 
-    assert config.config_overrides == ("model=\"gpt-5\"", "features.multi_agent=true")
+    # Codex applies overrides in order, so the caller's value is the effective one.
+    assert config.config_overrides == (
+        "mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=600",
+        "mcp_servers.agent_sdk_wrapper_tools.tool_timeout_sec=5",
+    )
 
 
 def test_codex_config_rejects_launch_args_with_generated_overrides(monkeypatch):
@@ -882,7 +907,6 @@ def test_codex_config_rejects_launch_args_with_generated_overrides(monkeypatch):
         _codex_config(
             {"launch_args_override": ("codex", "app-server", "--listen", "stdio://")},
             {},
-            None,
             config_overrides=("features.multi_agent=true",),
         )
 
@@ -906,8 +930,8 @@ def test_runtime_config_builds_codex_tool_and_subagent_overrides(tmp_path):
         cwd=tmp_path,
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
+    with _runtime_config(req) as config_overrides:
+        overrides = set(config_overrides)
         assert any(
             value.startswith("mcp_servers.agent_sdk_wrapper_tools.command=")
             for value in overrides
@@ -923,7 +947,59 @@ def test_runtime_config_builds_codex_tool_and_subagent_overrides(tmp_path):
         assert "features.multi_agent=true" in overrides
         assert 'agents.reviewer.description="Reviews code."' in overrides
         assert any(value.startswith("agents.reviewer.config_file=") for value in overrides)
-        assert runtime.warnings == ()
+
+
+TRICKY_TEXT = 'fox \U0001f98a "quoted" \\ tab\t line\nDEL\x7f bell\x07 café'
+
+
+def test_codex_config_values_are_valid_toml():
+    import tomllib
+
+    from agent_sdk_wrapper.providers.openai_provider import _toml_literal
+
+    value = {"text": TRICKY_TEXT, "list": [TRICKY_TEXT, 1, 2.5, True], TRICKY_TEXT: "key"}
+
+    assert tomllib.loads(f"x = {_toml_literal(value)}")["x"] == value
+    assert tomllib.loads(f"x = {_toml_literal(('x.py', 'A'))}")["x"] == ["x.py", "A"]
+    with pytest.raises(ConfigError, match="surrogate"):
+        _toml_literal("\ud83d")
+
+
+@pytest.mark.parametrize(
+    ("options", "match"),
+    [
+        ({"subagents": {"two words": SubagentDef(description="d", prompt="p")}}, "key part"),
+        ({"subagents": {"fox": SubagentDef(description="\ud83d", prompt="p")}}, "surrogate"),
+        ({"mcp_servers": [McpStdioServer(name="repo", command="\ud83d")]}, "surrogate"),
+    ],
+)
+def test_codex_rejects_unencodable_config_before_running(options, match):
+    req = RunRequest(provider="openai", prompt="ignored", **options)
+
+    with pytest.raises(ConfigError, match=match):
+        OpenAIProvider().validate_request(req)
+
+
+def test_codex_subagent_config_file_is_valid_toml(tmp_path):
+    import tomllib
+
+    req = RunRequest(
+        provider="openai",
+        prompt="ignored",
+        subagents={"fox": SubagentDef(description=TRICKY_TEXT, prompt=TRICKY_TEXT)},
+    )
+
+    with _runtime_config(req) as config_overrides:
+        [config_file] = [
+            v.split("=", 1)[1] for v in config_overrides if ".config_file=" in v
+        ]
+        path = tomllib.loads(f"x = {config_file}")["x"]
+        with open(path, "rb") as handle:
+            assert tomllib.load(handle) == {"developer_instructions": TRICKY_TEXT}
+        [description] = [
+            v.split("=", 1)[1] for v in config_overrides if ".description=" in v
+        ]
+        assert tomllib.loads(f"x = {description}")["x"] == TRICKY_TEXT
 
 
 def test_codex_rejects_builtin_tools():
@@ -931,17 +1007,6 @@ def test_codex_rejects_builtin_tools():
 
     with pytest.raises(ConfigError, match="builtin_tools"):
         _validate_supported(req)
-
-
-def test_codex_web_tools_emits_config_override():
-    with _runtime_config(
-        RunRequest(provider="openai", prompt="ignored", web_tools=False)
-    ) as runtime:
-        assert "tools.web_search=false" in runtime.config_overrides
-    with _runtime_config(
-        RunRequest(provider="openai", prompt="ignored", web_tools=True)
-    ) as runtime:
-        assert "tools.web_search=true" in runtime.config_overrides
 
 
 def test_codex_web_tools_coexists_with_tools(tmp_path):
@@ -953,11 +1018,11 @@ def test_codex_web_tools_coexists_with_tools(tmp_path):
         web_tools=False,
     )
 
-    with _runtime_config(req) as runtime:
-        assert "tools.web_search=false" in runtime.config_overrides
+    with _runtime_config(req) as config_overrides:
+        assert 'web_search="disabled"' in config_overrides
         assert any(
             value.startswith("mcp_servers.agent_sdk_wrapper_tools.command=")
-            for value in runtime.config_overrides
+            for value in config_overrides
         )
 
 
@@ -1017,18 +1082,21 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         ],
     )
 
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
+    with _runtime_config(req) as config_overrides:
+        overrides = set(config_overrides)
         assert 'mcp_servers.auditor.command="uv"' in overrides
         assert 'mcp_servers.auditor.args=["run", "auditor-mcp"]' in overrides
         assert f'mcp_servers.auditor.cwd="{tmp_path}"' in overrides
-        env_override = next(
-            value for value in overrides if value.startswith("mcp_servers.auditor.env=")
+        # Passed-through values never reach the Codex command line.
+        assert "parent" not in " ".join(overrides)
+        assert (
+            'mcp_servers.auditor.env_vars=["INHERITED_MODE", "OVERRIDE_MODE", "MISSING_MODE"]'
+            in overrides
         )
-        assert '"INHERITED_MODE" = "parent"' in env_override
-        assert '"OVERRIDE_MODE" = "explicit"' in env_override
-        assert '"AUDITOR_MODE" = "test"' in env_override
-        assert "MISSING_MODE" not in env_override
+        assert (
+            'mcp_servers.auditor.env={ "AUDITOR_MODE" = "test", "OVERRIDE_MODE" = "explicit" }'
+            in overrides
+        )
         assert 'mcp_servers.auditor.enabled_tools=["review", "search"]' in overrides
         assert 'mcp_servers.auditor.disabled_tools=["delete"]' in overrides
         assert 'mcp_servers.auditor.default_tools_approval_mode="approve"' in overrides
@@ -1037,6 +1105,8 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         assert "mcp_servers.auditor.startup_timeout_sec=5" in overrides
         assert "mcp_servers.auditor.tool_timeout_sec=30" in overrides
         assert 'mcp_servers.remote.url="https://example.test/mcp"' in overrides
+        # A server without a mode is approved, as the Claude adapter pre-approves MCP tools.
+        assert 'mcp_servers.remote.default_tools_approval_mode="approve"' in overrides
         assert 'mcp_servers.remote.http_headers={ "X-Test" = "1" }' in overrides
         assert (
             'mcp_servers.remote.env_http_headers={ "Authorization" = "REMOTE_TOKEN" }'
@@ -1046,74 +1116,68 @@ def test_runtime_config_builds_external_mcp_server_overrides(tmp_path, monkeypat
         assert 'mcp_servers.remote.disabled_tools=["expensive"]' in overrides
 
 
-def test_runtime_config_applies_codex_tool_filters(tmp_path):
-    def add(a: int, b: int) -> int:
-        """Add two integers."""
-        return a + b
+class OptionalAnswer(BaseModel):
+    a: int
+    b: str | None = None
 
-    def multiply(a: int, b: int) -> int:
-        """Multiply two integers."""
-        return a * b
 
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        tools=[add, multiply],
-        allowed_tools=["agent_sdk_wrapper_tools.add"],
-        disallowed_tools=["mcp__agent_sdk_wrapper_tools__multiply"],
-        cwd=tmp_path,
+class Inner(BaseModel):
+    x: int
+    label: str = "none"
+
+
+class Outer(BaseModel):
+    inner: Inner = Field(description="The inner part.")
+    items: list[Inner]
+    count: int = 3
+
+
+def test_codex_output_schema_is_strict():
+    assert _codex_output_schema(OptionalAnswer) == {
+        "properties": {
+            "a": {"title": "A", "type": "integer"},
+            "b": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "B"},
+        },
+        "required": ["a", "b"],
+        "title": "OptionalAnswer",
+        "type": "object",
+        "additionalProperties": False,
+    }
+
+
+def test_codex_output_schema_inlines_described_refs_and_nulls_defaults():
+    schema = _codex_output_schema(Outer)
+
+    inner = schema["properties"]["inner"]
+    assert "$ref" not in inner
+    assert inner["description"] == "The inner part."
+    assert inner["required"] == ["x", "label"]
+    assert inner["additionalProperties"] is False
+    assert inner["properties"]["label"] == {
+        "anyOf": [{"title": "Label", "type": "string"}, {"type": "null"}]
+    }
+    assert schema["properties"]["items"]["items"] == {"$ref": "#/$defs/Inner"}
+    assert schema["$defs"]["Inner"]["required"] == ["x", "label"]
+    assert schema["required"] == ["inner", "items", "count"]
+    assert "default" not in json.dumps(schema)
+    assert "x-agent-sdk-wrapper" not in json.dumps(schema)
+
+
+@pytest.mark.asyncio
+async def test_codex_structured_output_restores_defaults_for_forced_nulls():
+    req = RunRequest(provider="openai", prompt="ignored", output_schema=Outer)
+    text = json.dumps(
+        {
+            "inner": {"x": 1, "label": None},
+            "items": [{"x": 2, "label": "two"}, {"x": 3, "label": None}],
+            "count": None,
+        }
     )
-
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
-        assert 'mcp_servers.agent_sdk_wrapper_tools.enabled_tools=["add"]' in overrides
-        assert 'mcp_servers.agent_sdk_wrapper_tools.disabled_tools=["multiply"]' in overrides
-
-
-def test_runtime_config_targets_one_external_mcp_server_among_many():
-    req = RunRequest(
-        provider="openai",
-        prompt="ignored",
-        allowed_tools=["repo.read_file"],
-        disallowed_tools=["bugs.search_bugs"],
-        mcp_servers=[
-            McpStdioServer(
-                name="repo",
-                command="repo-mcp",
-                enabled_tools=["read_file", "grep_files"],
-            ),
-            McpStdioServer(
-                name="bugs",
-                command="bugs-mcp",
-                enabled_tools=["search_bugs"],
-            ),
-        ],
-    )
-
-    with _runtime_config(req) as runtime:
-        overrides = set(runtime.config_overrides)
-        assert 'mcp_servers.repo.enabled_tools=["read_file"]' in overrides
-        assert 'mcp_servers.bugs.enabled_tools=[]' in overrides
-        assert 'mcp_servers.bugs.disabled_tools=["search_bugs"]' in overrides
-
-
-def test_codex_output_schema_disallows_additional_properties():
-    schema = _codex_output_schema(Answer)
-
-    assert schema["additionalProperties"] is False
-
-
-def _usage_events(input_tokens: int, output_tokens: int):
-    return [
+    events = [
         SimpleNamespace(
-            method="thread/tokenUsage/updated",
+            method="item/completed",
             payload=SimpleNamespace(
-                token_usage={
-                    "total": {
-                        "inputTokens": input_tokens,
-                        "outputTokens": output_tokens,
-                    }
-                }
+                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text=text))
             ),
         ),
         SimpleNamespace(
@@ -1122,78 +1186,460 @@ def _usage_events(input_tokens: int, output_tokens: int):
         ),
     ]
 
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
 
-@pytest.mark.asyncio
-async def test_codex_usage_reports_the_delta_when_a_thread_is_resumed():
-    from agent_sdk_wrapper.providers.openai_provider import _UsageBaseline
-
-    req = RunRequest(provider="openai", prompt="ignored")
-    baseline = _UsageBaseline()
-
-    first = [
-        event
-        async for event in _stream_turn(
-            FakeTurn(_usage_events(100, 20)), req, "thread-1", baseline
-        )
-    ]
-    second = [
-        event
-        async for event in _stream_turn(
-            FakeTurn(_usage_events(340, 55)), req, "thread-1", baseline
-        )
-    ]
-
-    # Subtract prior thread usage from the second turn.
-    assert next(e for e in first if isinstance(e, Usage)).usage.input_tokens == 100
-    delta = next(e for e in second if isinstance(e, Usage)).usage
-    assert delta.input_tokens == 240
-    assert delta.output_tokens == 35
+    structured = next(event for event in out if isinstance(event, StructuredOutput))
+    assert structured.value == Outer(
+        inner=Inner(x=1), items=[Inner(x=2, label="two"), Inner(x=3)], count=3
+    )
 
 
-@pytest.mark.asyncio
-async def test_codex_usage_baseline_resets_on_a_new_thread():
-    from agent_sdk_wrapper.providers.openai_provider import _UsageBaseline
+@pytest.mark.parametrize(
+    ("output_schema", "match"),
+    [
+        (list[int], "object schema"),
+        (dict[str, int], "free-form"),
+        (TypedDict("Loose", {"meta": dict[str, int]}), "free-form"),
+        (TypedDict("Anything", {"value": Any}), "any value"),
+    ],
+)
+def test_codex_rejects_output_schemas_strict_mode_cannot_express(output_schema, match):
+    req = RunRequest(provider="openai", prompt="ignored", output_schema=output_schema)
 
-    req = RunRequest(provider="openai", prompt="ignored")
-    baseline = _UsageBaseline()
+    with pytest.raises(ConfigError, match=match):
+        OpenAIProvider().validate_request(req)
 
-    async for _ in _stream_turn(FakeTurn(_usage_events(100, 20)), req, "thread-1", baseline):
-        pass
-    events = [
-        event
-        async for event in _stream_turn(
-            FakeTurn(_usage_events(30, 5)), req, "thread-2", baseline
-        )
-    ]
 
-    usage = next(e for e in events if isinstance(e, Usage)).usage
-    assert usage.input_tokens == 30
-    assert usage.output_tokens == 5
+CODEX_FIXTURES = Path(__file__).parent / "fixtures" / "codex"
+
+
+def codex_frames(name: str) -> list[Any]:
+    """Load redacted real provider events as SDK notification objects."""
+
+    from openai_codex.generated.notification_registry import NOTIFICATION_MODELS
+    from openai_codex.models import Notification
+
+    frames = []
+    for line in (CODEX_FIXTURES / name).read_text(encoding="utf-8").splitlines():
+        message = json.loads(line)["message"]
+        payload = NOTIFICATION_MODELS[message["method"]].model_validate(message["payload"])
+        frames.append(Notification(method=message["method"], payload=payload))
+    return frames
 
 
 @pytest.mark.asyncio
-async def test_codex_retried_error_is_a_warning_and_a_final_one_is_an_error():
+async def test_codex_model_reroute_updates_the_session_model():
+    from agent_sdk_wrapper import SessionInfo
+
     req = RunRequest(provider="openai", prompt="ignored")
-    events = [
-        SimpleNamespace(
-            method="error",
-            payload=SimpleNamespace(
-                error=SimpleNamespace(message="upstream 503"), will_retry=True
-            ),
+    reroute = notification(
+        "model/rerouted",
+        {
+            "fromModel": "gpt-5.4",
+            "toModel": "gpt-5.4-safe",
+            "reason": "highRiskCyberActivity",
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+        },
+    )
+
+    out = [event async for event in _stream_turn(FakeTurn([reroute, turn_completed()]), req)]
+
+    assert [type(event) for event in out] == [WarningEvent, SessionInfo]
+    assert "gpt-5.4-safe" in out[0].message
+    assert out[1] == SessionInfo(id="thread-1", model="gpt-5.4-safe")
+
+
+def test_codex_runtime_warnings_report_this_threads_mcp_failures():
+    import queue
+
+    from agent_sdk_wrapper.providers.openai_provider import _RuntimeWarnings
+
+    def mcp_status(thread_id: str, status: str, error: str | None = None):
+        payload = {"name": "broken", "status": status, "threadId": thread_id, "error": error}
+        return notification("mcpServer/startupStatus/updated", payload)
+
+    notifications = queue.Queue()
+    for item in (
+        mcp_status("thread-1", "starting"),
+        mcp_status("thread-2", "failed", "other thread"),
+        mcp_status("thread-1", "failed", "MCP client for `broken` failed to start"),
+        notification("configWarning", {"summary": "Unknown key", "details": "x.y"}),
+    ):
+        notifications.put(item)
+    router = SimpleNamespace(_global_notifications=notifications)
+    codex = SimpleNamespace(_client=SimpleNamespace(_sync=SimpleNamespace(_router=router)))
+
+    warnings = _RuntimeWarnings(codex, "thread-1", include_raw=False).drain()
+
+    assert [w.message for w in warnings] == [
+        "MCP client for `broken` failed to start",
+        "Unknown key: x.y",
+    ]
+    assert notifications.empty()
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_call_is_emitted_when_the_item_starts():
+    req = RunRequest(provider="openai", prompt="ignored")
+    frames = codex_frames("tool-turn.provider-events.jsonl")
+    started, completed = frames[:2]
+    commentary = SimpleNamespace(
+        method="item/completed",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="working"))
         ),
-        SimpleNamespace(
-            method="error",
-            payload=SimpleNamespace(
-                error=SimpleNamespace(message="upstream 503"), will_retry=False
-            ),
+    )
+
+    out = [
+        event
+        async for event in _stream_turn(
+            FakeTurn([started, commentary, completed, turn_completed()]), req
+        )
+    ]
+
+    command = "/bin/zsh -lc \"python3 -c 'print((3 + 4) ** 2)'\""
+    assert out == [
+        ToolCall(id="exec-1", name="command", input={"command": command}),
+        Text(text="working"),
+        ToolResult(id="exec-1", name="command", output="49\n"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_replays_a_multi_request_turn():
+    req = RunRequest(provider="openai", prompt="ignored")
+    turn = FakeTurn(codex_frames("tool-turn.provider-events.jsonl"))
+
+    out = [event async for event in _stream_turn(turn, req)]
+
+    [usage] = [event.usage for event in out if isinstance(event, Usage)]
+    assert usage == TokenUsage(
+        input_tokens=27707,
+        output_tokens=109,
+        total_tokens=27816,
+        cache_read_tokens=13786,
+        cache_write_tokens=13915,
+        reasoning_output_tokens=22,
+        requests=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_of_a_resumed_turn_excludes_thread_history():
+    req = RunRequest(provider="openai", prompt="ignored", session_id="thread-fixture")
+
+    out = [
+        event
+        async for event in _stream_turn(
+            FakeTurn(codex_frames("resumed-turn.provider-events.jsonl")), req
+        )
+    ]
+
+    [usage] = [event.usage for event in out if isinstance(event, Usage)]
+    assert usage == TokenUsage(
+        input_tokens=12730,
+        output_tokens=7,
+        total_tokens=12737,
+        cache_read_tokens=12672,
+        requests=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_ignores_repeated_totals_and_a_full_context_window():
+    # Codex 0.154: a request, then a failed one that repeats the usage and fills the window.
+    req = RunRequest(provider="openai", prompt="ignored")
+    tool_call = codex_frames("tool-turn.provider-events.jsonl")[:2]
+    first = usage_breakdown(200, 20)
+    history = usage_breakdown(300, 30)
+    full = usage_breakdown(0, 0, total=258400)
+    error = {"codexErrorInfo": "contextWindowExceeded", "message": "Codex ran out of room"}
+    events = [
+        *tool_call,
+        token_usage(first, history),
+        token_usage(first, history),
+        token_usage({**full, "totalTokens": 258100}, full),
+        notification("error", {"error": error, "threadId": "t", "turnId": "u", "willRetry": False}),
+        failed_turn(error),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    [usage] = [event.usage for event in out if isinstance(event, Usage)]
+    assert usage == TokenUsage(input_tokens=200, output_tokens=20, total_tokens=220, requests=1)
+
+
+_SERVER_ERROR = {"message": "stream disconnected before completion", "codexErrorInfo": "other"}
+
+
+def _message(text: str) -> SimpleNamespace:
+    item = SimpleNamespace(root=SimpleNamespace(type="agentMessage", text=text))
+    return SimpleNamespace(method="item/completed", payload=SimpleNamespace(item=item))
+
+
+def _retry_error(will_retry: bool = True) -> Any:
+    payload = {"error": _SERVER_ERROR, "threadId": "t", "turnId": "u", "willRetry": will_retry}
+    return notification("error", payload)
+
+
+# Sequences seen from Codex 0.154 against the mock; a resumed thread's earlier total is 100/10.
+@pytest.mark.parametrize(
+    ("session_id", "events", "expected"),
+    [
+        pytest.param(
+            None,
+            [
+                token_usage(usage_breakdown(200, 20)),
+                _message("done"),
+                token_usage(usage_breakdown(300, 30), usage_breakdown(500, 50)),
+                turn_completed(),
+            ],
+            (2, 500, 50),
+            id="first request without an item",
         ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(200, 20), usage_breakdown(300, 30)),
+                _message("done"),
+                token_usage(usage_breakdown(300, 30), usage_breakdown(600, 60)),
+                turn_completed(),
+            ],
+            (2, 500, 50),
+            id="resumed, first request without an item",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(100, 10)),
+                _retry_error(),
+                _message("done"),
+                token_usage(usage_breakdown(600, 60), usage_breakdown(700, 70)),
+                turn_completed(),
+            ],
+            (1, 600, 60),
+            id="resumed, first attempt failed",
+        ),
+        pytest.param(
+            "t",
+            [
+                _message("partial"),
+                token_usage(usage_breakdown(100, 10)),
+                _retry_error(will_retry=False),
+                failed_turn(_SERVER_ERROR),
+            ],
+            None,
+            id="resumed, failed after text",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(100, 10)),
+                token_usage(usage_breakdown(0, 0)),
+                _retry_error(will_retry=False),
+                failed_turn(_SERVER_ERROR),
+            ],
+            None,
+            id="resumed, context window exhausted",
+        ),
+        pytest.param(
+            "t",
+            [
+                token_usage(usage_breakdown(700, 70), usage_breakdown(800, 80)),
+                token_usage(usage_breakdown(700, 70), usage_breakdown(800, 80)),
+                _retry_error(will_retry=False),
+                failed_turn(_SERVER_ERROR),
+            ],
+            (1, 700, 70),
+            id="resumed, second request failed",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_usage_counts_each_completed_request(session_id, events, expected):
+    req = RunRequest(provider="openai", prompt="ignored", session_id=session_id)
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    usage = [event.usage for event in out if isinstance(event, Usage)]
+    if expected is None:
+        assert usage == []
+    else:
+        [total] = usage
+        assert (total.requests, total.input_tokens, total.output_tokens) == expected
+
+
+@pytest.mark.asyncio
+async def test_codex_failed_turn_yields_one_classified_error():
+    req = RunRequest(provider="openai", prompt="ignored")
+    error = {"codexErrorInfo": "serverOverloaded", "message": "Selected model is at capacity."}
+    events = [
+        notification(
+            "error",
+            {
+                "error": {"message": "Reconnecting... 1/5", "codexErrorInfo": "other"},
+                "threadId": "t",
+                "turnId": "u",
+                "willRetry": True,
+            },
+        ),
+        notification(
+            "error", {"error": error, "threadId": "t", "turnId": "u", "willRetry": False}
+        ),
+        failed_turn(error),
     ]
 
     out = [event async for event in _stream_turn(FakeTurn(events), req)]
 
     assert [type(event) for event in out] == [WarningEvent, Error]
-    assert out[0].message == "upstream 503"
-    assert out[1].retryable is True
+    assert out[0].message == "Reconnecting... 1/5"
+    assert out[1].message == "Selected model is at capacity."
+    assert out[1].error_type == "transient_api_error"
+
+
+@pytest.mark.asyncio
+async def test_codex_error_notice_on_a_completed_turn_is_a_warning():
+    req = RunRequest(provider="openai", prompt="ignored")
+    notice = {"codexErrorInfo": "other", "message": "Hook failed; continuing."}
+    payload = {"error": notice, "threadId": "t", "turnId": "u", "willRetry": False}
+    events = [
+        notification("error", payload),
+        SimpleNamespace(
+            method="item/completed",
+            payload=SimpleNamespace(
+                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="done"))
+            ),
+        ),
+        turn_completed(),
+    ]
+
+    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    assert out == [Text(text="done"), WarningEvent(message="Hook failed; continuing.")]
+
+
+@pytest.mark.asyncio
+async def test_codex_error_text_survives_empty_messages_and_unparsed_payloads():
+    from openai_codex.models import Notification, UnknownNotification
+
+    req = RunRequest(provider="openai", prompt="ignored")
+    probe = "Offline gateway probe ✓"
+    unparsed = Notification(
+        method="error",
+        payload=UnknownNotification(
+            params={"error": {"message": probe, "codexErrorInfo": "newKind"}, "willRetry": False}
+        ),
+    )
+    only_details = failed_turn(
+        {"codexErrorInfo": "other", "message": "", "additionalDetails": probe}
+    )
+
+    first = [e async for e in _stream_turn(FakeTurn([unparsed, turn_completed("failed")]), req)]
+    second = [e async for e in _stream_turn(FakeTurn([only_details]), req)]
+
+    assert [(type(e), e.message) for e in first] == [(Error, probe)]
+    assert [(type(e), e.message) for e in second] == [(Error, probe)]
+
+
+# Payloads captured from Codex 0.154 against a mock Responses API.
+@pytest.mark.parametrize(
+    ("error", "error_type"),
+    [
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 401 Unauthorized: Incorrect API key provided: "
+                "sk-x., url: http://127.0.0.1:9/v1/responses",
+            },
+            "authentication_failed",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 403 Forbidden: You are not allowed to sample "
+                "from this model, url: http://127.0.0.1:9/v1/responses",
+            },
+            "permission_denied",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 404 Not Found: The model `gpt-5.9` does not "
+                "exist or you do not have access to it., url: http://127.0.0.1:9/v1/responses",
+            },
+            "model_not_found",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": '{"error": {"message": "Invalid value for \'input\'.", '
+                '"type": "invalid_request_error", "code": null}}',
+            },
+            "invalid_request",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": '{"error": {"message": "Your input exceeds the context window of '
+                'this model.", "type": "invalid_request_error", '
+                '"code": "context_length_exceeded"}}',
+            },
+            "context_window_exceeded",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "unexpected status 503 Service Unavailable: The engine is currently "
+                "overloaded, please try again later., url: http://127.0.0.1:9/v1/responses",
+            },
+            "transient_api_error",
+        ),
+        (
+            {
+                "codexErrorInfo": "other",
+                "message": "stream disconnected before completion: stream closed before "
+                "response.completed",
+            },
+            "transient_api_error",
+        ),
+        (
+            {
+                "codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 429}},
+                "message": "exceeded retry limit, last status: 429 Too Many Requests",
+            },
+            "transient_api_error",
+        ),
+        (
+            {"codexErrorInfo": "internalServerError", "message": "We're currently experiencing"},
+            "transient_api_error",
+        ),
+        (
+            {"codexErrorInfo": "contextWindowExceeded", "message": "Codex ran out of room"},
+            "context_window_exceeded",
+        ),
+        (
+            {"codexErrorInfo": "usageLimitExceeded", "message": "Quota exceeded."},
+            "usage_limit_exceeded",
+        ),
+        ({"codexErrorInfo": "sessionBudgetExceeded", "message": "Budget spent."}, "max_budget"),
+        ({"codexErrorInfo": "unauthorized", "message": "Log in again."}, "authentication_failed"),
+        ({"codexErrorInfo": "badRequest", "message": "Bad input."}, "invalid_request"),
+        (
+            {"codexErrorInfo": "other", "message": "Wrote 1500 tokens before timeout_sec."},
+            "provider_exception",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_failed_turns_are_classified(error, error_type):
+    req = RunRequest(provider="openai", prompt="ignored")
+
+    out = [event async for event in _stream_turn(FakeTurn([failed_turn(error)]), req)]
+
+    assert [type(event) for event in out] == [Error]
+    assert out[0].message == error["message"]
+    assert out[0].error_type == error_type
 
 
 @pytest.mark.asyncio
@@ -1210,7 +1656,7 @@ async def test_codex_context_compaction_is_surfaced():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [type(event) for event in out] == [ContextCompacted]
     assert out[0].trigger == "codex"
@@ -1233,7 +1679,232 @@ async def test_codex_reasoning_item_without_a_summary_still_emits_thinking():
         ),
     ]
 
-    out = [event async for event in _stream_turn(FakeTurn(events), req)]
+    out = [event async for event in _stream_turn(FakeTurn([*events, turn_completed()]), req)]
 
     assert [type(event) for event in out] == [Thinking]
     assert out[0].text == ""
+
+
+@pytest.mark.parametrize(
+    ("account", "requires_auth", "cli_login", "allowed"),
+    [
+        ({"type": "apiKey"}, True, "deny", True),
+        ({"type": "amazonBedrock"}, True, "deny", True),
+        (None, False, "deny", True),
+        ({"type": "chatgpt", "email": None, "planType": "pro"}, True, "deny", False),
+        (None, True, "deny", False),
+        ({"type": "chatgpt", "email": None, "planType": "pro"}, True, "require", True),
+        ({"type": "apiKey"}, True, "require", False),
+        (None, True, "require", False),
+    ],
+)
+def test_codex_account_check_enforces_cli_login(account, requires_auth, cli_login, allowed):
+    from openai_codex.generated.v2_all import GetAccountResponse
+
+    from agent_sdk_wrapper.providers.openai_provider import _account_problem
+
+    response = GetAccountResponse.model_validate(
+        {"account": account, "requiresOpenaiAuth": requires_auth}
+    )
+    assert (_account_problem(response, cli_login) is None) is allowed
+
+
+def test_codex_cli_login_deny_needs_an_api_key_and_require_takes_none(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    req = RunRequest(provider="openai", prompt="x")
+
+    assert "OPENAI_API_KEY" in (OpenAIProvider().check_credentials(req) or "")
+    assert OpenAIProvider(api_key="sk-test").check_credentials(req) is None
+    assert OpenAIProvider(model_provider="local").check_credentials(req) is None
+
+    required = RunRequest(provider="openai", prompt="x", cli_login="require")
+    assert OpenAIProvider().check_credentials(required) is None
+    with pytest.raises(ConfigError, match="cli_login='require'"):
+        OpenAIProvider(api_key="sk-test").validate_request(required)
+
+
+def test_codex_api_key_comes_from_the_run_env_first(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    provider = OpenAIProvider()
+
+    run_key = RunRequest(provider="openai", prompt="x", env={"OPENAI_API_KEY": "sk-run"})
+    assert provider._login_api_key(run_key) == "sk-run"
+    no_key = RunRequest(provider="openai", prompt="x", env={"OPENAI_API_KEY": ""})
+    assert provider._login_api_key(no_key) is None
+    assert provider.check_credentials(no_key) is not None
+
+
+@pytest.mark.parametrize(
+    ("override", "request_kwargs"),
+    [
+        ('cli_auth_credentials_store="file"', {}),
+        ('forced_login_method="api"', {}),
+        ('web_search="live"', {"web_tools": False}),
+    ],
+)
+def test_codex_caller_overrides_cannot_undo_wrapper_controls(override, request_kwargs):
+    provider = OpenAIProvider(config={"config_overrides": (override,)})
+    with pytest.raises(ConfigError, match="conflict"):
+        provider.validate_request(RunRequest(provider="openai", prompt="x", **request_kwargs))
+
+
+def test_codex_custom_model_providers_skip_the_openai_key_gate(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    req = RunRequest(provider="openai", prompt="x")
+
+    by_thread = OpenAIProvider(thread_options={"model_provider": "local"})
+    by_override = OpenAIProvider(config={"config_overrides": ('model_provider="local"',)})
+    assert by_thread.check_credentials(req) is None
+    assert by_override.check_credentials(req) is None
+
+
+def test_codex_web_search_call_waits_for_its_query():
+    started = SimpleNamespace(
+        method="item/started",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(root=SimpleNamespace(type="webSearch", id="w1", query=""))
+        ),
+    )
+    completed = SimpleNamespace(
+        method="item/completed",
+        payload=SimpleNamespace(
+            item=SimpleNamespace(
+                root=SimpleNamespace(type="webSearch", id="w1", query="codex sdk", action=None)
+            )
+        ),
+    )
+    req = RunRequest(provider="openai", prompt="ignored")
+
+    async def collect():
+        return [event async for event in _stream_turn(FakeTurn([started, completed]), req)]
+
+    events = asyncio.run(collect())
+    calls = [event for event in events if isinstance(event, ToolCall)]
+    assert [call.input["query"] for call in calls] == ["codex sdk"]
+
+
+def test_codex_optional_nulls_follow_the_matching_union_member():
+    from agent_sdk_wrapper.providers.openai_provider import _structured_value
+
+    class Cat(BaseModel):
+        kind: Literal["cat"]
+        lives: int = 9
+
+    class Dog(BaseModel):
+        kind: Literal["dog"]
+        breed: str = "mutt"
+        lives: int | None
+
+    class Owner(BaseModel):
+        pet: Cat | Dog
+
+    value = {"pet": {"kind": "dog", "breed": None, "lives": None}}
+    cleaned = _structured_value(Owner, value)
+    assert Owner.model_validate(cleaned).pet == Dog(kind="dog", lives=None)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "thread_config", "allowed"),
+    [
+        (('shell_environment_policy.set={PATH="/bin"}',), None, False),
+        (('shell_environment_policy={inherit="core"}',), None, False),
+        (('shell_environment_policy.set.OPENAI_API_KEY="sk"',), None, False),
+        ((), {"shell_environment_policy": {"inherit": "core"}}, False),
+        ((), {"shell_environment_policy.set": {"PATH": "/bin"}}, False),
+        (('shell_environment_policy.set.PATH="/bin"',), None, True),
+        ((), {"shell_environment_policy.inherit": "core"}, True),
+    ],
+)
+def test_codex_config_cannot_replace_the_policy_that_hides_keys_from_commands(
+    overrides, thread_config, allowed
+):
+    provider = OpenAIProvider(
+        config={"config_overrides": overrides},
+        thread_options={"config": thread_config} if thread_config else None,
+    )
+    req = RunRequest(provider="openai", prompt="x")
+
+    if allowed:
+        provider.validate_request(req)
+    else:
+        with pytest.raises(ConfigError, match="hide OPENAI_API_KEY, CODEX_API_KEY"):
+            provider.validate_request(req)
+
+
+@pytest.mark.parametrize(
+    "provider_options",
+    [
+        {"config": {"config_overrides": ("features.shell_snapshot=true",)}},
+        {"config": {"config_overrides": ("features={shell_snapshot=true}",)}},
+        {"thread_options": {"config": {"features": {"shell_snapshot": True}}}},
+        {"thread_options": {"config": {"features.shell_snapshot": True}}},
+        {"thread_options": {"config": {"features": "shell_snapshot=true"}}},
+    ],
+)
+def test_codex_rejects_shell_snapshot_overrides_before_launch(provider_options):
+    with pytest.raises(ConfigError, match="features.shell_snapshot"):
+        OpenAIProvider(**provider_options).validate_request(
+            RunRequest(provider="openai", prompt="x")
+        )
+
+
+def test_codex_recursive_output_schemas_terminate():
+    from agent_sdk_wrapper.providers.openai_provider import _codex_output_schema
+
+    class Node(BaseModel):
+        name: str
+        parent: Node = Field(default=None, description="parent")
+
+    Node.model_rebuild()
+    schema = _codex_output_schema(Node)
+    assert schema["required"] == ["name", "parent"]
+
+
+@pytest.mark.parametrize(
+    ("thread_config", "request_kwargs"),
+    [
+        ({"web_search": "live"}, {"web_tools": False}),
+        ({"tools": {"web_search": True}}, {"web_tools": False}),
+        ({"cli_auth_credentials_store": "file"}, {}),
+    ],
+)
+def test_codex_thread_config_cannot_undo_wrapper_controls(thread_config, request_kwargs):
+    req = RunRequest(
+        provider="openai",
+        prompt="x",
+        extra_options={"thread_options": {"config": thread_config}},
+        **request_kwargs,
+    )
+    with pytest.raises(ConfigError, match="config"):
+        OpenAIProvider().validate_request(req)
+
+
+def test_codex_tool_manifest_skips_undecodable_sys_path_entries(monkeypatch):
+    import sys
+
+    from agent_sdk_wrapper.providers.openai_provider import _tool_manifest
+
+    monkeypatch.setattr(sys, "path", ["/ok", "/bad\udcff"])
+    assert json.dumps(_tool_manifest([])["sys_path"]) == '["/ok"]'
+
+
+
+def test_codex_plan_updates_become_one_thinking_checklist():
+    def step(text, status):
+        return SimpleNamespace(step=text, status=status)
+
+    def plan(*steps):
+        payload = SimpleNamespace(plan=list(steps))
+        return SimpleNamespace(method="turn/plan/updated", payload=payload)
+    req = RunRequest(provider="openai", prompt="ignored")
+    events = [
+        plan(step("read", "inProgress")),
+        plan(step("read", "completed"), step("fix", "pending")),
+        turn_completed(),
+    ]
+
+    async def collect():
+        return [event async for event in _stream_turn(FakeTurn(events), req)]
+
+    thinking = [event.text for event in asyncio.run(collect()) if isinstance(event, Thinking)]
+    assert thinking == ["- [x] read\n- [ ] fix"]

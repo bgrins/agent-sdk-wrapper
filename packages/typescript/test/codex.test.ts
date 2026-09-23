@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type {
   CodexOptions,
@@ -10,10 +13,14 @@ import {
   Agent,
   ConfigError,
   ProcessTerminatedError,
+  ProviderError,
   RuntimeUnavailableError,
 } from "../src/index.js";
 import type { AgentDefaults } from "../src/index.js";
 import { CodexAdapter } from "../src/providers/codex.js";
+
+// Adapters refuse to launch without API credentials; these tests fake the runtime.
+process.env.OPENAI_API_KEY ||= "test-key";
 
 const completed: ThreadEvent = {
   type: "turn.completed",
@@ -115,9 +122,19 @@ test("Codex maps final items once, tools and inclusive token totals", async () =
   const run = await agent.run("prompt");
   assert.equal(run.final_text, "answer");
   assert.equal(run.session_id, "thread-1");
-  assert.equal(
-    run.events.filter((env) => env.event.type === "tool_call").length,
-    1,
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "tool_call")
+      .map((env) => env.event),
+    [
+      {
+        type: "tool_call",
+        id: "cmd",
+        name: "command",
+        input: { command: "pwd" },
+        raw: messages[2],
+      },
+    ],
   );
   assert.equal(
     run.events.filter((env) => env.event.type === "tool_result").length,
@@ -141,7 +158,67 @@ test("Codex maps final items once, tools and inclusive token totals", async () =
   assert.equal(threads[0]?.options.model, "gpt-test");
   assert.equal(threads[0]?.options.modelReasoningEffort, "high");
   assert.equal(threads[0]?.options.workingDirectory, "/tmp");
-  assert.deepEqual(clients[0]?.config, { model_reasoning_summary: "auto" });
+  assert.equal(clients[0]?.config?.model_reasoning_summary, "auto");
+});
+test("Codex cliLogin deny keeps logins and stored credentials out of the child", async () => {
+  const { agent, clients } = harness([completed], {
+    providerOptions: {
+      provider: "openai",
+      client: {
+        env: { OPENAI_API_KEY: "k", CODEX_ACCESS_TOKEN: "token", HOME: "/h" },
+      },
+    },
+  });
+  await agent.run("deny");
+  assert.deepEqual(clients[0]?.config?.features, { shell_snapshot: false });
+  // The SDK passes apiKey to the child as CODEX_API_KEY.
+  assert.equal(clients[0]?.apiKey, "k");
+  assert.deepEqual(clients[0]?.env, { HOME: "/h" });
+});
+test("Codex client.config merges safe options but cannot unhide API keys", async () => {
+  const { agent, clients } = harness([completed], {
+    providerOptions: {
+      provider: "openai",
+      client: {
+        config: {
+          features: { shell_tool: false },
+          shell_environment_policy: { inherit: "core" },
+        },
+      },
+    },
+  });
+  await agent.run("config");
+  assert.deepEqual(clients[0]?.config, {
+    model_reasoning_summary: "auto",
+    features: { shell_snapshot: false, shell_tool: false },
+    shell_environment_policy: { inherit: "core" },
+  });
+  // Sent after config, so it survives a caller table that replaces the policy.
+  assert.deepEqual(clients[0]?.configOverrides, [
+    'shell_environment_policy.set.CODEX_API_KEY=""',
+  ]);
+  // The SDK sends an empty table as `key={}`, which replaces it.
+  for (const config of [
+    { shell_environment_policy: { set: {} } },
+    { "shell_environment_policy.set": { OPENAI_API_KEY: "k" } },
+    { cli_auth_credentials_store: "file" },
+    { features: { shell_snapshot: true } },
+    { "features.shell_snapshot": false },
+    { features: "shell_snapshot=true" },
+    { model: null },
+  ])
+    assert.throws(
+      () =>
+        new Agent({
+          provider: "openai",
+          providerOptions: {
+            provider: "openai",
+            client: { config: config as never },
+          },
+        }),
+      ConfigError,
+      JSON.stringify(config),
+    );
 });
 test("Codex completion-only file/MCP/search items get paired calls and results", async () => {
   const { agent } = harness([
@@ -207,28 +284,80 @@ test("Codex subtracts cumulative thread usage on resume", async () => {
   assert.deepEqual(first.usage, second.usage);
   assert.equal(second.session_id, "saved");
 });
-for (const type of ["turn.failed", "error"] as const)
-  test(`Codex ${type} is a terminal typed failure`, async () => {
-    const message = "401 Unauthorized";
-    const event: ThreadEvent =
-      type === "turn.failed" ? { type, error: { message } } : { type, message };
-    const { agent } = harness([event], {}, new Error("secondary exit failure"));
-    const run = await agent.run("bad credentials");
-    assert.equal(run.status, "failure");
-    assert.equal(run.error, message);
-    assert.equal(
-      run.events.filter((env) => env.event.type === "error").length,
-      1,
-    );
-    assert.ok(
-      run.events.some(
-        (env) =>
-          env.event.type === "error" &&
-          env.event.error_type === "authentication_failed" &&
-          !env.event.retryable,
-      ),
-    );
+test("Codex turn.failed is the one terminal typed failure, not also a warning", async () => {
+  const message = "401 Unauthorized";
+  const { agent } = harness(
+    [
+      { type: "error", message },
+      { type: "turn.failed", error: { message } },
+    ],
+    {},
+    new Error("secondary exit failure"),
+  );
+  const run = await agent.run("bad credentials");
+  assert.equal(run.status, "failure");
+  assert.equal(run.error, message);
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "error")
+      .map((env) => env.event),
+    [
+      {
+        type: "error",
+        message,
+        error_type: "authentication_failed",
+      },
+    ],
+  );
+  assert.deepEqual(
+    run.events
+      .filter((env) => env.event.type === "warning")
+      .map((env) => env.event),
+    [],
+  );
+});
+test("Codex stops reading at its terminal event", async () => {
+  const { agent, closed } = harness([
+    completed,
+    {
+      type: "item.completed",
+      item: { type: "agent_message", id: "late", text: "late" },
+    },
+    completed,
+  ]);
+  const run = await agent.run("once");
+  assert.equal(run.status, "success");
+  assert.equal(run.final_text, "");
+  assert.equal(
+    run.events.filter((env) => env.event.type === "usage").length,
+    1,
+  );
+  assert.equal(closed(), 1);
+});
+test("Codex todo lists map to thinking instead of unmapped warnings", async () => {
+  const run = await harness([
+    {
+      type: "item.completed",
+      item: {
+        type: "todo_list",
+        id: "plan",
+        items: [
+          { text: "inspect", completed: true },
+          { text: "fix", completed: false },
+        ],
+      },
+    },
+    completed,
+  ]).agent.run("plan");
+  assert.equal(
+    run.events.some((env) => env.event.type === "warning"),
+    false,
+  );
+  assert.deepEqual(run.events[1]?.event, {
+    type: "thinking",
+    text: "- [x] inspect\n- [ ] fix",
   });
+});
 test("Codex transient error events are classified and item errors remain warnings", async () => {
   const failure = await harness([
     { type: "turn.failed", error: { message: "429 rate limit" } },
@@ -237,8 +366,7 @@ test("Codex transient error events are classified and item errors remain warning
     failure.events.some(
       (env) =>
         env.event.type === "error" &&
-        env.event.error_type === "transient_api_error" &&
-        env.event.retryable,
+        env.event.error_type === "transient_api_error",
     ),
   );
   const success = await harness([
@@ -251,7 +379,7 @@ test("Codex transient error events are classified and item errors remain warning
   assert.equal(success.status, "success");
   assert.ok(success.events.some((env) => env.event.type === "warning"));
 });
-test("Codex truncated streams fail; signal exits throw without retrying", async () => {
+test("Codex truncated streams fail; signal exits throw", async () => {
   const truncated = await harness([{ type: "turn.started" }]).agent.run(
     "truncated",
   );
@@ -259,13 +387,12 @@ test("Codex truncated streams fail; signal exits throw without retrying", async 
   assert.match(truncated.error ?? "", /without turn.completed/);
   const killed = harness(
     [],
-    { maxRetries: 5 },
+    {},
     new Error("Codex Exec exited with signal SIGTERM:"),
   );
   await assert.rejects(killed.agent.run("killed"), ProcessTerminatedError);
-  assert.equal(killed.clients.length, 1);
 });
-test("closing a Codex stream aborts its native signal and closes its iterator", async () => {
+test("closing a Codex stream closes its iterator without aborting the native signal", async () => {
   const { agent, turns, closed } = harness([
     {
       type: "item.completed",
@@ -276,11 +403,11 @@ test("closing a Codex stream aborts its native signal and closes its iterator", 
   for await (const env of agent.stream("close"))
     if (env.event.type === "text") break;
   assert.equal(closed(), 1);
-  assert.equal(turns[0]?.signal?.aborted, true);
+  // The SDK's cleanup kills the child; a later abort would raise an uncaught AbortError.
+  assert.equal(turns[0]?.signal?.aborted, false);
 });
 test("Codex rejects native config that could bypass wrapper guarantees", () => {
   for (const native of [
-    { client: { config: { mcp_servers: {} } } },
     { thread: { model: "override" } },
     { thread: { outputSchema: {} } },
     { thread: { sandboxMode: "bad" } },
@@ -356,7 +483,85 @@ test("explicit Codex env does not inherit the host API key", async () => {
   const { agent, clients } = harness([completed], {
     providerOptions: { provider: "openai", client: { env: {} } },
   });
-  await agent.run("isolated");
+  await assert.rejects(
+    agent.run("isolated"),
+    (error) =>
+      error instanceof ProviderError &&
+      error.errorType === "authentication_failed",
+  );
+  assert.equal(clients.length, 0);
+});
+test("Codex cliLogin require keeps API keys and access tokens out of the child", async () => {
+  assert.throws(
+    () =>
+      harness([], {
+        cliLogin: "require",
+        providerOptions: { provider: "openai", client: { apiKey: "k" } },
+      }),
+    ConfigError,
+  );
+  const { agent, clients } = harness([completed], {
+    cliLogin: "require",
+    providerOptions: {
+      provider: "openai",
+      client: {
+        env: {
+          OPENAI_API_KEY: "k",
+          CODEX_API_KEY: "k",
+          CODEX_ACCESS_TOKEN: "token",
+          HOME: "/h",
+        },
+      },
+    },
+  });
+  await agent.run("login");
   assert.equal(clients[0]?.apiKey, undefined);
-  assert.deepEqual(clients[0]?.env, {});
+  assert.deepEqual(clients[0]?.env, { HOME: "/h" });
+  assert.deepEqual(clients[0]?.config?.features, { shell_snapshot: false });
+});
+test("Codex cliLogin require accepts only a stored ChatGPT login", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-login-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const script = join(dir, "codex");
+  writeFileSync(
+    script,
+    '#!/bin/sh\n[ "$1 $2" = "login status" ] && echo "$FAKE_LOGIN" >&2\n',
+    { mode: 0o755 },
+  );
+  const agent = (status: string) =>
+    new Agent({
+      provider: "openai",
+      cliLogin: "require",
+      providerOptions: {
+        provider: "openai",
+        client: { codexPathOverride: script, env: { FAKE_LOGIN: status } },
+      },
+    });
+  await agent("Logged in using ChatGPT").checkRuntime();
+  for (const status of ["Logged in using an API key - sk-***", "Not logged in"])
+    await assert.rejects(
+      agent(status).checkRuntime(),
+      (error) =>
+        error instanceof ProviderError &&
+        error.errorType === "authentication_failed",
+    );
+});
+test("Codex web search calls wait for their query", async () => {
+  const { agent } = harness([
+    { type: "thread.started", thread_id: "t" },
+    { type: "item.started", item: { type: "web_search", id: "w", query: "" } },
+    {
+      type: "item.completed",
+      item: { type: "web_search", id: "w", query: "codex sdk" },
+    },
+    completed,
+  ]);
+  const run = await agent.run("search");
+  const calls = run.events
+    .map((env) => env.event)
+    .filter((event) => event.type === "tool_call");
+  assert.deepEqual(
+    calls.map((event) => event.type === "tool_call" && event.input),
+    [{ query: "codex sdk" }],
+  );
 });

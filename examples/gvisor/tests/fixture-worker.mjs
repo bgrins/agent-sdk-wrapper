@@ -16,6 +16,9 @@ const baseline = spawnSync("node", ["--test"], {
 assert.equal(baseline.status, 1);
 assert.match(baseline.stdout, /ERR_ASSERTION/);
 const request = JSON.parse(process.env.JOB_REQUEST || "{}");
+// Terminal controls that sandboxed code could write to worker output.
+for (const stream of [process.stdout, process.stderr])
+  stream.write("\x1b]0;forged\x07\x9b31m\rforged\n");
 const run_id = randomUUID();
 const started = Date.now();
 let sequence = 0;

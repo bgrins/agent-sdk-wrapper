@@ -24,6 +24,9 @@ from .events import (
 
 LOGGER_NAME = "agent_sdk_wrapper"
 _INFO_EVENTS = (RunStarted, ToolCall, ToolResult, Error, WarningEvent, RunFinished)
+# Lone surrogates can't be encoded as UTF-8. Inside a JSON string, the
+# ``\udXXX`` text this handler writes is the JSON escape for the same code point.
+JSON_TEXT_ERRORS = "backslashreplace"
 
 
 def get_logger() -> logging.Logger:
@@ -62,23 +65,15 @@ def summarize(env: EventEnvelope) -> str:
 
 
 class TraceWriter:
-    """Writes every event to a JSONL file and the stdlib logger.
+    """Writes every event to a JSONL file and the stdlib logger. Call :meth:`close` when done."""
 
-    Use as a context manager or call :meth:`close` when done.
-    """
-
-    def __init__(
-        self,
-        trace_file: str | Path | None = None,
-        *,
-        logger: logging.Logger | None = None,
-    ) -> None:
-        self._logger = logger or get_logger()
+    def __init__(self, trace_file: str | Path | None = None) -> None:
+        self._logger = get_logger()
         self._fh: TextIO | None = None
         self._path = Path(trace_file) if trace_file else None
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = self._path.open("w", encoding="utf-8")
+            self._fh = self._path.open("w", encoding="utf-8", errors=JSON_TEXT_ERRORS)
 
     def write(self, env: EventEnvelope) -> None:
         if self._fh is not None:
@@ -92,9 +87,3 @@ class TraceWriter:
         if self._fh is not None:
             self._fh.close()
             self._fh = None
-
-    def __enter__(self) -> TraceWriter:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()

@@ -28,8 +28,13 @@ if (result.session_id) {
 }
 ```
 
-Set native SDK credentials through environment variables or login. Codex also accepts
-`OPENAI_API_KEY`. The wrapper does not load `.env`.
+Claude needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or an enabled cloud-provider
+flag such as `CLAUDE_CODE_USE_BEDROCK=1`; a keyless `ANTHROPIC_BASE_URL` gateway needs a
+placeholder key. Codex needs `OPENAI_API_KEY` or `client.apiKey`, including with
+`baseUrl`. With the default `cliLogin: "deny"`,
+a run never uses a runtime's stored login and throws before starting without
+credentials. Codex accepts `cliLogin: "require"` to use its stored ChatGPT login
+(checked with `codex login status`); Claude rejects it. The wrapper does not load `.env`.
 
 ## Contract
 
@@ -38,10 +43,10 @@ overridden per field, without deep merging. One active run per Agent.
 
 | Options | Meaning |
 |---|---|
-| `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings; conflicts fail |
-| `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider |
-| `maxRetries`, `retryDelayMs` | Default 0 retries; transient failures retry only before any events |
-| `signal` | Cancellation or `AbortSignal.timeout(ms)` |
+| `provider`, `model`, `effort`, `cwd` | Provider/model selection and execution settings; conflicts fail. A `provider:` prefix counts only for `anthropic`, `openai` or `codex`, so Bedrock IDs and ARNs stay whole; blank values mean omitted; `cwd` must be an existing directory |
+| `sessionId`, `continueSession` | Explicit resume or automatic reuse of the latest ID per provider; a constructor `sessionId` gives way to the latest reported session |
+| `signal` | Cancellation or `AbortSignal.timeout(ms)`; ignored after the terminal frame |
+| `cliLogin` | `"deny"` (default) or Codex-only `"require"` for the runtime's stored login |
 | `traceFile` | Write normalized JSONL during `run()` or `stream()` |
 | `providerOptions` | Native options below; unknown keys fail |
 | `onProviderEvent`, `includeRaw` | Original SDK-event callback, or raw data on mapped events |
@@ -49,12 +54,19 @@ overridden per field, without deep merging. One active run per Agent.
 `EventEnvelope` has `run_id`, zero-based `sequence`, `timestamp` and `event`.
 Events cover run boundaries, sessions, completed text/thinking, tool activity,
 usage, warnings and errors. `RunResult` contains status, text, usage/cost,
-session ID and events. `collectRun` rejects incomplete or misordered streams.
+session ID, the first error and its `error_type`, and events. `final_text` is the last
+assistant message. Runs are never retried; see [retrying](PARITY.md#retrying). For Claude,
+`session_info.model` reports the model the runtime used, including a fallback model after
+`model_fallback` or a `model_refusal_fallback` that retracts nothing (a warning precedes
+it); Codex exec doesn't expose it. `error_type` uses the
+[shared vocabulary](PARITY.md#error-types). `collectRun` rejects incomplete or
+misordered streams.
 
-`checkRuntime()` validates configuration and runtime availability without a model call.
-Setup throws `ConfigError` or `RuntimeUnavailableError`; runtime failures usually
-produce failed results. Signal-killed processes throw `ProcessTerminatedError`.
-Trace I/O or serialization failures throw `TraceWriteError` without retrying inference.
+`checkRuntime()` validates configuration, runtime and credentials without a model call.
+Setup throws `ConfigError`, `RuntimeUnavailableError` or `ProviderError`; runtime
+failures usually produce failed results. Signal-killed processes record the failure,
+then throw `ProcessTerminatedError`; a kill after the caller's abort is cancelled.
+Trace I/O or serialization failures throw `TraceWriteError`.
 Implement `ProviderAdapter` for custom validation, runtime checks and streaming.
 
 ## Capabilities
@@ -73,17 +85,47 @@ Native options use `providerOptions.provider: "anthropic"` or `"openai"`:
 | Group | Accepted keys |
 |---|---|
 | Claude `options` | `permissionMode`, `allowDangerouslySkipPermissions`, `tools`, `allowedTools`, `disallowedTools`, `settingSources`, `env`, `systemPrompt`, `maxTurns`, `thinking`, `pathToClaudeCodeExecutable` |
-| Codex `client` | `apiKey`, `baseUrl`, `env`, `codexPathOverride` |
-| Codex `thread` | `sandboxMode`, `approvalPolicy`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` |
+| Codex `client` | `apiKey`, `baseUrl`, `env`, `codexPathOverride`, `config` |
+| Codex `thread` | `sandboxMode`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` (`codex exec` always uses approval policy `never`) |
 
-Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
-`allowedTools` grants approval, not a hard filter. Codex `env` replaces inheritance.
-Host tool callbacks are unsupported. See [API limits](PARITY.md).
+Claude permission bypass requires `allowDangerouslySkipPermissions: true`;
+`allowedTools` grants approval, not a hard filter. Native `env` replaces inheritance;
+otherwise the child gets `process.env`. Claude pins effort, disables background tasks,
+blanks the subagent model and strips claude.ai login tokens by default; explicit login
+tokens are rejected. Codex drops `CODEX_ACCESS_TOKEN`, keeps its API key out of model
+commands and disables shell snapshots. Host tool callbacks are unsupported.
+See [API limits](PARITY.md).
+
+Codex `client.config` takes Codex config tables, which the SDK sends as `--config`
+entries. The caller's keys win over `model_reasoning_summary: "auto"`;
+`features.shell_snapshot` stays `false`. Login-store keys and keys that would replace
+the blank `CODEX_API_KEY` or `OPENAI_API_KEY` entries in `shell_environment_policy.set` fail.
+
+For a run without a shell, Claude takes `options.tools: []`, which leaves the model no
+tools. Codex always offers `apply_patch` and `request_user_input`. Its feature flags remove
+the other built-in tools, and a read-only sandbox refuses every file write:
+
+```ts
+providerOptions: {
+  provider: "openai",
+  client: {
+    config: {
+      features: { shell_tool: false, view_image: false, goals: false, multi_agent: false },
+    },
+  },
+  thread: { sandboxMode: "read-only", webSearchMode: "disabled" },
+}
+```
+
+`multi_agent: false` also removes the tool search Codex uses to find MCP tools. The flags
+belong to the pinned Codex release; `codex features list` shows them.
 
 ## Native events and traces
 
 `onProviderEvent` receives original SDK events, typed `unknown`, including unmapped
-frames. Callback exceptions fail the run. Import native SDK symbols from their
+frames. Callback exceptions, and rejections of a promise the callback returns, propagate
+unchanged from `run()`/`stream()` after the runtime is closed; the trace then has no
+`run_finished`. Stopping iteration at `run_finished` releases the Agent and trace file. Import native SDK symbols from their
 packages; the wrapper does not re-export them or expose client handles.
 
 ```ts

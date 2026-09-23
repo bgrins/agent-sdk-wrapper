@@ -19,7 +19,7 @@ export type AnthropicNativeOptions = Pick<
 };
 export type CodexNativeOptions = Pick<
   CodexOptions,
-  "apiKey" | "baseUrl" | "env" | "codexPathOverride"
+  "apiKey" | "baseUrl" | "env" | "codexPathOverride" | "config"
 >;
 export type CodexThreadOptions = Pick<
   ThreadOptions,
@@ -27,7 +27,6 @@ export type CodexThreadOptions = Pick<
   | "skipGitRepoCheck"
   | "networkAccessEnabled"
   | "webSearchMode"
-  | "approvalPolicy"
   | "additionalDirectories"
 >;
 export type ProviderOptions =

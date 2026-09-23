@@ -9,6 +9,8 @@ requires-python = ">=3.12"
 
 dependencies = [
     "claude-agent-sdk==0.2.152",
+    # The generated Codex tool server imports mcp directly.
+    "mcp>=2,<3",
     "openai-codex==0.154.0",
     "pydantic>=2.12,<3",
 ]

@@ -18,7 +18,9 @@ ProviderInput = str | None
 BuiltinTools = Literal["none"] | list[str]
 BuiltinToolsInput = Literal["none"] | Sequence[str] | None
 INHERIT_MODEL = "inherit"
-Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+CliLogin = Literal["deny", "require"]
+_CLI_LOGIN_VALUES = ("deny", "require")
+Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 _PROVIDER_ALIASES: dict[str, Provider] = {
     "anthropic": "anthropic",
@@ -28,7 +30,8 @@ _PROVIDER_ALIASES: dict[str, Provider] = {
 _OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "o5", "codex", "chatgpt-")
 _ANTHROPIC_MODEL_PREFIXES = ("claude",)
 _ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-_OPENAI_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+# Mirrors openai_codex ReasoningEffort.
+_OPENAI_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 def normalize_provider(provider: ProviderInput) -> Provider | None:
@@ -51,7 +54,11 @@ def normalize_provider(provider: ProviderInput) -> Provider | None:
 
 
 def parse_model_spec(model: str | None) -> tuple[Provider | None, str | None]:
-    """Parse optional ``provider:model`` syntax without inferring bare names."""
+    """Parse optional ``provider:model`` syntax without inferring bare names.
+
+    Only a known provider name before the first colon is a prefix, so model IDs
+    such as ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` pass through whole.
+    """
 
     if model is None:
         return None, None
@@ -62,11 +69,11 @@ def parse_model_spec(model: str | None) -> tuple[Provider | None, str | None]:
         return None, None
 
     prefix, sep, name = spec.partition(":")
-    if not sep:
+    provider = _PROVIDER_ALIASES.get(prefix.strip().lower())
+    if not sep or provider is None:
         return None, spec
-    provider = normalize_provider(prefix)
     model_name = name.strip()
-    if provider is None or model_name == "":
+    if model_name == "":
         raise ConfigError(f"invalid model spec {model!r}; expected 'provider:model'")
     return provider, model_name
 
@@ -166,9 +173,13 @@ def normalize_effort_for_provider(provider: Provider, value: str | None) -> Effo
             f"effort {value!r} is not supported by provider {provider!r}; "
             f"expected one of: {', '.join(sorted(allowed))}"
         )
-    if provider == "openai" and effort == "max":
-        return "xhigh"
     return cast(Effort, effort)
+
+
+def normalize_cli_login(value: str) -> CliLogin:
+    if value not in _CLI_LOGIN_VALUES:
+        raise ConfigError(f"cli_login must be one of {_CLI_LOGIN_VALUES}, got {value!r}")
+    return cast(CliLogin, value)
 
 
 @dataclass
@@ -177,7 +188,8 @@ class SubagentDef:
 
     Codex accepts ``tools=None`` or ``[]`` as defaults. Non-empty tool lists
     and any subagent ``max_turns`` raise ``ConfigError``.
-    ``model=None`` and ``INHERIT_MODEL`` inherit the parent model.
+    ``model=None`` and ``INHERIT_MODEL`` inherit the parent model; on Claude, a run
+    ``env`` value for ``CLAUDE_CODE_SUBAGENT_MODEL`` applies to subagents without a model.
     """
 
     description: str
@@ -234,7 +246,6 @@ class RunRequest:
 
     # Run-level controls.
     timeout: float | None = None  # seconds, wall-clock for the whole run
-    max_retries: int = 2  # whole-run retries on transient errors (backoff)
     include_raw: bool = False
     include_events_in_result: bool = True
     artifacts_dir: str | Path | None = None
@@ -242,7 +253,7 @@ class RunRequest:
     # None keeps defaults; "none" requires disabling all built-ins or rejection.
     builtin_tools: BuiltinTools | None = None
     # None keeps defaults. False disables Claude WebSearch/WebFetch or Codex
-    # tools.web_search; True enables them. This does not restrict network egress.
+    # web_search ("disabled"); True sets it to "live". This does not restrict network egress.
     web_tools: bool | None = None
     # Claude tool approvals; Agent is added when subagents exist.
     allowed_tools: list[str] = field(default_factory=list)
@@ -254,7 +265,13 @@ class RunRequest:
     continue_session: bool = False
     # anthropic: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
     permission_mode: str | None = None
-    # anthropic: which on-disk settings to load. Default [] = none (isolated).
+    # anthropic: which on-disk settings to load. None loads none (isolated).
     setting_sources: list[str] | None = None
     # Escape hatch merged into the backend's native options object.
     extra_options: dict[str, Any] = field(default_factory=dict)
+    # The runtime's stored login (Claude claude.ai/OAuth, Codex auth.json/keyring).
+    # "deny" requires API-key or cloud-provider credentials; "require" (Codex only)
+    # requires the stored ChatGPT login and removes API keys from the child env.
+    cli_login: CliLogin = "deny"
+    # Set by Agent for provider-event logs.
+    run_id: str | None = None

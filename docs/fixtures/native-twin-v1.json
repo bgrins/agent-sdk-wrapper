@@ -2,7 +2,7 @@
   {
     "run_id": "contract-success",
     "provider": "openai",
-    "model": "gpt-test",
+    "model": "gpt-test-2026",
     "status": "success",
     "ended_reason": "success",
     "final_text": "Hello world",
@@ -21,6 +21,7 @@
     "session_id": "session-contract",
     "artifacts_dir": null,
     "error": null,
+    "error_type": null,
     "events": [
       {
         "run_id": "contract-success",
@@ -39,7 +40,8 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "session_info",
-          "id": "session-contract"
+          "id": "session-contract",
+          "model": "gpt-test-2026"
         }
       },
       {
@@ -83,7 +85,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "Hello "
+          "text": "Checking the result."
         }
       },
       {
@@ -92,7 +94,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "world"
+          "text": "Hello world"
         }
       },
       {
@@ -156,6 +158,7 @@
     "session_id": "session-contract",
     "artifacts_dir": null,
     "error": "Turn limit",
+    "error_type": "max_turns",
     "events": [
       {
         "run_id": "contract-failure",
@@ -218,7 +221,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "Hello "
+          "text": "Checking the result."
         }
       },
       {
@@ -227,7 +230,7 @@
         "timestamp": "2026-09-01T00:00:00Z",
         "event": {
           "type": "text",
-          "text": "world"
+          "text": "Hello world"
         }
       },
       {
@@ -263,8 +266,7 @@
         "event": {
           "type": "error",
           "message": "Turn limit",
-          "error_type": "max_turns",
-          "retryable": false
+          "error_type": "max_turns"
         }
       },
       {

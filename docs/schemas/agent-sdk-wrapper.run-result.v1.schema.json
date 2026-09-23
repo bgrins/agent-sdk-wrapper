@@ -18,6 +18,7 @@
     "session_id",
     "artifacts_dir",
     "error",
+    "error_type",
     "events"
   ],
   "properties": {
@@ -62,6 +63,9 @@
       "type": ["string", "null"]
     },
     "error": {
+      "type": ["string", "null"]
+    },
+    "error_type": {
       "type": ["string", "null"]
     },
     "events": {

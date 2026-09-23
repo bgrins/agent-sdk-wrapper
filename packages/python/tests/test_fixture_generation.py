@@ -20,7 +20,6 @@ regenerate_fixtures = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(regenerate_fixtures)
 EXPECTED_FIXTURES = {
     "provider_error.trace.jsonl",
-    "retry.trace.jsonl",
     "stream.trace.jsonl",
     "structured_output.trace.jsonl",
     "success.trace.jsonl",
@@ -153,6 +152,8 @@ def test_live_fixture_promotion_selection_ignores_generic_provider_env(monkeypat
 
 
 def test_live_fixture_promotion_models_ignore_generic_model_env(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.setenv("PROVIDER", "codex")
     monkeypatch.setenv("MODEL", "claude-haiku-4-5")
 

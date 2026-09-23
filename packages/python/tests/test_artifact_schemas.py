@@ -13,7 +13,6 @@ from referencing.jsonschema import DRAFT202012
 
 from agent_sdk_wrapper import (
     Agent,
-    AgentUpdated,
     Error,
     EventEnvelope,
     RunFinished,
@@ -78,7 +77,6 @@ def test_each_event_type_validates_against_trace_schema() -> None:
         Thinking(text="plan"),
         ToolCall(id="tool-1", name="repo.read_file", input={"path": "app.py"}),
         ToolResult(id="tool-1", output="contents", is_error=False),
-        AgentUpdated(name="reviewer"),
         Usage(
             usage=TokenUsage(
                 requests=1,
@@ -94,7 +92,7 @@ def test_each_event_type_validates_against_trace_schema() -> None:
         SessionInfo(id="sess-1"),
         StructuredOutput(value={"ok": True}),
         WarningEvent(message="retrying"),
-        Error(message="missing runtime", error_type="ProviderNotAvailableError"),
+        Error(message="missing runtime", error_type="runtime_unavailable"),
         RunFinished(status=RunStatus.SUCCESS, duration_ms=12),
     ]
 
@@ -159,18 +157,26 @@ def test_generated_artifacts_validate_schemas(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(op_mod, "OpenAIProvider", FakeProvider)
 
     artifacts_dir = tmp_path / "artifacts"
-    result = asyncio.run(Agent(provider="openai", artifacts_dir=artifacts_dir).run("ignored"))
+    manifests = []
+
+    def read_manifest(env: EventEnvelope) -> None:
+        manifests.append(json.loads((artifacts_dir / "manifest.json").read_text()))
+
+    result = asyncio.run(
+        Agent(provider="openai", artifacts_dir=artifacts_dir, on_event=read_manifest).run("x")
+    )
+    manifests.append(json.loads((artifacts_dir / "manifest.json").read_text()))
 
     assert result.ok
+    assert (manifests[0]["status"], manifests[-1]["status"]) == ("running", "success")
     trace_validator = validator("agent-sdk-wrapper.event-envelope-jsonl.v1.schema.json")
     manifest_validator = validator("agent-sdk-wrapper.manifest.v1.schema.json")
     result_validator = validator("agent-sdk-wrapper.run-result.v1.schema.json")
 
     for line in (artifacts_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines():
         trace_validator.validate(json.loads(line))
-    manifest_validator.validate(
-        json.loads((artifacts_dir / "manifest.json").read_text(encoding="utf-8"))
-    )
+    for manifest in (manifests[0], manifests[-1]):
+        manifest_validator.validate(manifest)
     result_validator.validate(
         json.loads((artifacts_dir / "result.json").read_text(encoding="utf-8"))
     )

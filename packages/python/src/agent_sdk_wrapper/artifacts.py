@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import uuid
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from .events import RunResult, _jsonable, utcnow_iso
-from .logging import get_logger
+from .logging import JSON_TEXT_ERRORS, get_logger
 
 ARTIFACT_SCHEMA_VERSION = 1
 TRACE_FORMAT = "agent-sdk-wrapper.event-envelope-jsonl.v1"
@@ -29,10 +31,16 @@ class ProviderEventEnvelope:
     class_name: str
     message: Any
     raw: Any = dataclasses.field(default=None, repr=False, compare=False)
+    run_id: str | None = None
 
     @classmethod
     def from_message(
-        cls, provider: str, sequence: int, message: Any
+        cls,
+        provider: str,
+        sequence: int,
+        message: Any,
+        *,
+        run_id: str | None = None,
     ) -> ProviderEventEnvelope:
         typ = type(message)
         return cls(
@@ -42,10 +50,12 @@ class ProviderEventEnvelope:
             class_name=f"{typ.__module__}.{typ.__qualname__}",
             message=_provider_jsonable(message),
             raw=message,
+            run_id=run_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "run_id": self.run_id,
             "sequence": self.sequence,
             "timestamp": self.timestamp,
             "provider": self.provider,
@@ -82,12 +92,6 @@ def manifest_file_for(artifacts_dir: Path) -> Path:
     return artifacts_dir / "manifest.json"
 
 
-def sdk_dir_for(artifacts_dir: str | Path) -> Path:
-    path = Path(artifacts_dir) / "sdk"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def provider_events_file_for(artifacts_dir: str | Path) -> Path:
     path = Path(artifacts_dir)
     path.mkdir(parents=True, exist_ok=True)
@@ -95,13 +99,18 @@ def provider_events_file_for(artifacts_dir: str | Path) -> Path:
 
 
 class ProviderEventLogger:
-    """Write provider-native SDK messages before normalized adapter mapping."""
+    """Append provider-native SDK messages before normalized adapter mapping.
+
+    The runner clears the file at run start.
+    """
 
     def __init__(
         self,
         provider: str,
         artifacts_dir: str | Path | None,
         on_provider_event: ProviderEventCallback | None = None,
+        *,
+        run_id: str | None = None,
     ) -> None:
         self.provider = provider
         self.path = (
@@ -110,17 +119,21 @@ class ProviderEventLogger:
             else None
         )
         self.on_provider_event = on_provider_event
+        self.run_id = run_id
         self.sequence = 0
 
     def write(self, message: Any) -> None:
         if self.path is None and self.on_provider_event is None:
             return
         envelope = ProviderEventEnvelope.from_message(
-            self.provider, self.sequence, message
+            self.provider,
+            self.sequence,
+            message,
+            run_id=self.run_id,
         )
         self.sequence += 1
         if self.path is not None:
-            with self.path.open("a", encoding="utf-8") as out:
+            with self.path.open("a", encoding="utf-8", errors=JSON_TEXT_ERRORS) as out:
                 out.write(envelope.to_json() + "\n")
         if self.on_provider_event is not None:
             try:
@@ -131,29 +144,24 @@ class ProviderEventLogger:
                 )
 
 
+def clear_stale_artifacts(artifacts_dir: Path) -> None:
+    """Remove files from a previous run that the new run would not overwrite first."""
+    result_file_for(artifacts_dir).unlink(missing_ok=True)
+    provider_events_file_for(artifacts_dir).unlink(missing_ok=True)
+
+
 def collect_side_files(artifacts_dir: Path) -> dict[str, Path]:
     """Return provider-specific side files for manifest discovery."""
     files: dict[str, Path] = {}
     provider_events = artifacts_dir / "provider-events.jsonl"
     if provider_events.exists():
         files["provider_events"] = provider_events
-
-    sdk_dir = artifacts_dir / "sdk"
-    if not sdk_dir.exists():
-        return files
-    for path in sorted(sdk_dir.rglob("*")):
-        if path.is_file():
-            rel = path.relative_to(artifacts_dir).as_posix()
-            files[rel.replace("/", ".")] = path
     return files
 
 
 def write_result_artifact(artifacts_dir: Path, result: RunResult) -> Path:
     path = result_file_for(artifacts_dir)
-    path.write_text(
-        json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomic(path, result.to_dict())
     return path
 
 
@@ -165,9 +173,11 @@ def write_manifest(
     model: str | None,
     status: str,
     trace_file: str | Path | None,
+    ended_reason: str | None = None,
     result_file: str | Path | None = None,
     duration_ms: int | None = None,
     error: str | None = None,
+    error_type: str | None = None,
     extra_files: dict[str, str | Path] | None = None,
 ) -> Path:
     files: dict[str, str] = {}
@@ -185,23 +195,35 @@ def write_manifest(
         "provider": provider,
         "model": model,
         "status": status,
+        "ended_reason": ended_reason,
         "updated_at": utcnow_iso(),
         "duration_ms": duration_ms,
         "error": error,
+        "error_type": error_type,
         "files": files,
     }
     path = manifest_file_for(artifacts_dir)
-    path.write_text(
-        json.dumps(_jsonable(manifest), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomic(path, _jsonable(manifest))
     return path
 
 
-def _relpath(path: str | Path, base: Path) -> str:
-    path = Path(path)
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """Replace ``path`` in one step so readers never see a partial file."""
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        return path.relative_to(base).as_posix()
+        with tmp.open("x", encoding="utf-8", errors=JSON_TEXT_ERRORS) as out:
+            out.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _relpath(path: str | Path, base: Path) -> str:
+    """Relative to the manifest's directory, or absolute when outside it."""
+    path = Path(path).resolve()
+    try:
+        return path.relative_to(base.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
 
