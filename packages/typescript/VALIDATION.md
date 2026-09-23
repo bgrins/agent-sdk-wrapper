@@ -17,6 +17,11 @@ Package checks require `tar` and symlinks on macOS/Linux. `npm test` includes th
 shared conformance cases (`docs/fixtures/CONFORMANCE.md`), run against the bundled
 Claude CLI and `codex exec` with local mock APIs.
 
+The offline workflow runs these checks, Python tests/Ruff and the gVisor suite on
+every push and pull requests targeting `main`, without provider keys. Once it has run on
+`main`, require the `Python offline`, `TypeScript offline` and `gVisor offline`
+checks in the branch protection rule. Live tests remain manual.
+
 ## Containers
 
 ```sh
