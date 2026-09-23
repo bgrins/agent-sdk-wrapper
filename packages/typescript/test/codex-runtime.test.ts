@@ -44,7 +44,10 @@ async function scratch(t: TestContext, steps: Step[]) {
   };
   return { root, home, cwd, env, mock };
 }
-const thread = { skipGitRepoCheck: true } as const;
+const thread = {
+  skipGitRepoCheck: true,
+  sandboxMode: "danger-full-access",
+} as const;
 async function files(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { recursive: true, withFileTypes: true });
   return entries

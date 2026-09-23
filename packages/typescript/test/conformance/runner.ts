@@ -561,7 +561,15 @@ export async function runCase(plan: Plan, mode: Mode): Promise<void> {
       request: { cwd: join(root, "work") },
       ...(provider === "anthropic"
         ? { anthropic: { env: { ...env } } }
-        : { client: { env: { ...env } }, thread: { skipGitRepoCheck: true } }),
+        : {
+            client: { env: { ...env } },
+            thread: {
+              skipGitRepoCheck: true,
+              ...(mode === "offline"
+                ? { sandboxMode: "danger-full-access" }
+                : {}),
+            },
+          }),
     });
     const deadline = AbortSignal.timeout(
       (mode === "live" ? 300_000 : 60_000) * plan.turns.length,
