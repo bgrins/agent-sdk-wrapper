@@ -66,6 +66,7 @@ def codex_agent(
         timeout=60,
         provider_options={
             "api_key": "sk-mock-key",
+            "sandbox": "full-access",
             "config": codex_config(api, *overrides),
             **(provider_options or {}),
         },
@@ -153,6 +154,7 @@ async def test_commands_and_codex_home_never_see_credentials(
     mock_api.steps = [{"shell": "env"}, {"text": "done"}]
     options = dict(options)
     provider_options = {
+        "sandbox": "full-access",
         "config": codex_config(mock_api, *overrides),
         **options.pop("provider_options", {}),
     }
@@ -230,7 +232,7 @@ async def test_mcp_servers_and_wrapper_tools_keep_the_api_key(mock_api, cwd, tmp
         timeout=60,
         mcp_servers=[server],
         tools=[importlib.import_module("key_tools").wrapper_key],
-        provider_options={"config": codex_config(mock_api)},
+        provider_options={"sandbox": "full-access", "config": codex_config(mock_api)},
     )
 
     result = await agent.run("hi")

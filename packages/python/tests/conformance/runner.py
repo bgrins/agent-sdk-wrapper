@@ -339,7 +339,13 @@ async def _mock(
 
 
 async def _runs(case: dict[str, Any], ctx: Context, live: bool) -> None:
-    base = {"provider": ctx.provider, "cwd": "work", "provider_options": {}}
+    base = {
+        "provider": ctx.provider,
+        "cwd": "work",
+        "provider_options": {"sandbox": "full-access"}
+        if ctx.provider == "codex" and not live
+        else {},
+    }
     base = _merged(base, case.get("options", {}))
     agent: Agent | None = None
     runs = [

@@ -21,6 +21,8 @@ The offline workflow runs these checks, Python tests/Ruff and the gVisor suite o
 every push and pull requests targeting `main`, without provider keys. Once it has run on
 `main`, require the `Python offline`, `TypeScript offline` and `gVisor offline`
 checks in the branch protection rule. Live tests remain manual.
+Offline Codex shell fixtures use unsandboxed modes with mock endpoints and scratch
+credentials so they run where Linux user namespaces are unavailable.
 
 ## Containers
 
