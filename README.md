@@ -1,8 +1,9 @@
 # agent-sdk-wrapper
 
-Native Python and TypeScript interfaces for the **Claude Agent SDK** and **Codex SDK**.
-The SDKs manage tools, sessions and agent loops. The wrapper adds provider selection,
-validation and normalized events/results. Install either language independently.
+Python and TypeScript interfaces for the **Claude Agent SDK** and **Codex SDK**.
+The SDKs own agent loops, tools, sessions and API retries. This wrapper owns provider
+selection, request validation, credential policy and normalized runs, events and traces.
+It does not make provider-specific tools or options interchangeable.
 
 | Package | Guide |
 |---|---|
@@ -13,7 +14,9 @@ Both expose `Agent.run()` and `Agent.stream()`. Use provider `anthropic` or `cod
 (an alias for `openai`). Unsupported settings raise `ConfigError`. Runs use API or
 cloud-provider credentials and never a runtime's stored login unless Codex
 `cli_login="require"` asks for it.
-See [API differences](packages/typescript/PARITY.md) and [SDK versions](docs/sdk-versions.md).
+Python supports callable tools, MCP and structured output; TypeScript intentionally
+supports a smaller run/stream/resume API. See [API limits](packages/typescript/PARITY.md)
+and [SDK versions](docs/sdk-versions.md).
 
 ## Develop
 

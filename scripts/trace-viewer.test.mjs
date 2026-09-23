@@ -289,16 +289,19 @@ test("past the directory cap the scan skips the oldest directories and says so",
   await writeFile(join(newest, "trace.jsonl"), "{}\n");
   const later = new Date(Date.now() + 60_000);
   await utimes(newest, later, later);
-  // List the newest directory last, as readdir order sometimes does.
-  const readdir = fs.readdir;
-  const mocked = t.mock.method(fs, "readdir", async (path, ...args) => {
-    const entries = await readdir(path, ...args);
-    return path === root
-      ? [
-          ...entries.filter((entry) => entry.name !== "newest"),
-          ...entries.filter((entry) => entry.name === "newest"),
-        ]
-      : entries;
+  // List the newest directory last, as directory iteration sometimes does.
+  const opendir = fs.opendir;
+  const mocked = t.mock.method(fs, "opendir", async (path, ...args) => {
+    const handle = await opendir(path, ...args);
+    if (path !== root) return handle;
+    const entries = [];
+    for await (const entry of handle) entries.push(entry);
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield* entries.filter((entry) => entry.name !== "newest");
+        yield* entries.filter((entry) => entry.name === "newest");
+      },
+    };
   });
   syncBuiltinESMExports();
   t.after(() => {
@@ -372,7 +375,7 @@ test("concurrent index requests share one scan that reads a few directories at a
   const base = await listen(t, root, {}, (directory, options) =>
     createTraceServer(directory, options).on("request", () => arrived++),
   );
-  const readdir = fs.readdir;
+  const opendir = fs.opendir;
   let rootReads = 0;
   let reading = 0;
   let most = 0;
@@ -380,14 +383,14 @@ test("concurrent index requests share one scan that reads a few directories at a
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  const mocked = t.mock.method(fs, "readdir", async (path, ...args) => {
+  const mocked = t.mock.method(fs, "opendir", async (path, ...args) => {
     if (path === root) {
       rootReads++;
       await gate;
     }
     most = Math.max(most, ++reading);
     try {
-      return await readdir(path, ...args);
+      return await opendir(path, ...args);
     } finally {
       reading--;
     }
@@ -404,6 +407,48 @@ test("concurrent index requests share one scan that reads a few directories at a
     assert.equal(response.status, 200);
   assert.equal(rootReads, 1);
   assert.ok(most > 1 && most < jobs, `${most} directories read at once`);
+});
+
+test("a crowded run directory scans and retains files with bounded memory", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "run-file-cap-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const count = MAX_RUNS + 120;
+  for (let index = 0; index < count; index += 100)
+    await Promise.all(
+      Array.from({ length: Math.min(100, count - index) }, async (_, offset) => {
+        const number = index + offset;
+        const trace = join(root, `run-${String(number).padStart(4, "0")}.trace.jsonl`);
+        const stamp = new Date(Date.UTC(2026, 0, 1) + number * 60_000);
+        await writeFile(trace, "{}\n");
+        await utimes(trace, stamp, stamp);
+      }),
+    );
+  const lstat = fs.lstat;
+  let active = 0;
+  let most = 0;
+  const mocked = t.mock.method(fs, "lstat", async (path, ...args) => {
+    if (!path.endsWith(".trace.jsonl")) return lstat(path, ...args);
+    most = Math.max(most, ++active);
+    try {
+      await setImmediate();
+      return await lstat(path, ...args);
+    } finally {
+      active--;
+    }
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const base = await listen(t, root, { depth: 0 });
+  const response = await get(base, "/api/runs");
+  const runs = JSON.parse(response.body);
+  assert.equal(response.headers["x-runs-found"], String(count));
+  assert.equal(runs.length, MAX_RUNS);
+  assert.ok(most > 1 && most <= 16, `${most} files inspected at once`);
+  assert.equal(runs[0].label, `run-${String(count - 1).padStart(4, "0")}.trace.jsonl`);
+  assert.equal(runs.at(-1).label, "run-0120.trace.jsonl");
 });
 
 // freebsd stands in for platforms with neither O_NOFOLLOW_ANY nor /proc.

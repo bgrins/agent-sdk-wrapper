@@ -88,25 +88,18 @@ Native options use `providerOptions.provider: "anthropic"` or `"openai"`:
 | Codex `client` | `apiKey`, `baseUrl`, `env`, `codexPathOverride`, `config` |
 | Codex `thread` | `sandboxMode`, `skipGitRepoCheck`, `networkAccessEnabled`, `webSearchMode`, `additionalDirectories` (`codex exec` always uses approval policy `never`) |
 
-Claude permission bypass requires `allowDangerouslySkipPermissions: true`.
-`allowedTools` grants approval, not a hard filter. Native `env` replaces inheritance
-for both providers; without it, the child gets `process.env`. Claude also receives
-`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless `env` sets it and
-`CLAUDE_CODE_EFFORT_LEVEL` set to `effort` (blank without it) and a blank
-`CLAUDE_CODE_SUBAGENT_MODEL` unless `env` sets them; claude.ai login tokens are removed,
-and a login token in `env` is rejected. Claude server-tool results (web
-search, advisor) are `tool_result` events. Codex drops `CODEX_ACCESS_TOKEN` and
-`OPENAI_API_KEY` from the child (the key reaches it only as `CODEX_API_KEY`, which model
-commands see blank; `require` drops both API keys too) and disables shell snapshots, which
-would copy the env to `CODEX_HOME`. Codex `error` notices are warnings, emitted with the
-next event or before the run's final error; the shell tool is named `command`,
-web-search calls are emitted when the search completes, and todo lists appear as thinking.
-Host tool callbacks are unsupported. See [API limits](PARITY.md).
+Claude permission bypass requires `allowDangerouslySkipPermissions: true`;
+`allowedTools` grants approval, not a hard filter. Native `env` replaces inheritance;
+otherwise the child gets `process.env`. Claude pins effort, disables background tasks,
+blanks the subagent model and strips claude.ai login tokens by default; explicit login
+tokens are rejected. Codex drops `CODEX_ACCESS_TOKEN`, keeps its API key out of model
+commands and disables shell snapshots. Host tool callbacks are unsupported.
+See [API limits](PARITY.md).
 
 Codex `client.config` takes Codex config tables, which the SDK sends as `--config`
-entries. The caller's keys win over the wrapper's `model_reasoning_summary: "auto"` and
-`features.shell_snapshot: false`; login-store keys, and any key that would replace the blank
-`CODEX_API_KEY` or `OPENAI_API_KEY` entries in `shell_environment_policy.set`, fail.
+entries. The caller's keys win over `model_reasoning_summary: "auto"`;
+`features.shell_snapshot` stays `false`. Login-store keys and keys that would replace
+the blank `CODEX_API_KEY` or `OPENAI_API_KEY` entries in `shell_environment_policy.set` fail.
 
 For a run without a shell, Claude takes `options.tools: []`, which leaves the model no
 tools. Codex always offers `apply_patch` and `request_user_input`. Its feature flags remove

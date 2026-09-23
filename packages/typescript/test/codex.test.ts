@@ -175,13 +175,13 @@ test("Codex cliLogin deny keeps logins and stored credentials out of the child",
   assert.equal(clients[0]?.apiKey, "k");
   assert.deepEqual(clients[0]?.env, { HOME: "/h" });
 });
-test("Codex client.config merges over the defaults but cannot unhide API keys", async () => {
+test("Codex client.config merges safe options but cannot unhide API keys", async () => {
   const { agent, clients } = harness([completed], {
     providerOptions: {
       provider: "openai",
       client: {
         config: {
-          features: { shell_tool: false, shell_snapshot: true },
+          features: { shell_tool: false },
           shell_environment_policy: { inherit: "core" },
         },
       },
@@ -190,7 +190,7 @@ test("Codex client.config merges over the defaults but cannot unhide API keys", 
   await agent.run("config");
   assert.deepEqual(clients[0]?.config, {
     model_reasoning_summary: "auto",
-    features: { shell_snapshot: true, shell_tool: false },
+    features: { shell_snapshot: false, shell_tool: false },
     shell_environment_policy: { inherit: "core" },
   });
   // Sent after config, so it survives a caller table that replaces the policy.
@@ -202,6 +202,9 @@ test("Codex client.config merges over the defaults but cannot unhide API keys", 
     { shell_environment_policy: { set: {} } },
     { "shell_environment_policy.set": { OPENAI_API_KEY: "k" } },
     { cli_auth_credentials_store: "file" },
+    { features: { shell_snapshot: true } },
+    { "features.shell_snapshot": false },
+    { features: "shell_snapshot=true" },
     { model: null },
   ])
     assert.throws(

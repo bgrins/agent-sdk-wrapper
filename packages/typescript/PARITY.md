@@ -1,8 +1,8 @@
-# API differences
+# API scope and limits
 
 Both packages share run/stream, provider resolution, session resume, credential
-policy, the error vocabulary and normalized JSON envelopes. TypeScript implements
-a subset of Python's API.
+policy, error types and normalized JSON envelopes. TypeScript is intentionally a
+subset of Python; native tools, options and permission policies are not a shared API.
 
 | Area | Python | TypeScript |
 |---|---|---|
@@ -48,7 +48,7 @@ adapter's structured native signals, and apply it to raised exceptions too, else
 replay.
 
 SDK symbols and internal client/thread handles are not re-exported in either package.
-Unsupported options fail validation; native permission policies are not interchangeable.
+Unsupported options fail validation.
 
 ## Error types
 

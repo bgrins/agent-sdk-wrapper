@@ -75,6 +75,7 @@ _COMMAND_KEY_POLICY_KEYS = frozenset(
         *(f"shell_environment_policy.set.{name}" for name in _API_KEY_ENVS),
     }
 )
+_SNAPSHOT_OVERRIDE_KEYS = frozenset({"features", "features.shell_snapshot"})
 _CONFIG_KEY_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_REASONING_SUMMARY = "auto"
@@ -125,6 +126,16 @@ class OpenAIProvider(ProviderAdapter):
         _enum_value(ApprovalMode, self._approval_mode)
         _enum_value(Sandbox, self._sandbox)
         caller_keys = _override_keys(self._config)
+        thread_config_keys = self._native_config_keys(req)
+        snapshot_keys = sorted(
+            (caller_keys & _SNAPSHOT_OVERRIDE_KEYS)
+            | (thread_config_keys & {"features.shell_snapshot"})
+        )
+        if snapshot_keys or any(
+            "features" in config and not isinstance(config["features"], dict)
+            for config in self._native_configs(req)
+        ):
+            raise ConfigError("Codex config cannot override features.shell_snapshot=False")
         controlled = sorted(caller_keys & _CREDENTIAL_OVERRIDE_KEYS)
         if controlled:
             raise ConfigError(
@@ -133,7 +144,6 @@ class OpenAIProvider(ProviderAdapter):
             )
         if req.web_tools is not None and caller_keys & _WEB_SEARCH_OVERRIDE_KEYS:
             raise ConfigError("config_overrides for web search conflict with web_tools")
-        thread_config_keys = self._native_config_keys(req)
         exposed = sorted((caller_keys | thread_config_keys) & _COMMAND_KEY_POLICY_KEYS)
         if exposed:
             raise ConfigError(

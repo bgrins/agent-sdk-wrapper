@@ -1831,6 +1831,23 @@ def test_codex_config_cannot_replace_the_policy_that_hides_keys_from_commands(
             provider.validate_request(req)
 
 
+@pytest.mark.parametrize(
+    "provider_options",
+    [
+        {"config": {"config_overrides": ("features.shell_snapshot=true",)}},
+        {"config": {"config_overrides": ("features={shell_snapshot=true}",)}},
+        {"thread_options": {"config": {"features": {"shell_snapshot": True}}}},
+        {"thread_options": {"config": {"features.shell_snapshot": True}}},
+        {"thread_options": {"config": {"features": "shell_snapshot=true"}}},
+    ],
+)
+def test_codex_rejects_shell_snapshot_overrides_before_launch(provider_options):
+    with pytest.raises(ConfigError, match="features.shell_snapshot"):
+        OpenAIProvider(**provider_options).validate_request(
+            RunRequest(provider="openai", prompt="x")
+        )
+
+
 def test_codex_recursive_output_schemas_terminate():
     from agent_sdk_wrapper.providers.openai_provider import _codex_output_schema
 

@@ -63,6 +63,10 @@ export class CodexAdapter implements ProviderAdapter {
       "openai.client",
     );
     for (const path of configPaths(native?.client?.config, "")) {
+      if (path === "features" || path === "features.shell_snapshot")
+        throw new ConfigError(
+          "openai.client.config cannot override features.shell_snapshot: false",
+        );
       if (
         credentialKeys.some((key) => path === key || path.startsWith(`${key}.`))
       )

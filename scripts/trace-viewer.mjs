@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import {
   lstat,
   open,
-  readdir,
+  opendir,
   readFile,
   readlink,
   realpath,
@@ -23,83 +23,118 @@ export const MAX_DIRECTORIES = 5000;
 export const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const PARALLEL_READS = 16;
 
+function keepNewest(items, item, limit, key) {
+  if (!limit || (items.length === limit && item[key] <= items.at(-1)[key]))
+    return;
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (items[middle][key] >= item[key]) low = middle + 1;
+    else high = middle;
+  }
+  items.splice(low, 0, item);
+  if (items.length > limit) items.pop();
+}
+
 async function listRuns(directory, depth) {
   // Read every directory within the depth limit, then keep the newest runs, so
   // neither shallow siblings nor deep runs can crowd out newer ones. Each depth
   // is read most recently modified first, so the directory cap skips the oldest.
-  const runs = [];
+  const runs = { items: [], found: 0 };
   let scanned = 0;
   let capped = false;
-  for (let level = [""]; level.length && !capped; ) {
-    const next = [];
+  for (let level = [""]; level.length; ) {
+    if (scanned === MAX_DIRECTORIES) {
+      capped = true;
+      break;
+    }
+    const next = { items: [], found: 0 };
     const batch = level.slice(0, MAX_DIRECTORIES - scanned);
-    capped = batch.length < level.length;
+    capped ||= batch.length < level.length;
     scanned += batch.length;
     let index = 0;
     const worker = async () => {
       while (index < batch.length)
-        await readRunDirectory(directory, batch[index++], depth, runs, next);
+        await readRunDirectory(
+          directory,
+          batch[index++],
+          depth,
+          runs,
+          next,
+          MAX_DIRECTORIES - scanned,
+        );
     };
     await Promise.all(Array.from({ length: PARALLEL_READS }, worker));
-    level = next
-      .sort((a, b) => b.modified - a.modified)
-      .map((entry) => entry.path);
+    if (next.found > next.items.length) capped = true;
+    level = next.items.map((entry) => entry.path);
   }
-  runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   return {
-    runs: runs.slice(0, MAX_RUNS),
-    found: runs.length,
+    runs: runs.items,
+    found: runs.found,
     scanned: capped ? scanned : null,
   };
 }
 
 // Adds a directory's runs to `runs` and its subdirectories to `next`.
-async function readRunDirectory(directory, relative, depth, runs, next) {
-  let entries;
+async function readRunDirectory(directory, relative, depth, runs, next, remaining) {
+  let handle;
   try {
-    entries = await readdir(resolve(directory, relative), {
-      withFileTypes: true,
-    });
+    handle = await opendir(resolve(directory, relative));
   } catch (error) {
     // An unreadable or replaced directory must not hide the other runs.
     if (!relative && error.code !== "ENOENT") throw error;
     return;
   }
   const prefix = relative ? `${relative}/` : "";
-  const hasManifest = entries.some(
-    (entry) => entry.name === "manifest.json" && entry.isFile(),
+  const manifest = await lstat(resolve(directory, prefix, "manifest.json")).catch(
+    () => null,
   );
-  const traceCount = entries.filter(
-    (entry) =>
+  const hasManifest = manifest?.isFile() ?? false;
+  const descend = depth > 0 && (!relative || relative.split("/").length < depth);
+  let traceCount = 0;
+  let traceName;
+  let pending = [];
+  for await (const entry of handle) {
+    if (entry.name.startsWith(".")) continue;
+    const isTrace =
       entry.isFile() &&
-      (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl")),
-  ).length;
-  const descend =
-    depth > 0 && (!relative || relative.split("/").length < depth);
-  await Promise.all(
-    entries.map(async (entry) => {
-      if (entry.name.startsWith(".")) return;
+      (entry.name === "trace.jsonl" || entry.name.endsWith(".trace.jsonl"));
+    if (isTrace) {
+      traceCount++;
+      traceName = entry.name;
+    }
+    const isRun = entry.isFile() && (hasManifest ? entry.name === "manifest.json" : isTrace);
+    if (!isRun && !(descend && entry.isDirectory())) continue;
+    pending.push((async () => {
       const path = prefix + entry.name;
-      const isRun =
-        entry.isFile() &&
-        (hasManifest
-          ? entry.name === "manifest.json"
-          : entry.name === "trace.jsonl" ||
-            entry.name.endsWith(".trace.jsonl"));
-      if (!isRun && !(descend && entry.isDirectory())) return;
       const info = await lstat(resolve(directory, path)).catch(() => null);
-      if (info?.isDirectory() && !isRun)
-        return next.push({ path, modified: info.mtimeMs });
+      if (info?.isDirectory() && !isRun) {
+        next.found++;
+        keepNewest(next.items, { path, modified: info.mtimeMs }, remaining, "modified");
+        return;
+      }
       if (!isRun || !info?.isFile() || info.nlink !== 1) return;
-      runs.push({
-        label: !hasManifest && traceCount > 1 ? path : relative || entry.name,
+      runs.found++;
+      keepNewest(runs.items, {
+        label: hasManifest ? relative || entry.name : path,
         trace: hasManifest ? null : `/results/${urlPath(path)}`,
         manifest: hasManifest ? `/results/${urlPath(path)}` : null,
         updated_at: info.mtime.toISOString(),
         too_large: info.size > MAX_FILE_BYTES,
-      });
-    }),
-  );
+      }, MAX_RUNS, "updated_at");
+    })());
+    if (pending.length === PARALLEL_READS) {
+      await Promise.all(pending);
+      pending = [];
+    }
+  }
+  await Promise.all(pending);
+  if (!hasManifest && traceCount === 1) {
+    const trace = `/results/${urlPath(prefix + traceName)}`;
+    const run = runs.items.find((item) => item.trace === trace);
+    if (run) run.label = relative || traceName;
+  }
 }
 
 const inlineHashes = (html, tag) =>

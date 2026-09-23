@@ -87,26 +87,19 @@ arguments with the same schema, pass a `**kwargs` tool the arguments it doesn't 
 return a raised exception to the model as `Error: <message>` (the type name when the
 message is empty); positional-only parameters are rejected.
 
-The Claude child env sets `CLAUDE_CODE_EFFORT_LEVEL` to `effort` (blank without it; the
-CLI ranks it above `--effort`), sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` unless
-`env` sets it, blanks `CLAUDE_CODE_SUBAGENT_MODEL` unless `env` sets it (so subagents
-inherit the run's model), and blanks claude.ai login tokens; a login token in `env` is
-rejected. MCP servers without `enabled_tools` have all their tools pre-approved.
-Claude `extra_options` must be Claude Agent SDK options, and cannot set a key a
-first-class option sets, nor `env` or `cli_path` (use `provider_options`); `tools` counts as set whenever `builtin_tools`,
-`web_tools=True` or `subagents` is. Thinking defaults to adaptive with summarized display
-unless `extra_options` sets `thinking` or `max_thinking_tokens`. Codex drops
-`CODEX_ACCESS_TOKEN` from the runtime env, since it would replace the stored login. Model
-commands get blank `OPENAI_API_KEY` and `CODEX_API_KEY` through
-`shell_environment_policy.set`, while MCP servers, tools and model providers keep them.
-Shell snapshots, which would copy the env to `CODEX_HOME`, are disabled. Codex
-`env_passthrough` names are read from the run env. Codex `sandbox` applies per thread;
-`thread_options`/`turn_options` override first-class values, start-only thread options
-are dropped on resume, and native option values are checked against the SDK's params
-before launch. Caller `config_overrides` take precedence, except login-store keys, config
-that replaces those `shell_environment_policy.set` entries and, with `web_tools`,
-web-search keys, which fail. A stopped Codex run closes the app-server's stdin and gives it
-up to 2 s to exit, which stops its commands.
+Claude pins the child effort, disables background tasks and blanks subagent model and
+claude.ai login tokens by default; an explicit login token in `env` is rejected.
+MCP servers without `enabled_tools` have all tools pre-approved. Claude
+`extra_options` accepts SDK options except keys controlled by first-class options,
+`env` and `cli_path`. Thinking defaults to adaptive with summarized display.
+
+Codex drops `CODEX_ACCESS_TOKEN`, blanks API keys in model commands (not MCP servers,
+tools or model providers) and disables shell snapshots. Its sandbox applies per thread;
+native thread/turn options are validated, and start-only options are dropped on resume.
+Caller `config_overrides` take precedence except login-store keys,
+`features.shell_snapshot`, replacements for `shell_environment_policy.set`, and
+web-search keys when `web_tools` is set. Stopping a run closes the app-server's stdin
+to stop its commands.
 
 For a run without a shell, Claude takes `builtin_tools="none"`, which leaves the model no
 tools. Codex always offers `apply_patch` and `request_user_input`. Its feature flags remove
