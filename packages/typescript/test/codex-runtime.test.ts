@@ -63,6 +63,33 @@ const alive = (pid: number) => {
   }
 };
 
+test("Codex sends the output schema through the bundled SDK", async (t) => {
+  const outputSchema = {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"],
+    additionalProperties: false,
+  };
+  const { cwd, env, mock } = await scratch(t, [{ text: '{"answer":"done"}' }]);
+  const run = await new Agent({
+    provider: "codex",
+    model: "gpt-5.4",
+    cwd,
+    providerOptions: {
+      provider: "openai",
+      client: { env: { ...env, OPENAI_API_KEY: "sk-mock" } },
+      thread,
+    },
+  }).run({ prompt: "Return an answer.", outputSchema });
+  assert.equal(run.status, "success", run.error ?? "");
+  assert.deepEqual(run.structured_output, { answer: "done" });
+  const body = mock.requests[0]?.body as {
+    text?: { format?: Record<string, unknown> };
+  };
+  assert.equal(body.text?.format?.type, "json_schema");
+  assert.deepEqual(body.text?.format?.schema, outputSchema);
+});
+
 test("Codex runs keep the API key out of CODEX_HOME and shell commands", async (t) => {
   const key = "sk-wrapper-test-SECRET";
   // A shell call can snapshot the login shell's environment; printing it would copy the

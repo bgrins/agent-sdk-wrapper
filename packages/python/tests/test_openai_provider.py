@@ -1002,13 +1002,6 @@ def test_codex_subagent_config_file_is_valid_toml(tmp_path):
         assert tomllib.loads(f"x = {description}")["x"] == TRICKY_TEXT
 
 
-def test_codex_rejects_builtin_tools():
-    req = RunRequest(provider="openai", prompt="ignored", builtin_tools="none")
-
-    with pytest.raises(ConfigError, match="builtin_tools"):
-        _validate_supported(req)
-
-
 def test_codex_web_tools_coexists_with_tools(tmp_path):
     req = RunRequest(
         provider="openai",

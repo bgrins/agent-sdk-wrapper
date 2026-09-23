@@ -29,11 +29,7 @@ from agent_sdk_wrapper import (
     Usage,
     install_fake_providers,
 )
-from agent_sdk_wrapper.request import (
-    normalize_builtin_tools,
-    normalize_effort_for_provider,
-    parse_model_spec,
-)
+from agent_sdk_wrapper.request import normalize_effort_for_provider, parse_model_spec
 
 
 def test_token_usage_addition():
@@ -41,16 +37,6 @@ def test_token_usage_addition():
     b = TokenUsage(requests=2, input_tokens=2, output_tokens=3, total_tokens=5)
     s = a + b
     assert (s.requests, s.input_tokens, s.output_tokens, s.total_tokens) == (3, 12, 8, 20)
-
-
-def test_normalize_builtin_tools():
-    assert normalize_builtin_tools(None) is None
-    assert normalize_builtin_tools("none") == "none"
-    assert normalize_builtin_tools([]) == "none"
-    assert normalize_builtin_tools(("Read", "Grep")) == ["Read", "Grep"]
-
-    with pytest.raises(ConfigError, match="must be 'none'"):
-        normalize_builtin_tools("Read")
 
 
 def test_normalize_effort_for_provider():
@@ -307,20 +293,19 @@ def test_check_runtime_uses_provider_adapter(monkeypatch):
 
 
 def test_check_runtime_validates_codex_request_before_runtime_check():
-    agent = Agent(provider="openai", builtin_tools="none")
+    agent = Agent(provider="openai", extra_options={"not_an_option": True})
 
-    with pytest.raises(ConfigError, match="builtin_tools"):
+    with pytest.raises(ConfigError, match="not_an_option"):
         agent.check_runtime()
 
 
 def test_check_runtime_validates_anthropic_request_before_runtime_check():
     agent = Agent(
         provider="anthropic",
-        builtin_tools="none",
-        extra_options={"tools": []},
+        extra_options={"not_an_option": True},
     )
 
-    with pytest.raises(ConfigError, match="tools"):
+    with pytest.raises(ConfigError, match="not_an_option"):
         agent.check_runtime()
 
 
@@ -941,11 +926,11 @@ def test_stream_close_closes_provider_iterator(monkeypatch):
 
 def test_stream_raises_config_error_before_iterating(tmp_path):
     trace_file = tmp_path / "trace.jsonl"
-    agent = Agent(provider="openai", builtin_tools="none", trace_file=trace_file)
+    agent = Agent(provider="openai", extra_options={"not_an_option": True}, trace_file=trace_file)
 
-    with pytest.raises(ConfigError, match="builtin_tools"):
+    with pytest.raises(ConfigError, match="not_an_option"):
         agent.stream("hi")
-    with pytest.raises(ConfigError, match="builtin_tools"):
+    with pytest.raises(ConfigError, match="not_an_option"):
         agent.run_sync("hi")
     assert not trace_file.exists()
 
@@ -1241,5 +1226,4 @@ def test_artifact_json_files_are_replaced_atomically(tmp_path):
 
     assert torn_reads == []
     assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
-
 

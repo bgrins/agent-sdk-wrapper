@@ -61,7 +61,12 @@
       "propertyNames": { "pattern": "^[a-z_]+$" },
       "properties": {
         "tools": { "type": "array", "items": { "enum": ["add", "shout"] } },
-        "output_schema": { "enum": ["Weather"] },
+        "output_schema": {
+          "oneOf": [
+            { "enum": ["Weather"] },
+            { "type": "object", "required": ["type"], "properties": { "type": { "const": "object" } } }
+          ]
+        },
         "mcp_servers": {
           "type": "array",
           "items": {

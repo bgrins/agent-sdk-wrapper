@@ -94,14 +94,16 @@ def test_anthropic_options_skip_disabled_mcp_servers():
     assert options.allowed_tools == []
 
 
-def test_anthropic_options_map_builtin_tools():
+def test_anthropic_options_accept_native_tools():
     none_options = AnthropicProvider()._build_options(
-        RunRequest(provider="anthropic", prompt="ignored", builtin_tools="none")
+        RunRequest(provider="anthropic", prompt="ignored", extra_options={"tools": []})
     )
     assert none_options.tools == []
 
     allowlist_options = AnthropicProvider()._build_options(
-        RunRequest(provider="anthropic", prompt="ignored", builtin_tools=["Read", "Grep"])
+        RunRequest(
+            provider="anthropic", prompt="ignored", extra_options={"tools": ["Read", "Grep"]}
+        )
     )
     assert allowlist_options.tools == ["Read", "Grep"]
 
@@ -189,7 +191,6 @@ def test_every_native_option_a_first_class_field_sets_is_owned(tmp_path):
         "max_turns": 2,
         "effort": "low",
         "cwd": tmp_path,
-        "builtin_tools": ["Read"],
         "web_tools": True,
         "allowed_tools": ["Read"],
         "disallowed_tools": ["Bash"],
@@ -773,10 +774,8 @@ def test_anthropic_options_leave_buffer_headroom_unless_overridden():
         ),
         ({"extra_options": {"env": {}}}, "env"),
         ({"extra_options": {"cli_path": "/opt/claude"}}, "cli_path"),
-        ({"web_tools": True, "builtin_tools": "none"}, "web_tools"),
         ({"web_tools": True, "disallowed_tools": ["WebFetch"]}, "WebFetch"),
         # A native tools list would drop the tools these options need.
-        ({"builtin_tools": "none", "extra_options": {"tools": []}}, "tools"),
         ({"web_tools": True, "extra_options": {"tools": ["Read"]}}, "tools"),
         (
             {
@@ -794,19 +793,18 @@ def test_anthropic_rejects_options_the_sdk_would_ignore_or_override(request_kwar
         )
 
 
-def test_anthropic_web_tools_true_and_subagents_extend_a_builtin_allowlist():
+def test_anthropic_web_tools_true_uses_native_preset_with_subagents():
     from agent_sdk_wrapper import SubagentDef
 
     options = AnthropicProvider()._build_options(
         RunRequest(
             provider="anthropic",
             prompt="x",
-            builtin_tools=["Read"],
             web_tools=True,
             subagents={"helper": SubagentDef(description="d", prompt="p")},
         )
     )
-    assert options.tools == ["Read", "WebSearch", "WebFetch", "Agent"]
+    assert options.tools is None
     assert "Agent" in options.allowed_tools
 
 

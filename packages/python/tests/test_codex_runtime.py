@@ -286,6 +286,28 @@ async def test_structured_output_is_sent_in_strict_form(mock_api, cwd):
     assert "default" not in json.dumps(schema)
 
 
+async def test_schema_free_exploration_then_structured_extraction(mock_api, cwd):
+    mock_api.steps = [
+        {"text": "A welcome note should greet the teammate and offer help."},
+        {"text": '{"note":"Welcome! Let us know how we can help."}'},
+    ]
+
+    class Note(BaseModel):
+        note: str
+
+    agent = codex_agent(mock_api, cwd, continue_session=True)
+    exploration = await agent.run("Plan a welcome note.")
+    extraction = await agent.run("Return the note as structured output.", output_schema=Note)
+
+    assert exploration.ok, exploration.error
+    assert extraction.ok, extraction.error
+    assert extraction.structured_output == Note(note="Welcome! Let us know how we can help.")
+    assert exploration.session_id == extraction.session_id
+    assert len(mock_api.requests) == 2
+    assert "schema" not in mock_api.requests[0]["body"].get("text", {}).get("format", {})
+    assert mock_api.requests[1]["body"]["text"]["format"]["type"] == "json_schema"
+
+
 ECHO_MCP_SERVER = '''
 import os
 import sys

@@ -221,6 +221,7 @@ export class CodexAdapter implements ProviderAdapter {
     let iterator: AsyncIterator<ThreadEvent> | undefined;
     let session = req.sessionId;
     let sawReasoning = false;
+    let finalText: string | undefined;
     const started = new Set<string>();
     const completed = new Set<string>();
     // A fatal failure repeats its error notice in turn.failed; hold the notice
@@ -243,6 +244,7 @@ export class CodexAdapter implements ProviderAdapter {
         : client.startThread(opts);
       const { events } = await thread.runStreamed(req.prompt, {
         signal: abort.signal,
+        outputSchema: req.outputSchema,
       });
       const source = events[Symbol.asyncIterator]();
       iterator = source;
@@ -309,6 +311,32 @@ export class CodexAdapter implements ProviderAdapter {
           if (usage.reasoning_output_tokens > 0 && !sawReasoning)
             yield { type: "thinking", text: "" };
           yield { type: "usage", usage, ...raw };
+          if (req.outputSchema) {
+            let value: unknown;
+            try {
+              value = JSON.parse(finalText ?? "");
+            } catch {
+              yield {
+                type: "error",
+                message: "Codex returned no valid structured output",
+                error_type: "structured_output_failed",
+              };
+              return;
+            }
+            if (
+              typeof value !== "object" ||
+              value === null ||
+              Array.isArray(value)
+            ) {
+              yield {
+                type: "error",
+                message: "Codex returned non-object structured output",
+                error_type: "structured_output_failed",
+              };
+              return;
+            }
+            yield { type: "structured_output", value };
+          }
           return;
         } else if (event.type === "turn.failed") {
           yield {
@@ -336,9 +364,10 @@ export class CodexAdapter implements ProviderAdapter {
           if (event.type !== "item.completed" || completed.has(item.id))
             continue;
           completed.add(item.id);
-          if (item.type === "agent_message")
+          if (item.type === "agent_message") {
+            finalText = item.text;
             yield { type: "text", text: item.text, ...raw };
-          else if (item.type === "reasoning") {
+          } else if (item.type === "reasoning") {
             sawReasoning = true;
             yield { type: "thinking", text: item.text, ...raw };
           } else if (item.type === "todo_list")

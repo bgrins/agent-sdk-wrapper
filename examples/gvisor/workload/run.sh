@@ -14,7 +14,7 @@ esac
 export PROVIDER=${PROVIDER:-anthropic}
 case $PROVIDER in
   anthropic) key=${ANTHROPIC_API_KEY:-}; model=claude-haiku-4-5 ;;
-  codex|openai) export PROVIDER=openai; key=${OPENAI_API_KEY:-}; model=gpt-5.6-luna ;;
+  codex|openai) export PROVIDER=openai; key=${OPENAI_API_KEY:-}; model=gpt-6-luna ;;
   *) fail 'Use PROVIDER=anthropic or codex' ;;
 esac
 [[ -n $key ]] || fail "Missing $PROVIDER API key"

@@ -91,7 +91,7 @@ services:
     <<: *agent-sdk-wrapper-python
     command: >
       sh -lc 'set -e;
-      for example in run_basic stream structured_output custom_tools subagent auditor_style; do
+      for example in run_basic stream structured_output custom_tools subagent auditor_style agent_flow; do
       echo "== examples/$${example}.py ==";
       uv run --no-sync python "examples/$${example}.py";
       done'
@@ -123,6 +123,10 @@ services:
   python-example-auditor-style:
     <<: *agent-sdk-wrapper-python
     command: uv run --no-sync python examples/auditor_style.py
+
+  python-example-agent-flow:
+    <<: *agent-sdk-wrapper-python
+    command: uv run --no-sync python examples/agent_flow.py
 
 volumes:
   uv-cache:

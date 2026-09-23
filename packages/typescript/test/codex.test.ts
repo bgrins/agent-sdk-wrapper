@@ -77,6 +77,75 @@ function harness(
     closed: () => closed,
   };
 }
+const outputSchema = {
+  type: "object",
+  properties: { answer: { type: "string" } },
+  required: ["answer"],
+  additionalProperties: false,
+};
+test("Codex uses the last completed message for structured output", async () => {
+  const { agent, turns } = harness([
+    {
+      type: "item.completed",
+      item: {
+        type: "agent_message",
+        id: "progress",
+        text: '{"answer":"starting"}',
+      },
+    },
+    {
+      type: "item.completed",
+      item: { type: "agent_message", id: "final", text: '{"answer":"done"}' },
+    },
+    completed,
+  ]);
+  const run = await agent.run({ prompt: "question", outputSchema });
+  assert.equal(run.status, "success");
+  assert.deepEqual(turns[0]?.outputSchema, outputSchema);
+  assert.equal(run.final_text, '{"answer":"done"}');
+  assert.deepEqual(run.structured_output, { answer: "done" });
+  assert.deepEqual(
+    run.events
+      .filter(({ event }) => event.type === "structured_output")
+      .map(({ event }) => event),
+    [{ type: "structured_output", value: { answer: "done" } }],
+  );
+});
+test("Codex rejects missing or invalid final structured output", async () => {
+  for (const messages of [
+    [completed],
+    [
+      {
+        type: "item.completed",
+        item: { type: "agent_message", id: "final", text: "not JSON" },
+      },
+      completed,
+    ],
+    [
+      {
+        type: "item.completed",
+        item: { type: "agent_message", id: "final", text: "[]" },
+      },
+      completed,
+    ],
+  ] as ThreadEvent[][]) {
+    const { agent } = harness(messages);
+    const run = await agent.run({ prompt: "question", outputSchema });
+    assert.equal(run.status, "failure");
+    assert.equal(run.error_type, "structured_output_failed");
+    assert.equal(run.structured_output, null);
+  }
+  const { agent } = harness([
+    {
+      type: "item.completed",
+      item: { type: "agent_message", id: "final", text: '{"answer":"done"}' },
+    },
+    { type: "turn.failed", error: { message: "Turn failed" } },
+  ]);
+  const run = await agent.run({ prompt: "question", outputSchema });
+  assert.equal(run.status, "failure");
+  assert.equal(run.structured_output, null);
+});
 test("Codex maps final items once, tools and inclusive token totals", async () => {
   const item = {
     type: "command_execution",

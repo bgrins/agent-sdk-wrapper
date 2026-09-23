@@ -56,7 +56,7 @@ AGENT_SDK_WRAPPER_RUN_INTEGRATION=1 uv --directory packages/python run pytest -m
 
 Each case runs with scratch `HOME`, `CODEX_HOME` and Claude config directories, and without
 inherited `ANTHROPIC_*`, `OPENAI_*`, `CODEX_*` and `CLAUDE_CODE_*` variables other than the two
-API keys. Python models default to `claude-haiku-4-5` and `gpt-5.6-luna`; override them with
+API keys. Python models default to `claude-haiku-4-5` and `gpt-6-luna`; override them with
 `AGENT_SDK_WRAPPER_ANTHROPIC_MODEL` or `AGENT_SDK_WRAPPER_OPENAI_MODEL`. Python writes each live
 run's artifacts to `packages/python/results/integration-runs/<timestamp>/<case>/run-<n>`, or under
 `AGENT_SDK_WRAPPER_TEST_ARTIFACTS_DIR`. TypeScript uses the same defaults; override them with

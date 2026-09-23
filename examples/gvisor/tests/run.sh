@@ -11,7 +11,7 @@ esac
 export PROVIDER=${PROVIDER:-anthropic}
 case $PROVIDER in
   anthropic) model=claude-haiku-4-5 ;;
-  codex|openai) export PROVIDER=openai; model=gpt-5.6-luna ;;
+  codex|openai) export PROVIDER=openai; model=gpt-6-luna ;;
   *) echo 'Invalid test provider' >&2; exit 1 ;;
 esac
 export UPSTREAM_KEY=outer-only-canary GVISOR_MODEL=$model

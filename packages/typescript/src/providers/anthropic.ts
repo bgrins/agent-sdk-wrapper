@@ -289,6 +289,14 @@ export class AnthropicAdapter implements ProviderAdapter {
           cwd: req.cwd,
           effort: req.effort as Options["effort"],
           resume: req.sessionId,
+          ...(req.outputSchema
+            ? {
+                outputFormat: {
+                  type: "json_schema",
+                  schema: req.outputSchema,
+                } as const,
+              }
+            : {}),
           includePartialMessages: false,
           abortController: abort,
         },
@@ -469,8 +477,28 @@ export class AnthropicAdapter implements ProviderAdapter {
             ? cancelled()
             : resultError(message, assistantError);
           if (error) yield { ...error, ...raw };
-          else if (!seenText && message.subtype === "success" && message.result)
-            yield { type: "text", text: message.result, ...raw };
+          else {
+            if (!seenText && message.subtype === "success" && message.result)
+              yield { type: "text", text: message.result, ...raw };
+            if (req.outputSchema) {
+              const value =
+                message.subtype === "success"
+                  ? message.structured_output
+                  : undefined;
+              if (
+                typeof value !== "object" ||
+                value === null ||
+                Array.isArray(value)
+              )
+                yield {
+                  type: "error",
+                  message: "Claude returned no valid structured output",
+                  error_type: "structured_output_failed",
+                  ...raw,
+                };
+              else yield { type: "structured_output", value, ...raw };
+            }
+          }
           return;
         } else if (
           message.type === "system" &&

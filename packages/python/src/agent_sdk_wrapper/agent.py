@@ -49,7 +49,6 @@ from .request import (
     ProviderInput,
     RunRequest,
     SubagentDef,
-    normalize_builtin_tools,
     normalize_cli_login,
     normalize_effort_for_provider,
     normalize_model_for_provider,
@@ -105,7 +104,6 @@ class Agent:
         timeout: float | None = None,
         include_raw: bool = False,
         include_events_in_result: bool = True,
-        builtin_tools: Sequence[str] | str | None = None,
         web_tools: bool | None = None,
         allowed_tools: Sequence[str] | None = None,
         disallowed_tools: Sequence[str] | None = None,
@@ -137,7 +135,6 @@ class Agent:
         self.timeout = timeout
         self.include_raw = include_raw
         self.include_events_in_result = include_events_in_result
-        self.builtin_tools = normalize_builtin_tools(builtin_tools)
         self.web_tools = web_tools
         self.allowed_tools = _string_list("allowed_tools", allowed_tools)
         self.disallowed_tools = _string_list("disallowed_tools", disallowed_tools)
@@ -263,9 +260,6 @@ class Agent:
             ),
             artifacts_dir=pick("artifacts_dir", self.artifacts_dir),
             on_provider_event=pick("on_provider_event", self.on_provider_event),
-            builtin_tools=normalize_builtin_tools(
-                pick("builtin_tools", self.builtin_tools)
-            ),
             web_tools=pick("web_tools", self.web_tools),
             allowed_tools=_string_list("allowed_tools", pick("allowed_tools", self.allowed_tools)),
             disallowed_tools=_string_list(

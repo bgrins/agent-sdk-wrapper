@@ -59,7 +59,7 @@ async def main():
     if request["provider"] == "anthropic":
         options.update(
             permission_mode="bypassPermissions",
-            builtin_tools=["Read", "Edit", "Write", "Bash"],
+            extra_options={"tools": ["Read", "Edit", "Write", "Bash"]},
             max_turns=8,
             env={"ANTHROPIC_API_KEY": token, "ANTHROPIC_BASE_URL": base_url},
             setting_sources=[],

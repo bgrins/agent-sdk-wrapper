@@ -29,10 +29,10 @@ export interface AgentDefaults {
   onProviderEvent?: (event: unknown) => void | PromiseLike<void>;
   traceFile?: string;
   cliLogin?: CliLogin;
+  outputSchema?: Record<string, unknown>;
   // Reserved features fail at compile time and at runtime, including empty values.
   tools?: never;
   mcpServers?: never;
-  outputSchema?: never;
   systemPrompt?: never;
   subagents?: never;
   maxTurns?: never;
@@ -64,6 +64,7 @@ const keys = new Set([
   "onProviderEvent",
   "traceFile",
   "cliLogin",
+  "outputSchema",
 ]);
 export function checkKeys(
   value: object,
@@ -142,6 +143,14 @@ export function resolveRequest(input: RunRequest): ResolvedRequest {
   checkKeys(input, keys, "request");
   if (typeof input.prompt !== "string")
     throw new ConfigError("prompt must be a string");
+  if (
+    input.outputSchema !== undefined &&
+    (typeof input.outputSchema !== "object" ||
+      input.outputSchema === null ||
+      Array.isArray(input.outputSchema) ||
+      input.outputSchema.type !== "object")
+  )
+    throw new ConfigError("outputSchema must be an object-root JSON Schema");
   for (const key of ["cwd", "sessionId", "traceFile"] as const) {
     if (
       input[key] !== undefined &&

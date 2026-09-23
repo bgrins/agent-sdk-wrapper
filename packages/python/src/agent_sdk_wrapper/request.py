@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -15,8 +15,6 @@ from .mcp import McpServer
 Provider = Literal["anthropic", "openai"]
 PROVIDERS: tuple[Provider, ...] = ("anthropic", "openai")
 ProviderInput = str | None
-BuiltinTools = Literal["none"] | list[str]
-BuiltinToolsInput = Literal["none"] | Sequence[str] | None
 INHERIT_MODEL = "inherit"
 CliLogin = Literal["deny", "require"]
 _CLI_LOGIN_VALUES = ("deny", "require")
@@ -139,26 +137,6 @@ def normalize_model_for_provider(provider: Provider, model: str | None) -> str |
     return bare_model
 
 
-def normalize_builtin_tools(value: BuiltinToolsInput) -> BuiltinTools | None:
-    """``None`` keeps defaults; ``"none"`` or ``[]`` disables built-ins where supported.
-
-    A non-empty list requests a provider-native allowlist.
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, str):
-        if value.strip().lower() == "none":
-            return "none"
-        raise ConfigError("builtin_tools string value must be 'none'")
-    if not isinstance(value, Sequence):
-        raise ConfigError("builtin_tools must be 'none' or a sequence of strings")
-    tools = list(value)
-    if not all(isinstance(tool, str) for tool in tools):
-        raise ConfigError("builtin_tools must be 'none' or a sequence of strings")
-    return tools or "none"
-
-
 def normalize_effort_for_provider(provider: Provider, value: str | None) -> Effort | None:
     if value is None:
         return None
@@ -250,8 +228,6 @@ class RunRequest:
     include_events_in_result: bool = True
     artifacts_dir: str | Path | None = None
     on_provider_event: ProviderEventCallback | None = None
-    # None keeps defaults; "none" requires disabling all built-ins or rejection.
-    builtin_tools: BuiltinTools | None = None
     # None keeps defaults. False disables Claude WebSearch/WebFetch or Codex
     # web_search ("disabled"); True sets it to "live". This does not restrict network egress.
     web_tools: bool | None = None

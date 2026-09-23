@@ -15,6 +15,7 @@ const eventTypes = {
   tool_call: true,
   tool_result: true,
   usage: true,
+  structured_output: true,
   session_info: true,
   warning: true,
   error: true,
